@@ -146,7 +146,81 @@ for node in slurm-c1 slurm-c2; do
 done
 log "sshd started on compute nodes."
 
-# ---- Step 3c: Connect MinIO to slurm-net (if running) ----
+# ---- Step 3c: Install enroot + pyxis for container support ----
+# Enables SkyPilot to launch Docker images on SLURM via --container-image.
+# Both bare (miniconda) and containerized workflows coexist.
+
+log "Installing enroot + pyxis for container support..."
+for node in slurm-slurmctld slurm-c1 slurm-c2; do
+    $DOCKER_CMD exec "$node" bash -c '
+        # Skip if already installed
+        if command -v enroot &>/dev/null && [ -f /usr/local/lib/slurm/spank_pyxis.so ]; then
+            exit 0
+        fi
+
+        # Install EPEL (needed for GNU parallel) + build deps
+        dnf install -y -q epel-release
+        dnf install -y -q \
+            gcc make libcap-devel libtool automake libmd-devel \
+            curl gawk jq squashfs-tools parallel fuse-overlayfs zstd \
+            git slurm-devel
+
+        # Install enroot from source
+        if ! command -v enroot &>/dev/null; then
+            cd /tmp && rm -rf enroot
+            git clone --quiet --depth 1 https://github.com/NVIDIA/enroot.git
+            cd enroot && make install && make setcap
+            rm -rf /tmp/enroot
+        fi
+
+        # Build + install pyxis SPANK plugin
+        if [ ! -f /usr/local/lib/slurm/spank_pyxis.so ]; then
+            cd /tmp && rm -rf pyxis
+            git clone --quiet --depth 1 https://github.com/NVIDIA/pyxis.git
+            cd pyxis && make install
+            rm -rf /tmp/pyxis
+        fi
+
+        # Configure enroot
+        mkdir -p /etc/enroot
+        cat > /etc/enroot/enroot.conf <<ENROOTEOF
+ENROOT_RUNTIME_PATH=/run/enroot/\$(id -u)
+ENROOT_CACHE_PATH=/var/cache/enroot
+ENROOT_DATA_PATH=/var/lib/enroot
+ENROOT_SQUASH_OPTIONS="-comp lz4 -noD"
+ENROOTEOF
+
+        mkdir -p /run/enroot /var/cache/enroot /var/lib/enroot
+        chmod 777 /run/enroot /var/cache/enroot /var/lib/enroot
+
+        # Configure pyxis SPANK plugin for SLURM
+        mkdir -p /etc/slurm/plugstack.conf.d
+        echo "required /usr/local/lib/slurm/spank_pyxis.so container_scope=global" \
+            > /etc/slurm/plugstack.conf.d/pyxis.conf
+        # SLURM reads plugstack.conf (not .d/ directly)
+        echo "include /etc/slurm/plugstack.conf.d/*" \
+            > /etc/slurm/plugstack.conf
+    '
+done
+log "enroot + pyxis installed."
+
+# Restart compute containers to load pyxis SPANK plugin
+# (slurmd is the container entrypoint — docker restart is the cleanest way)
+$DOCKER_CMD restart slurm-c1 slurm-c2
+sleep 5
+log "Compute nodes restarted (pyxis plugin loaded)."
+
+# Re-enable sshd on compute nodes (lost on restart)
+for node in slurm-c1 slurm-c2; do
+    $DOCKER_CMD exec "$node" bash -c '
+        ssh-keygen -A 2>/dev/null
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        /usr/sbin/sshd -D -e &
+    '
+done
+log "sshd re-started on compute nodes."
+
+# ---- Step 3d: Connect MinIO to slurm-net (if running) ----
 # Allows SLURM containers to reach MinIO at gb-minio:9000 for S3 artifact push.
 
 if $DOCKER_CMD container inspect gb-minio &>/dev/null 2>&1; then
@@ -222,6 +296,17 @@ else
     log "SLURM cluster is ready: $NODE_COUNT compute nodes."
 fi
 
+# ---- Step 7: Verify pyxis plugin ----
+
+if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -i "$SSH_KEY_PATH" -p "$SLURM_SSH_PORT" root@localhost \
+       "srun --help 2>&1 | grep -q '\[pyxis\]'"; then
+    log "Pyxis plugin loaded — container images supported (--container-image)."
+else
+    warn "Pyxis plugin not detected. Container images (image_id) will not work."
+    warn "Bare (miniconda) jobs still work normally."
+fi
+
 echo ""
 log "Cluster status:"
 ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
@@ -234,5 +319,6 @@ log "Quick reference:"
 log "  SSH to login node:   ssh -F ~/.slurm/config slurm-docker"
 log "  Run sinfo:           ssh -F ~/.slurm/config slurm-docker sinfo"
 log "  Submit a test job:   ssh -F ~/.slurm/config slurm-docker sbatch --wrap 'hostname'"
+log "  Container test:      ssh -F ~/.slurm/config slurm-docker srun --container-image=ubuntu:22.04 -- cat /etc/os-release"
 log "  SkyPilot check:      sky check"
 log "  Teardown:            bash $SCRIPT_DIR/teardown-slurm.sh"
