@@ -1,0 +1,523 @@
+granite.build:
+  name: $${NAME}
+  targets:
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1: SFT Training
+    # ═══════════════════════════════════════════════════════════════════
+    sft_training:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        base_model:
+          uri: $${BASE_MODEL}
+        dataset:
+          uri: $${SFT_DATASET}
+      outputs:
+        checkpoints:
+          uri: file:workspace/sft/checkpoints
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/msswift-py311:0.05
+            compute_config:
+              num_gpus_per_node: $${NUM_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/train-sft.sh"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/sft/checkpoints"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1 Evals: 5 parallel eval categories on SFT checkpoints
+    # ═══════════════════════════════════════════════════════════════════
+    eval_code_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/sft/code
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category code --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/sft/code"
+
+    eval_olmes_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/sft/olmes
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category olmes --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/sft/olmes"
+
+    eval_safety_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/sft/safety
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-safety:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category safety --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/sft/safety"
+
+    eval_multilingual_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/sft/multilingual
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category multilingual --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/sft/multilingual"
+
+    eval_bfcl_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/sft/bfcl
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/bfcl-py311:0.02
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category bfcl --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/sft/bfcl"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1 Selector: picks best SFT checkpoint from eval scores
+    # ═══════════════════════════════════════════════════════════════════
+    select_best_sft:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: sft_training.checkpoints
+        wait_eval_code:
+          event: eval_code_sft.success
+        wait_eval_olmes:
+          event: eval_olmes_sft.success
+        wait_eval_safety:
+          event: eval_safety_sft.success
+        wait_eval_multilingual:
+          event: eval_multilingual_sft.success
+        wait_eval_bfcl:
+          event: eval_bfcl_sft.success
+      outputs:
+        best_checkpoint:
+          uri: file:workspace/sft/best
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
+            compute_config:
+              num_gpus_per_node: 0
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/select.sh --stage sft --checkpoints {{ bindings.checkpoints.binding.path }} --override-wait $${OVERRIDE_WAIT_MIN}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:best_checkpoint LLMB_ARTIFACT_PATH:/workspace/sft/best"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 2: IFRL Training
+    # ═══════════════════════════════════════════════════════════════════
+    ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: select_best_sft.best_checkpoint
+      outputs:
+        checkpoints:
+          uri: file:workspace/ifrl/checkpoints
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/open-instruct-3:0.1.0-conda
+            compute_config:
+              num_gpus_per_node: $${NUM_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/train-ifrl.sh --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/ifrl/checkpoints"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 2 Evals: 5 parallel eval categories on IFRL checkpoints
+    # ═══════════════════════════════════════════════════════════════════
+    eval_code_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/ifrl/code
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category code --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/ifrl/code"
+
+    eval_olmes_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/ifrl/olmes
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category olmes --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/ifrl/olmes"
+
+    eval_safety_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/ifrl/safety
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-safety:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category safety --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/ifrl/safety"
+
+    eval_multilingual_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/ifrl/multilingual
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category multilingual --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/ifrl/multilingual"
+
+    eval_bfcl_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+      outputs:
+        results:
+          uri: file:workspace/eval/ifrl/bfcl
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/bfcl-py311:0.02
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category bfcl --checkpoints {{ bindings.checkpoints.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/ifrl/bfcl"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 2 Selector: picks best IFRL checkpoint from eval scores
+    # ═══════════════════════════════════════════════════════════════════
+    select_best_ifrl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        checkpoints:
+          binding: ifrl.checkpoints
+        wait_eval_code:
+          event: eval_code_ifrl.success
+        wait_eval_olmes:
+          event: eval_olmes_ifrl.success
+        wait_eval_safety:
+          event: eval_safety_ifrl.success
+        wait_eval_multilingual:
+          event: eval_multilingual_ifrl.success
+        wait_eval_bfcl:
+          event: eval_bfcl_ifrl.success
+      outputs:
+        best_checkpoint:
+          uri: file:workspace/ifrl/best
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
+            compute_config:
+              num_gpus_per_node: 0
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/select.sh --stage ifrl --checkpoints {{ bindings.checkpoints.binding.path }} --override-wait $${OVERRIDE_WAIT_MIN}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:best_checkpoint LLMB_ARTIFACT_PATH:/workspace/ifrl/best"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 3: Identity RL Training
+    # ═══════════════════════════════════════════════════════════════════
+    identity_rl:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: select_best_ifrl.best_checkpoint
+      outputs:
+        checkpoint:
+          uri: file:workspace/identity_rl/checkpoint
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/open-instruct-3:0.1.0-conda
+            compute_config:
+              num_gpus_per_node: $${NUM_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/train-identity-rl.sh --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:/workspace/identity_rl/checkpoint"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 3 Evals: 5 parallel eval categories on final model
+    # ═══════════════════════════════════════════════════════════════════
+    eval_code_final:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+      outputs:
+        results:
+          uri: file:workspace/eval/final/code
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category code --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/final/code"
+
+    eval_olmes_final:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+      outputs:
+        results:
+          uri: file:workspace/eval/final/olmes
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category olmes --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/final/olmes"
+
+    eval_safety_final:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+      outputs:
+        results:
+          uri: file:workspace/eval/final/safety
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-safety:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category safety --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/final/safety"
+
+    eval_multilingual_final:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+      outputs:
+        results:
+          uri: file:workspace/eval/final/multilingual
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category multilingual --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/final/multilingual"
+
+    eval_bfcl_final:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+      outputs:
+        results:
+          uri: file:workspace/eval/final/bfcl
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/bfcl-py311:0.02
+            compute_config:
+              num_gpus_per_node: $${EVAL_GPUS}
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/eval.sh --category bfcl --model {{ bindings.model.binding.path }}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/workspace/eval/final/bfcl"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Export: publish final model + eval results
+    # ═══════════════════════════════════════════════════════════════════
+    export_results:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        model:
+          binding: identity_rl.checkpoint
+        wait_eval_code:
+          event: eval_code_final.success
+        wait_eval_olmes:
+          event: eval_olmes_final.success
+        wait_eval_safety:
+          event: eval_safety_final.success
+        wait_eval_multilingual:
+          event: eval_multilingual_final.success
+        wait_eval_bfcl:
+          event: eval_bfcl_final.success
+      outputs:
+        published_model:
+          uri: $${OUTPUT_MODEL_URI}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/msswift-py311:0.05
+            compute_config:
+              num_gpus_per_node: 0
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash /app/export.sh --model {{ bindings.model.binding.path }} --output $${OUTPUT_MODEL_URI}"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:published_model LLMB_ARTIFACT_PATH:/workspace/export/model"
