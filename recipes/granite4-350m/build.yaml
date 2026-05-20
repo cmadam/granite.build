@@ -13,7 +13,7 @@ granite.build:
           uri: $${SFT_DATASET}
       outputs:
         checkpoints:
-          uri: file:workspace/sft/checkpoints
+          uri: $${STORAGE_BUCKET}/sft/checkpoints
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -38,7 +38,7 @@ granite.build:
           binding: sft_training.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/sft/code
+          uri: $${STORAGE_BUCKET}/eval/sft/code
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -60,7 +60,7 @@ granite.build:
           binding: sft_training.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/sft/olmes
+          uri: $${STORAGE_BUCKET}/eval/sft/olmes
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -82,7 +82,7 @@ granite.build:
           binding: sft_training.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/sft/safety
+          uri: $${STORAGE_BUCKET}/eval/sft/safety
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -104,7 +104,7 @@ granite.build:
           binding: sft_training.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/sft/multilingual
+          uri: $${STORAGE_BUCKET}/eval/sft/multilingual
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -126,7 +126,7 @@ granite.build:
           binding: sft_training.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/sft/bfcl
+          uri: $${STORAGE_BUCKET}/eval/sft/bfcl
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -161,7 +161,7 @@ granite.build:
           event: eval_bfcl_sft.success
       outputs:
         best_checkpoint:
-          uri: file:workspace/sft/best
+          uri: $${STORAGE_BUCKET}/sft/best
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -186,7 +186,7 @@ granite.build:
           binding: select_best_sft.best_checkpoint
       outputs:
         checkpoints:
-          uri: file:workspace/ifrl/checkpoints
+          uri: $${STORAGE_BUCKET}/ifrl/checkpoints
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -211,7 +211,7 @@ granite.build:
           binding: ifrl.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/ifrl/code
+          uri: $${STORAGE_BUCKET}/eval/ifrl/code
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -233,7 +233,7 @@ granite.build:
           binding: ifrl.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/ifrl/olmes
+          uri: $${STORAGE_BUCKET}/eval/ifrl/olmes
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -255,7 +255,7 @@ granite.build:
           binding: ifrl.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/ifrl/safety
+          uri: $${STORAGE_BUCKET}/eval/ifrl/safety
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -277,7 +277,7 @@ granite.build:
           binding: ifrl.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/ifrl/multilingual
+          uri: $${STORAGE_BUCKET}/eval/ifrl/multilingual
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -299,7 +299,7 @@ granite.build:
           binding: ifrl.checkpoints
       outputs:
         results:
-          uri: file:workspace/eval/ifrl/bfcl
+          uri: $${STORAGE_BUCKET}/eval/ifrl/bfcl
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -334,7 +334,7 @@ granite.build:
           event: eval_bfcl_ifrl.success
       outputs:
         best_checkpoint:
-          uri: file:workspace/ifrl/best
+          uri: $${STORAGE_BUCKET}/ifrl/best
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -359,7 +359,7 @@ granite.build:
           binding: select_best_ifrl.best_checkpoint
       outputs:
         checkpoint:
-          uri: file:workspace/identity_rl/checkpoint
+          uri: $${STORAGE_BUCKET}/identity_rl/checkpoint
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -384,7 +384,7 @@ granite.build:
           binding: identity_rl.checkpoint
       outputs:
         results:
-          uri: file:workspace/eval/final/code
+          uri: $${STORAGE_BUCKET}/eval/final/code
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -406,7 +406,7 @@ granite.build:
           binding: identity_rl.checkpoint
       outputs:
         results:
-          uri: file:workspace/eval/final/olmes
+          uri: $${STORAGE_BUCKET}/eval/final/olmes
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -428,7 +428,7 @@ granite.build:
           binding: identity_rl.checkpoint
       outputs:
         results:
-          uri: file:workspace/eval/final/safety
+          uri: $${STORAGE_BUCKET}/eval/final/safety
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -450,7 +450,7 @@ granite.build:
           binding: identity_rl.checkpoint
       outputs:
         results:
-          uri: file:workspace/eval/final/multilingual
+          uri: $${STORAGE_BUCKET}/eval/final/multilingual
       steps:
         - step_uri: space://steps/byoi
           config:
@@ -472,7 +472,7 @@ granite.build:
           binding: identity_rl.checkpoint
       outputs:
         results:
-          uri: file:workspace/eval/final/bfcl
+          uri: $${STORAGE_BUCKET}/eval/final/bfcl
       steps:
         - step_uri: space://steps/byoi
           config:
