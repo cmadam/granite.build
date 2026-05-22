@@ -27,6 +27,18 @@ granite.build:
                 value: "bash /app/train-sft.sh"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/sft/checkpoints"
+              TRAIN_EPOCHS:
+                value: "$${SFT_EPOCHS | default('4')}"
+              LR:
+                value: "$${SFT_LR | default('5e-05')}"
+              SEQLEN:
+                value: "$${SFT_SEQLEN | default('8192')}"
+              PER_DEVICE_BATCH_SIZE:
+                value: "$${SFT_BATCH_SIZE | default('4')}"
+              GRADIENT_ACCUMULATION_STEPS:
+                value: "$${SFT_GRAD_ACCUM | default('2')}"
+              WARMUP_RATIO:
+                value: "$${SFT_WARMUP_RATIO | default('0.05')}"
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 1 Evals: 5 parallel eval categories on SFT checkpoints
@@ -200,6 +212,12 @@ granite.build:
                 value: "bash /app/train-ifrl.sh --model {{ bindings.model.binding.path }}"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/ifrl/checkpoints"
+              IFRL_EPISODES:
+                value: "$${IFRL_EPISODES | default('1000000')}"
+              IFRL_TEMP:
+                value: "$${IFRL_TEMP | default('1.0')}"
+              IFRL_SAVE_FREQ:
+                value: "$${IFRL_SAVE_FREQ | default('80')}"
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 2 Evals: 5 parallel eval categories on IFRL checkpoints
@@ -373,6 +391,12 @@ granite.build:
                 value: "bash /app/train-identity-rl.sh --model {{ bindings.model.binding.path }}"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:/workspace/identity_rl/checkpoint"
+              IDENTITY_RL_EPISODES:
+                value: "$${IDENTITY_RL_EPISODES | default('300000')}"
+              IDENTITY_RL_TEMP:
+                value: "$${IDENTITY_RL_TEMP | default('1.15')}"
+              IDENTITY_RL_SAVE_FREQ:
+                value: "$${IDENTITY_RL_SAVE_FREQ | default('20')}"
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 3 Evals: 5 parallel eval categories on final model
