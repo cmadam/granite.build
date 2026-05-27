@@ -2,15 +2,62 @@ granite.build:
   name: $${NAME}
   targets:
     # ═══════════════════════════════════════════════════════════════════
-    # Stage 1: SFT Training
+    # Stage 1a: SFT Data Preparation (tokenization + filtering)
+    # Uses: open-instruct data_prep/run_data_prep_v2.sh
+    # Ref: gbansible roles/bluevela_openinstruct_data_prep_job
     # ═══════════════════════════════════════════════════════════════════
-    sft_training:
+    sft_data_prep:
       environment_uri: $${ENVIRONMENT}
       inputs:
         base_model:
           uri: $${BASE_MODEL}
         dataset:
           uri: $${SFT_DATASET}
+        chat_template:
+          uri: $${SFT_CHAT_TEMPLATE}
+      outputs:
+        cached_dataset:
+          uri: $${STORAGE_BUCKET}/sft/cached_dataset
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            k8s:
+              image: us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda
+            compute_config:
+              num_gpus_per_node: 1
+              num_nodes: 1
+            env:
+              APP_COMMAND:
+                value: "bash -c 'cd /stage/data_prep && bash run_data_prep_v2.sh -d $DATASET_PATH -t $CHAT_TEMPLATE_PATH -s $SAVE_DIR -c $CTX_LEN -m $MODEL_PATH'"
+              ECHO_COMMAND:
+                value: "echo LLMB_ARTIFACT_ID:cached_dataset LLMB_ARTIFACT_PATH:/workspace/sft/cached_dataset"
+              MODEL_PATH:
+                value: "{{ bindings.base_model.binding.path }}"
+              DATASET_PATH:
+                value: "{{ bindings.dataset.binding.path }}"
+              CHAT_TEMPLATE_PATH:
+                value: "{{ bindings.chat_template.binding.path }}"
+              SAVE_DIR:
+                value: "/workspace/sft/cached_dataset"
+              CTX_LEN:
+                value: "$${SFT_SEQLEN | default('8192')}"
+              NUM_PROCS:
+                value: "$${SFT_DATA_PREP_NUM_PROCS | default('45')}"
+
+    # ═══════════════════════════════════════════════════════════════════
+    # Stage 1b: SFT Training (Open Instruct finetune)
+    # Uses: open-instruct scripts/run_dense_enroot.sh → finetune.py
+    # Ref: gbansible roles/bluevela_openinstruct_sft_job
+    # ═══════════════════════════════════════════════════════════════════
+    sft_training:
+      environment_uri: $${ENVIRONMENT}
+      inputs:
+        base_model:
+          uri: $${BASE_MODEL}
+        cached_dataset:
+          binding: sft_data_prep.cached_dataset
+        chat_template:
+          uri: $${SFT_CHAT_TEMPLATE}
       outputs:
         checkpoints:
           uri: $${STORAGE_BUCKET}/sft/checkpoints
@@ -18,27 +65,71 @@ granite.build:
         - step_uri: space://steps/byoi
           config:
             k8s:
-              image: us.icr.io/cil15-shared-registry/msswift-py311:0.05
+              image: us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda
             compute_config:
               num_gpus_per_node: $${NUM_GPUS}
-              num_nodes: 1
+              num_nodes: $${SFT_NUM_NODES | default('2')}
             env:
               APP_COMMAND:
-                value: "bash /app/train-sft.sh"
+                value: "bash /stage/scripts/run_dense_enroot.sh"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/sft/checkpoints"
-              TRAIN_EPOCHS:
-                value: "$${SFT_EPOCHS | default('4')}"
+              PYTHONPATH:
+                value: "/stage"
+              MODEL_PATH:
+                value: "{{ bindings.base_model.binding.path }}"
+              TOKENIZED_DATA_PATH:
+                value: "{{ bindings.cached_dataset.binding.path }}"
+              CHAT_TEMPLATE_PATH:
+                value: "{{ bindings.chat_template.binding.path }}"
+              OUTPUT_DIR:
+                value: "/workspace/sft/checkpoints"
+              SHORT_NAME:
+                value: "$${SFT_SHORT_NAME | default('')}"
+              NUM_EPOCHS:
+                value: "$${SFT_EPOCHS | default('3')}"
               LR:
-                value: "$${SFT_LR | default('5e-05')}"
-              SEQLEN:
+                value: "$${SFT_LR | default('1e-5')}"
+              MAX_SEQ_LEN:
                 value: "$${SFT_SEQLEN | default('8192')}"
-              PER_DEVICE_BATCH_SIZE:
+              PER_DEVICE_TRAIN_BATCH_SIZE:
                 value: "$${SFT_BATCH_SIZE | default('4')}"
               GRADIENT_ACCUMULATION_STEPS:
                 value: "$${SFT_GRAD_ACCUM | default('2')}"
               WARMUP_RATIO:
-                value: "$${SFT_WARMUP_RATIO | default('0.05')}"
+                value: "$${SFT_WARMUP_RATIO | default('0.03')}"
+              LR_SCHEDULER_TYPE:
+                value: "$${SFT_LR_SCHEDULER | default('linear')}"
+              WEIGHT_DECAY:
+                value: "$${SFT_WEIGHT_DECAY | default('0.0')}"
+              CLIP_GRAD_NORM:
+                value: "$${SFT_CLIP_GRAD_NORM | default('1.0')}"
+              REDUCE_LOSS:
+                value: "$${SFT_REDUCE_LOSS | default('sum')}"
+              CHECKPOINTING_STEPS:
+                value: "$${SFT_CHECKPOINTING_STEPS | default('epoch')}"
+              KEEP_LAST_N_CHECKPOINTS:
+                value: "$${SFT_KEEP_LAST_N_CHECKPOINTS | default('5')}"
+              MIXED_PRECISION:
+                value: "$${SFT_MIXED_PRECISION | default('bf16')}"
+              SEED:
+                value: "$${SFT_SEED | default('123')}"
+              LOGGING_STEPS:
+                value: "$${SFT_LOGGING_STEPS | default('1')}"
+              ACC_CONFIG_FILE:
+                value: "$${SFT_ACC_CONFIG_FILE | default('/stage/configs/fsdp_accelerate_mamba.yaml')}"
+              USE_FLASH_ATTN:
+                value: "$${SFT_USE_FLASH_ATTN | default('true')}"
+              USE_FAST:
+                value: "$${SFT_USE_FAST | default('true')}"
+              PADFREE:
+                value: "$${SFT_PADFREE | default('true')}"
+              TORCH_COMPILE:
+                value: "$${SFT_TORCH_COMPILE | default('true')}"
+              GRADIENT_CHECKPOINTING:
+                value: "$${SFT_GRADIENT_CHECKPOINTING | default('true')}"
+              WITH_TRACKING:
+                value: "$${SFT_WITH_TRACKING | default('false')}"
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 1 Evals: 5 parallel eval categories on SFT checkpoints
@@ -189,7 +280,9 @@ granite.build:
                 value: "echo LLMB_ARTIFACT_ID:best_checkpoint LLMB_ARTIFACT_PATH:/workspace/sft/best"
 
     # ═══════════════════════════════════════════════════════════════════
-    # Stage 2: IFRL Training
+    # Stage 2: IFRL Training (GRPO — Instruction Following RL)
+    # Uses: open-instruct python -m open_instruct.grpo_fast
+    # Ref: gbansible roles/bluevela_rl_job
     # ═══════════════════════════════════════════════════════════════════
     ifrl:
       environment_uri: $${ENVIRONMENT}
@@ -212,9 +305,11 @@ granite.build:
                 value: "bash /app/train-ifrl.sh --model {{ bindings.model.binding.path }}"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/ifrl/checkpoints"
-              IFRL_EPISODES:
+              PYTHONPATH:
+                value: "/stage:/stage/open_instruct"
+              IFRL_TOTAL_EPISODES:
                 value: "$${IFRL_EPISODES | default('1000000')}"
-              IFRL_TEMP:
+              IFRL_TEMPERATURE:
                 value: "$${IFRL_TEMP | default('1.0')}"
               IFRL_SAVE_FREQ:
                 value: "$${IFRL_SAVE_FREQ | default('80')}"
@@ -368,7 +463,9 @@ granite.build:
                 value: "echo LLMB_ARTIFACT_ID:best_checkpoint LLMB_ARTIFACT_PATH:/workspace/ifrl/best"
 
     # ═══════════════════════════════════════════════════════════════════
-    # Stage 3: Identity RL Training
+    # Stage 3: Identity RL Training (GRPO on identity dataset)
+    # Uses: open-instruct python -m open_instruct.grpo_fast
+    # Ref: gbansible roles/bluevela_rl_job + vars/rl/identityrl.yml
     # ═══════════════════════════════════════════════════════════════════
     identity_rl:
       environment_uri: $${ENVIRONMENT}
@@ -391,9 +488,11 @@ granite.build:
                 value: "bash /app/train-identity-rl.sh --model {{ bindings.model.binding.path }}"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:/workspace/identity_rl/checkpoint"
-              IDENTITY_RL_EPISODES:
+              PYTHONPATH:
+                value: "/stage:/stage/open_instruct"
+              IDENTITY_RL_TOTAL_EPISODES:
                 value: "$${IDENTITY_RL_EPISODES | default('300000')}"
-              IDENTITY_RL_TEMP:
+              IDENTITY_RL_TEMPERATURE:
                 value: "$${IDENTITY_RL_TEMP | default('1.15')}"
               IDENTITY_RL_SAVE_FREQ:
                 value: "$${IDENTITY_RL_SAVE_FREQ | default('20')}"
@@ -536,7 +635,7 @@ granite.build:
         - step_uri: space://steps/byoi
           config:
             k8s:
-              image: us.icr.io/cil15-shared-registry/msswift-py311:0.05
+              image: us.icr.io/cil15-shared-registry/sage-py311-code:0.025
             compute_config:
               num_gpus_per_node: 0
               num_nodes: 1
