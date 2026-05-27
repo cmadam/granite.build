@@ -281,14 +281,18 @@ granite.build:
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 2: IFRL Training (GRPO — Instruction Following RL)
-    # Uses: open-instruct python -m open_instruct.grpo_fast
-    # Ref: gbansible roles/bluevela_rl_job
+    # Uses: open-instruct train_scripts/run_rlvr_grpo_fast.sh
+    # Ref: gbansible roles/bluevela_rl_job, vars/rl/ifrl.yml
     # ═══════════════════════════════════════════════════════════════════
     ifrl:
       environment_uri: $${ENVIRONMENT}
       inputs:
         model:
           binding: select_best_sft.best_checkpoint
+        ifrl_train_data:
+          uri: $${IFRL_DATASET_TRAIN}
+        ifrl_eval_data:
+          uri: $${IFRL_DATASET_EVAL}
       outputs:
         checkpoints:
           uri: $${STORAGE_BUCKET}/ifrl/checkpoints
@@ -302,17 +306,81 @@ granite.build:
               num_nodes: 1
             env:
               APP_COMMAND:
-                value: "bash /app/train-ifrl.sh --model {{ bindings.model.binding.path }}"
+                value: "bash /stage/train_scripts/run_rlvr_grpo_fast.sh --model_path $MODEL_PATH --output_dir $OUTPUT_DIR --shortname $SHORT_NAME --total_episodes $TOTAL_EPISODES --temperature $TEMPERATURE --eval_freq $SAVE_FREQ --beta $BETA --lr $LR --num_unique_prompts_rollout $NUM_UNIQUE_PROMPTS_ROLLOUT --num_samples_per_prompt_rollout $NUM_SAMPLES_PER_PROMPT_ROLLOUT --cliprange_low $CLIPRANGE_LOW --cliprange_high $CLIPRANGE_HIGH --num_mini_batches $NUM_MINI_BATCHES --num_epochs $NUM_EPOCHS --warmup_ratio $WARMUP_RATIO --kl_estimator $KL_ESTIMATOR --prompt_length $MAX_PROMPT_TOKEN_LENGTH --response_length $RESPONSE_LENGTH --pack_length $PACK_LENGTH --thinking $THINKING --apply_verifiable_reward $APPLY_VERIFIABLE_REWARD --apply_thinking_format_reward $APPLY_THINKING_FORMAT_REWARD --non_stop_penalty $NON_STOP_PENALTY --async_mode $ASYNC_MODE --pad_token_id $PAD_TOKEN_ID --additive_format_reward $ADDITIVE_FORMAT_REWARD --actor_gpus_str $ACTOR_GPUS_STR --num_vllm_engines $VLLM_NUM_ENGINES --tensor_parallel_size $VLLM_TENSOR_PARALLEL_SIZE --ref_policy_update_freq $REF_POLICY_UPDATE_FREQ --dataset_train_mixer $DATASET_TRAIN_MIXER --dataset_eval_mixer $DATASET_EVAL_MIXER --dataset_local_cache_dir $DATASET_LOCAL_CACHE_DIR --wandb_project_name $WANDB_PROJECT_NAME"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoints LLMB_ARTIFACT_PATH:/workspace/ifrl/checkpoints"
               PYTHONPATH:
                 value: "/stage:/stage/open_instruct"
-              IFRL_TOTAL_EPISODES:
+              MODEL_PATH:
+                value: "{{ bindings.model.binding.path }}"
+              OUTPUT_DIR:
+                value: "/workspace/ifrl"
+              SHORT_NAME:
+                value: "$${IFRL_SHORT_NAME | default('ifrl')}"
+              DATASET_TRAIN_MIXER:
+                value: "'{\"{{ bindings.ifrl_train_data.binding.path }}\":1.0}'"
+              DATASET_EVAL_MIXER:
+                value: "'{\"{{ bindings.ifrl_eval_data.binding.path }}\":1.0}'"
+              TOTAL_EPISODES:
                 value: "$${IFRL_EPISODES | default('1000000')}"
-              IFRL_TEMPERATURE:
+              TEMPERATURE:
                 value: "$${IFRL_TEMP | default('1.0')}"
-              IFRL_SAVE_FREQ:
+              SAVE_FREQ:
                 value: "$${IFRL_SAVE_FREQ | default('80')}"
+              BETA:
+                value: "$${IFRL_BETA | default('0.05')}"
+              LR:
+                value: "$${IFRL_LR | default('5e-7')}"
+              NUM_UNIQUE_PROMPTS_ROLLOUT:
+                value: "$${IFRL_NUM_UNIQUE_PROMPTS | default('64')}"
+              NUM_SAMPLES_PER_PROMPT_ROLLOUT:
+                value: "$${IFRL_NUM_SAMPLES_PER_PROMPT | default('16')}"
+              CLIPRANGE_LOW:
+                value: "$${IFRL_CLIPRANGE_LOW | default('0.2')}"
+              CLIPRANGE_HIGH:
+                value: "$${IFRL_CLIPRANGE_HIGH | default('0.28')}"
+              NUM_MINI_BATCHES:
+                value: "$${IFRL_NUM_MINI_BATCHES | default('1')}"
+              NUM_EPOCHS:
+                value: "$${IFRL_NUM_EPOCHS | default('1')}"
+              WARMUP_RATIO:
+                value: "$${IFRL_WARMUP_RATIO | default('0.0')}"
+              KL_ESTIMATOR:
+                value: "$${IFRL_KL_ESTIMATOR | default('kl3')}"
+              MAX_PROMPT_TOKEN_LENGTH:
+                value: "$${IFRL_MAX_PROMPT_LENGTH | default('512')}"
+              RESPONSE_LENGTH:
+                value: "$${IFRL_RESPONSE_LENGTH | default('8192')}"
+              PACK_LENGTH:
+                value: "$${IFRL_PACK_LENGTH | default('8704')}"
+              THINKING:
+                value: "$${IFRL_THINKING | default('4')}"
+              APPLY_VERIFIABLE_REWARD:
+                value: "$${IFRL_APPLY_VERIFIABLE_REWARD | default('true')}"
+              APPLY_THINKING_FORMAT_REWARD:
+                value: "$${IFRL_APPLY_THINKING_FORMAT_REWARD | default('true')}"
+              NON_STOP_PENALTY:
+                value: "$${IFRL_NON_STOP_PENALTY | default('true')}"
+              ASYNC_MODE:
+                value: "$${IFRL_ASYNC_MODE | default('true')}"
+              PAD_TOKEN_ID:
+                value: "$${IFRL_PAD_TOKEN_ID | default('6')}"
+              ADDITIVE_FORMAT_REWARD:
+                value: "$${IFRL_ADDITIVE_FORMAT_REWARD | default('false')}"
+              ACTOR_GPUS_STR:
+                value: "$${IFRL_ACTOR_GPUS_STR | default('4')}"
+              VLLM_NUM_ENGINES:
+                value: "$${IFRL_VLLM_NUM_ENGINES | default('4')}"
+              VLLM_TENSOR_PARALLEL_SIZE:
+                value: "$${IFRL_VLLM_TENSOR_PARALLEL_SIZE | default('1')}"
+              REF_POLICY_UPDATE_FREQ:
+                value: "$${IFRL_REF_POLICY_UPDATE_FREQ | default('32')}"
+              DATASET_LOCAL_CACHE_DIR:
+                value: "$${IFRL_DATASET_CACHE_DIR | default('/workspace/data_cache')}"
+              WANDB_PROJECT_NAME:
+                value: "$${IFRL_WANDB_PROJECT | default('granite-build-ifrl')}"
+              CODE_SERVER_URL:
+                value: "$${IFRL_CODE_SERVER_URL | default('')}"
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 2 Evals: 5 parallel eval categories on IFRL checkpoints
@@ -464,14 +532,19 @@ granite.build:
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 3: Identity RL Training (GRPO on identity dataset)
-    # Uses: open-instruct python -m open_instruct.grpo_fast
-    # Ref: gbansible roles/bluevela_rl_job + vars/rl/identityrl.yml
+    # Uses: open-instruct train_scripts/run_rlvr_grpo_fast.sh
+    # Ref: gbansible roles/bluevela_rl_job, vars/rl/identityrl.yml
+    # No code server needed — only RM server for identity scoring
     # ═══════════════════════════════════════════════════════════════════
     identity_rl:
       environment_uri: $${ENVIRONMENT}
       inputs:
         model:
           binding: select_best_ifrl.best_checkpoint
+        identity_train_data:
+          uri: $${IDENTITY_RL_DATASET_TRAIN}
+        identity_eval_data:
+          uri: $${IDENTITY_RL_DATASET_EVAL}
       outputs:
         checkpoint:
           uri: $${STORAGE_BUCKET}/identity_rl/checkpoint
@@ -485,17 +558,81 @@ granite.build:
               num_nodes: 1
             env:
               APP_COMMAND:
-                value: "bash /app/train-identity-rl.sh --model {{ bindings.model.binding.path }}"
+                value: "bash /stage/train_scripts/run_rlvr_grpo_fast.sh --model_path $MODEL_PATH --output_dir $OUTPUT_DIR --shortname $SHORT_NAME --total_episodes $TOTAL_EPISODES --temperature $TEMPERATURE --eval_freq $SAVE_FREQ --beta $BETA --lr $LR --num_unique_prompts_rollout $NUM_UNIQUE_PROMPTS_ROLLOUT --num_samples_per_prompt_rollout $NUM_SAMPLES_PER_PROMPT_ROLLOUT --cliprange_low $CLIPRANGE_LOW --cliprange_high $CLIPRANGE_HIGH --num_mini_batches $NUM_MINI_BATCHES --num_epochs $NUM_EPOCHS --warmup_ratio $WARMUP_RATIO --kl_estimator $KL_ESTIMATOR --prompt_length $MAX_PROMPT_TOKEN_LENGTH --response_length $RESPONSE_LENGTH --pack_length $PACK_LENGTH --thinking $THINKING --apply_verifiable_reward $APPLY_VERIFIABLE_REWARD --apply_thinking_format_reward $APPLY_THINKING_FORMAT_REWARD --non_stop_penalty $NON_STOP_PENALTY --async_mode $ASYNC_MODE --pad_token_id $PAD_TOKEN_ID --additive_format_reward $ADDITIVE_FORMAT_REWARD --actor_gpus_str $ACTOR_GPUS_STR --num_vllm_engines $VLLM_NUM_ENGINES --tensor_parallel_size $VLLM_TENSOR_PARALLEL_SIZE --ref_policy_update_freq $REF_POLICY_UPDATE_FREQ --dataset_train_mixer $DATASET_TRAIN_MIXER --dataset_eval_mixer $DATASET_EVAL_MIXER --dataset_local_cache_dir $DATASET_LOCAL_CACHE_DIR --wandb_project_name $WANDB_PROJECT_NAME"
               ECHO_COMMAND:
                 value: "echo LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:/workspace/identity_rl/checkpoint"
               PYTHONPATH:
                 value: "/stage:/stage/open_instruct"
-              IDENTITY_RL_TOTAL_EPISODES:
+              MODEL_PATH:
+                value: "{{ bindings.model.binding.path }}"
+              OUTPUT_DIR:
+                value: "/workspace/identity_rl"
+              SHORT_NAME:
+                value: "$${IDENTITY_RL_SHORT_NAME | default('identity-rl')}"
+              DATASET_TRAIN_MIXER:
+                value: "'{\"{{ bindings.identity_train_data.binding.path }}\":1.0}'"
+              DATASET_EVAL_MIXER:
+                value: "'{\"{{ bindings.identity_eval_data.binding.path }}\":1.0}'"
+              TOTAL_EPISODES:
                 value: "$${IDENTITY_RL_EPISODES | default('300000')}"
-              IDENTITY_RL_TEMPERATURE:
+              TEMPERATURE:
                 value: "$${IDENTITY_RL_TEMP | default('1.15')}"
-              IDENTITY_RL_SAVE_FREQ:
+              SAVE_FREQ:
                 value: "$${IDENTITY_RL_SAVE_FREQ | default('20')}"
+              BETA:
+                value: "$${IDENTITY_RL_BETA | default('0.05')}"
+              LR:
+                value: "$${IDENTITY_RL_LR | default('5e-7')}"
+              NUM_UNIQUE_PROMPTS_ROLLOUT:
+                value: "$${IDENTITY_RL_NUM_UNIQUE_PROMPTS | default('64')}"
+              NUM_SAMPLES_PER_PROMPT_ROLLOUT:
+                value: "$${IDENTITY_RL_NUM_SAMPLES_PER_PROMPT | default('16')}"
+              CLIPRANGE_LOW:
+                value: "$${IDENTITY_RL_CLIPRANGE_LOW | default('0.2')}"
+              CLIPRANGE_HIGH:
+                value: "$${IDENTITY_RL_CLIPRANGE_HIGH | default('0.28')}"
+              NUM_MINI_BATCHES:
+                value: "$${IDENTITY_RL_NUM_MINI_BATCHES | default('1')}"
+              NUM_EPOCHS:
+                value: "$${IDENTITY_RL_NUM_EPOCHS | default('1')}"
+              WARMUP_RATIO:
+                value: "$${IDENTITY_RL_WARMUP_RATIO | default('0.0')}"
+              KL_ESTIMATOR:
+                value: "$${IDENTITY_RL_KL_ESTIMATOR | default('kl3')}"
+              MAX_PROMPT_TOKEN_LENGTH:
+                value: "$${IDENTITY_RL_MAX_PROMPT_LENGTH | default('512')}"
+              RESPONSE_LENGTH:
+                value: "$${IDENTITY_RL_RESPONSE_LENGTH | default('8192')}"
+              PACK_LENGTH:
+                value: "$${IDENTITY_RL_PACK_LENGTH | default('8704')}"
+              THINKING:
+                value: "$${IDENTITY_RL_THINKING | default('4')}"
+              APPLY_VERIFIABLE_REWARD:
+                value: "$${IDENTITY_RL_APPLY_VERIFIABLE_REWARD | default('true')}"
+              APPLY_THINKING_FORMAT_REWARD:
+                value: "$${IDENTITY_RL_APPLY_THINKING_FORMAT_REWARD | default('true')}"
+              NON_STOP_PENALTY:
+                value: "$${IDENTITY_RL_NON_STOP_PENALTY | default('true')}"
+              ASYNC_MODE:
+                value: "$${IDENTITY_RL_ASYNC_MODE | default('true')}"
+              PAD_TOKEN_ID:
+                value: "$${IDENTITY_RL_PAD_TOKEN_ID | default('6')}"
+              ADDITIVE_FORMAT_REWARD:
+                value: "$${IDENTITY_RL_ADDITIVE_FORMAT_REWARD | default('false')}"
+              ACTOR_GPUS_STR:
+                value: "$${IDENTITY_RL_ACTOR_GPUS_STR | default('4')}"
+              VLLM_NUM_ENGINES:
+                value: "$${IDENTITY_RL_VLLM_NUM_ENGINES | default('4')}"
+              VLLM_TENSOR_PARALLEL_SIZE:
+                value: "$${IDENTITY_RL_VLLM_TENSOR_PARALLEL_SIZE | default('1')}"
+              REF_POLICY_UPDATE_FREQ:
+                value: "$${IDENTITY_RL_REF_POLICY_UPDATE_FREQ | default('8')}"
+              DATASET_LOCAL_CACHE_DIR:
+                value: "$${IDENTITY_RL_DATASET_CACHE_DIR | default('/workspace/data_cache')}"
+              WANDB_PROJECT_NAME:
+                value: "$${IDENTITY_RL_WANDB_PROJECT | default('granite-build-identity-rl')}"
+              CODE_SERVER_URL:
+                value: ""
 
     # ═══════════════════════════════════════════════════════════════════
     # Stage 3 Evals: 5 parallel eval categories on final model
