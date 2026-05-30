@@ -34,9 +34,29 @@ The local `/tmp/sky-launch-logs/launch.log` is just a streamed copy. If this san
    ssh sft-full "tail -500 '$RUN_LOG' | grep -iE 'Traceback|RuntimeError|CUDA error|CUDA out of memory|out of memory|NCCL.*ERROR|TERM_MEMLIMIT|TERM_RUNLIMIT|TERM_OWNER|TERM_FORCE|Killed|signal: 9|signal: 15|Segmentation fault'"
    ```
 
-## Decision
+## Decision (check in this order — first match wins)
 
-HEALTHY — ALL of:
+### COMPLETE — training finished successfully
+ALL of:
+- last extracted step `N` is ≥ 58806 (training reached or passed the final step)
+- bjobs is NOT in RUN state (i.e. DONE, EXIT, or empty / no matching `sft-full*` job)
+
+If COMPLETE: write a marker file (signals the runner to stop its loop — recovery is **not** invoked):
+```
+cat > ${MONITOR_HOME}/sky-monitor-logs/COMPLETE-$(date +%Y%m%d-%H%M%S).md <<'EOF'
+TIMESTAMP=<output of date>
+FINAL_STEP=<N>
+TOTAL_STEPS=58806
+JOBID=<J or unknown>
+RUN_LOG_PATH=<the path>
+BJOBS_OUTPUT:
+<paste full bjobs output here>
+EOF
+```
+Then print exactly one line: `COMPLETE  Step N/58806 (100.0%), jobid=J` and exit. **Do not write ALERT.txt.**
+
+### HEALTHY — training is progressing
+ALL of:
 - bjobs shows STAT=RUN for an `sft-full*` job
 - `RUN_LOG` exists AND its age < 900 seconds
 - step-5 grep finds nothing OR matches are clearly old (timestamps > 30 minutes ago, training has progressed past them)
@@ -45,11 +65,11 @@ If HEALTHY: print exactly one line to stdout:
 `HEALTHY  Step N/58806 (P%), Loss=L, TPS=K, age=As, jobid=J`
 …where P = round(100*N/58806, 1). Then exit. **Do not create any files.**
 
-If NOT HEALTHY: pick the first matching CATEGORY:
+### Otherwise — pick the first matching CATEGORY for ALERT
 - `OOM` — saw "CUDA out of memory" or "out of memory" in matched errors
 - `LSF_TERM` — saw TERM_MEMLIMIT, TERM_RUNLIMIT, TERM_OWNER, TERM_FORCE
 - `STALL` — `RUN_LOG` age > 900s but bjobs still RUN
-- `EVICTION` — bjobs shows EXIT/empty/no matching `sft-full*` job, OR `RUN_LOG=NONE`
+- `EVICTION` — bjobs shows EXIT/empty/no matching `sft-full*` job, OR `RUN_LOG=NONE` (and N < 58806, otherwise COMPLETE would have matched above)
 - `OTHER` — any other matched error pattern
 
 Then write the alert file (use the Bash tool's heredoc):

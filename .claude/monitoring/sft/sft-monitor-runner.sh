@@ -41,6 +41,13 @@ mkdir -p "$LOG_DIR/launch-archive"
 echo "$(date)  runner started, pid=$$" >> "$LOG_DIR/runner-heartbeat.log"
 
 while true; do
+  # Stop the loop if training is already marked complete (e.g. from a previous
+  # iteration, or carried over from before a pod restart). No Claude call needed.
+  if compgen -G "$LOG_DIR/COMPLETE-*.md" >/dev/null; then
+    echo "$(date)  COMPLETE marker present, runner exiting" >> "$LOG_DIR/runner-heartbeat.log"
+    exit 0
+  fi
+
   TS=$(date +%Y%m%d-%H%M%S)
 
   # Clear stale alert from previous iteration's recovery (if any)
@@ -51,6 +58,13 @@ while true; do
     --model claude-sonnet-4-6 \
     --dangerously-skip-permissions \
     > "$LOG_DIR/check-${TS}.md" 2>&1
+
+  # If this iteration's check declared COMPLETE, exit immediately rather than
+  # waiting another full INTERVAL. Skip the recovery branch — it isn't needed.
+  if compgen -G "$LOG_DIR/COMPLETE-*.md" >/dev/null; then
+    echo "$(date)  COMPLETE marker written by health check, runner exiting" >> "$LOG_DIR/runner-heartbeat.log"
+    exit 0
+  fi
 
   # Tier 2 — Opus recovery (only when Sonnet wrote ALERT.txt)
   if [ -f "$LOG_DIR/ALERT.txt" ]; then
