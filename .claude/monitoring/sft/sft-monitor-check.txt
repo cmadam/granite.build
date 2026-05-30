@@ -1,0 +1,74 @@
+You are a one-shot health checker for the SkyPilot LSF training job `sft-full` running on BlueVela. Your only task: determine if training is healthy by querying the remote source of truth (the LSF cluster), not the local sandbox. Be terse — do not preamble or describe steps; just do them.
+
+## Why query remote
+The local `/tmp/sky-launch-logs/launch.log` is just a streamed copy. If this sandbox pod restarted, that file disappears but the LSF training job keeps running on BlueVela compute nodes. So the source of truth is the remote training output and `bjobs`, not local files.
+
+## Context
+- BlueVela ssh alias: `sft-full` (logs in as `granitebuild` to login3 via the SkyPilot-generated key)
+- Total training steps: 58806
+- Remote training output lives under `/proj/granite-build/g4os/skypilot/.sky_clusters/sft-full-*/sky_logs/<job>--*/run.log`
+- Output dir for monitor artifacts (NFS, persists across pod restart): `${MONITOR_HOME}/sky-monitor-logs/`
+
+## Steps
+1. Discover the most recent remote run.log path:
+   ```
+   ssh sft-full 'ls -t /proj/granite-build/g4os/skypilot/.sky_clusters/sft-full-*/sky_logs/*/run.log 2>/dev/null | head -1'
+   ```
+   Capture the path as `RUN_LOG`. If empty, mark `RUN_LOG=NONE`.
+2. If `RUN_LOG` is set, capture its mtime and current time:
+   ```
+   ssh sft-full "stat -c %Y '$RUN_LOG'; date +%s"
+   ```
+   Compute log age in seconds.
+3. Tail the remote run.log:
+   ```
+   ssh sft-full "tail -200 '$RUN_LOG'"
+   ```
+   Extract the most recent line of the form `Step: N, LR: ..., Loss: L, TPS: K`. Capture N, L, K.
+4. Query LSF state:
+   ```
+   ssh sft-full 'bjobs -J "sft-full*" -o "JOBID JOB_NAME STAT QUEUE EXEC_HOST RUN_TIME" 2>&1'
+   ```
+5. Scan remote run.log for errors:
+   ```
+   ssh sft-full "tail -500 '$RUN_LOG' | grep -iE 'Traceback|RuntimeError|CUDA error|CUDA out of memory|out of memory|NCCL.*ERROR|TERM_MEMLIMIT|TERM_RUNLIMIT|TERM_OWNER|TERM_FORCE|Killed|signal: 9|signal: 15|Segmentation fault'"
+   ```
+
+## Decision
+
+HEALTHY — ALL of:
+- bjobs shows STAT=RUN for an `sft-full*` job
+- `RUN_LOG` exists AND its age < 900 seconds
+- step-5 grep finds nothing OR matches are clearly old (timestamps > 30 minutes ago, training has progressed past them)
+
+If HEALTHY: print exactly one line to stdout:
+`HEALTHY  Step N/58806 (P%), Loss=L, TPS=K, age=As, jobid=J`
+…where P = round(100*N/58806, 1). Then exit. **Do not create any files.**
+
+If NOT HEALTHY: pick the first matching CATEGORY:
+- `OOM` — saw "CUDA out of memory" or "out of memory" in matched errors
+- `LSF_TERM` — saw TERM_MEMLIMIT, TERM_RUNLIMIT, TERM_OWNER, TERM_FORCE
+- `STALL` — `RUN_LOG` age > 900s but bjobs still RUN
+- `EVICTION` — bjobs shows EXIT/empty/no matching `sft-full*` job, OR `RUN_LOG=NONE`
+- `OTHER` — any other matched error pattern
+
+Then write the alert file (use the Bash tool's heredoc):
+```
+cat > ${MONITOR_HOME}/sky-monitor-logs/ALERT.txt <<'EOF'
+CATEGORY=<category>
+TIMESTAMP=<output of date>
+LAST_STEP=<N or unknown>
+LAST_LOSS=<L>
+LAST_TPS=<K>
+LOG_AGE_SECONDS=<A>
+RUN_LOG_PATH=<the path or NONE>
+BJOBS_OUTPUT:
+<paste full bjobs output here>
+MATCHED_ERROR_LINES:
+<paste up to 10 matched lines from step 5>
+EOF
+```
+
+Then print one line: `ALERT category=<category>, see ${MONITOR_HOME}/sky-monitor-logs/ALERT.txt` and exit.
+
+Critical: do not modify any other files. Do not run `sky launch`, `sky down`, or any restart command. Do not edit YAML. Your role is **detection only** — recovery is a separate agent.

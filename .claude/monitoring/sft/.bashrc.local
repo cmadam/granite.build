@@ -1,0 +1,22 @@
+# User-owned bashrc customizations
+# Sourced from ~/.bashrc; preserved across pod / bashrc version bumps.
+
+# Sideloaded ~/.local/lib (e.g. libpopt.so.0 for the sideloaded rsync)
+[ -d "$HOME/.local/lib" ] && export LD_LIBRARY_PATH="$HOME/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# ─── sft-full training monitor: auto-restart on shell login if not running ────
+# Spawns at most one runner per pod (pgrep guard). The runner itself loops
+# hourly: Sonnet 4.6 health check, Opus 4.7 recovery on alert.
+# Override MONITOR_HOME if you keep the scripts somewhere other than $HOME.
+# To stop temporarily: pkill -f sft-monitor-runner.sh
+# To disable permanently: comment out this block.
+: "${MONITOR_HOME:=$HOME}"
+export MONITOR_HOME
+if [ -x "$MONITOR_HOME/sft-monitor-runner.sh" ] \
+   && [ -t 0 ] \
+   && ! pgrep -f sft-monitor-runner.sh >/dev/null 2>&1; then
+    mkdir -p "$MONITOR_HOME/sky-monitor-logs"
+    nohup "$MONITOR_HOME/sft-monitor-runner.sh" \
+        >> "$MONITOR_HOME/sky-monitor-logs/runner.log" 2>&1 & disown
+    echo "[sft-monitor] runner started (pid=$!)"
+fi
