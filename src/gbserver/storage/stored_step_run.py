@@ -19,5 +19,9 @@ class StoredStepRun(BaseStoredItem):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
 
+    # Standalone-mode SkyPilot reattach handle (F1, epic #46). A single JSON
+    # column — {cluster_name, job_id, done_marker}. None until first provision.
+    skypilot_handle: Optional[dict] = None
+
     def __init__(self: Self, **kwargs):
         super().__init__(**kwargs)
