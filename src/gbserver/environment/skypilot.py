@@ -260,7 +260,6 @@ from gbserver.environment._skypilot_ssh import (
     extract_host_ssh_info as _extract_host_ssh_info,
 )
 
-
 # --- F2 (epic #46): cluster-side completion marker ---------------------------
 # gbserver writes NOTHING here; it only shapes the run script and env so the
 # job marks its own successful completion durably. Read back on restart by
@@ -291,9 +290,7 @@ def _done_marker_path(build_workdir: Optional[str], tsr_id: str) -> Optional[str
     return os.path.join(build_workdir, ".gb_done", tsr_id)
 
 
-def _wrap_run_script_with_marker(
-    run_script: str, build_workdir: Optional[str]
-) -> str:
+def _wrap_run_script_with_marker(run_script: str, build_workdir: Optional[str]) -> str:
     """Wrap a step's run script with the existing workdir preamble AND the
     success-gated completion-marker epilogue.
 

@@ -251,6 +251,5 @@ async def test_fresh_launch_persists_done_marker_path():
         assert stored.skypilot_handle is not None
         # done_marker is the exact path the epilogue writes to on success.
         assert (
-            stored.skypilot_handle["done_marker"]
-            == f"{build_workdir}/.gb_done/tsr-1"
+            stored.skypilot_handle["done_marker"] == f"{build_workdir}/.gb_done/tsr-1"
         )
