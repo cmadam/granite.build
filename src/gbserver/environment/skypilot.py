@@ -252,6 +252,7 @@ def _is_transient_provision_error(exc: BaseException) -> bool:
     return any(s in text for s in _TRANSIENT_PROVISION_SUBSTRINGS)
 
 
+from gbserver.environment._skypilot_marker import read_done_marker_via_ssh
 from gbserver.environment._skypilot_ssh import (
     execute_on_host_via_ssh as _execute_on_host_via_ssh,
 )
@@ -511,6 +512,37 @@ class Skypilot(Environment):
         except Exception as e:
             logger.warning("Could not read stored handle for %s: %s", tsr_id, e)
             return None
+
+    async def _marker_completed(
+        self: Self,
+        run_metadata: Dict,
+        infra: str,
+        build_workdir: Optional[str],
+    ) -> bool:
+        """True if the job already wrote its success marker (finished while
+        gbserver was offline). Read over SSH to the persistent login node, since
+        the compute allocation is gone in this scenario.
+
+        Standalone-only concern; the caller gates on ``is_standalone()``. Never
+        raises — any failure returns False so the caller falls through to the
+        F1 reattach / fresh-launch path (F2, epic #48)."""
+        tsr_id = (run_metadata or {}).get("targetsteprun_id", "")
+        # Prefer the path persisted in the F1 handle; fall back to recomputing
+        # from build_workdir (both yield the same deterministic path).
+        handle = self._read_stored_handle(run_metadata) or {}
+        marker_path = handle.get("done_marker") or _done_marker_path(
+            build_workdir, tsr_id
+        )
+        if not marker_path:
+            return False
+        parts = str(infra).split("/")
+        cloud = (parts[0] or "").lower()
+        alias = parts[1] if len(parts) > 1 else ""
+        if not alias:
+            # No login-node alias to reach (e.g. k8s/local infra); the offline
+            # completion scenario only applies to slurm/lsf login-node clusters.
+            return False
+        return await read_done_marker_via_ssh(cloud, alias, marker_path)
 
     async def _try_reattach(self: Self, launch_id: str, handle: dict) -> bool:
         """Probe a persisted handle; if the job is still alive, adopt it into the
@@ -929,10 +961,27 @@ class Skypilot(Environment):
             no_autostop_clouds = ("slurm", "lsf")
             autostop = None if cloud_for_infra in no_autostop_clouds else idle_minutes
 
-            # In standalone mode, a relaunch may find the original cluster still
-            # running (host restarted mid-job). Probe the persisted handle and,
-            # if the job is alive, adopt it and skip a duplicate sky.launch
-            # (F1, epic #46).
+            # In standalone mode, a relaunch may find the step already finished
+            # while gbserver was offline. Read the durable completion marker
+            # (F2, epic #46) BEFORE attempting reattach: if present, the step
+            # succeeded, so skip provisioning entirely and let it complete as
+            # SUCCESS through the normal path (the finally below releases the
+            # monitors; the poller no-ops with no cluster recorded). Downstream
+            # artifact-binding reconstruction on restart is out of scope here
+            # (owned by F4 resume) — this only prevents a wrongful re-run.
+            if is_standalone() and run_metadata:
+                if await self._marker_completed(run_metadata, infra, build_workdir):
+                    logger.info(
+                        "Completion marker present for %s; step already "
+                        "succeeded — skipping relaunch (launch_id=%s).",
+                        run_metadata.get("targetsteprun_id", ""),
+                        launch_id,
+                    )
+                    return
+
+            # Otherwise a relaunch may find the original cluster still running
+            # (host restarted mid-job). Probe the persisted handle and, if the
+            # job is alive, adopt it and skip a duplicate sky.launch (F1).
             reattached = False
             if is_standalone() and run_metadata:
                 stored_handle = self._read_stored_handle(run_metadata)
