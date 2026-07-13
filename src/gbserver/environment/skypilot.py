@@ -260,6 +260,56 @@ from gbserver.environment._skypilot_ssh import (
 )
 
 
+# --- F2 (epic #46): cluster-side completion marker ---------------------------
+# gbserver writes NOTHING here; it only shapes the run script and env so the
+# job marks its own successful completion durably. Read back on restart by
+# the F2 login-node reader when the cluster is already gone.
+
+# Success-gated epilogue appended to every step's run script. Uses a trap so it
+# fires on ANY exit path (normal end, early `exit`, set -e abort) but writes the
+# marker ONLY when the final rc is 0 and the marker env var is present. The
+# marker file's content is the rc ("0"); its mere existence is the SUCCESS
+# signal. Kept POSIX-sh safe (no bashisms) so it works under whatever /bin/sh
+# the image ships.
+_GB_DONE_EPILOGUE = (
+    "__gb_on_exit() { "
+    "rc=$?; "
+    'if [ "$rc" -eq 0 ] && [ -n "$GB_STEP_DONE_MARKER" ]; then '
+    'mkdir -p "$(dirname "$GB_STEP_DONE_MARKER")"; '
+    'echo "$rc" > "$GB_STEP_DONE_MARKER"; '
+    "fi; }\n"
+    "trap __gb_on_exit EXIT\n"
+)
+
+
+def _done_marker_path(build_workdir: Optional[str], tsr_id: str) -> Optional[str]:
+    """Absolute path of the completion marker for one step run, or None when it
+    cannot be formed (no per-run workdir, or no targetsteprun_id)."""
+    if not build_workdir or not tsr_id:
+        return None
+    return os.path.join(build_workdir, ".gb_done", tsr_id)
+
+
+def _wrap_run_script_with_marker(
+    run_script: str, build_workdir: Optional[str]
+) -> str:
+    """Wrap a step's run script with the existing workdir preamble AND the
+    success-gated completion-marker epilogue.
+
+    The epilogue's ``trap`` is installed BEFORE the user script so it also fires
+    if the user script exits early. Marker writing is further gated on
+    ``GB_STEP_DONE_MARKER`` being exported, so this is inert when the caller did
+    not set that env var (e.g. no shared_workdir)."""
+    if not build_workdir:
+        return run_script
+    return (
+        'mkdir -p "$GB_BUILD_WORKDIR"\n'
+        'cd "$GB_BUILD_WORKDIR"\n'
+        f"{_GB_DONE_EPILOGUE}"
+        f"{run_script}"
+    )
+
+
 class Skypilot(Environment):
     """SkyPilot environment — provisions pods/VMs for step execution (unmanaged)."""
 
@@ -778,6 +828,11 @@ class Skypilot(Environment):
             )
             if build_workdir:
                 env_vars["GB_BUILD_WORKDIR"] = build_workdir
+                # F2 (epic #46): tell the job where to drop its success marker.
+                tsr_id_for_marker = (run_metadata or {}).get("targetsteprun_id", "")
+                marker_path = _done_marker_path(build_workdir, tsr_id_for_marker)
+                if marker_path:
+                    env_vars["GB_STEP_DONE_MARKER"] = marker_path
 
             # Inject inline hfpull downloads into setup from per-step bindings
             setup_script = launcher_config.get("setup") or ""
@@ -812,12 +867,7 @@ class Skypilot(Environment):
                 )
 
             run_script = launcher_config.get("run", "")
-            if build_workdir:
-                run_script = (
-                    'mkdir -p "$GB_BUILD_WORKDIR"\n'
-                    'cd "$GB_BUILD_WORKDIR"\n'
-                    f"{run_script}"
-                )
+            run_script = _wrap_run_script_with_marker(run_script, build_workdir)
 
             # Build sky.Task
             task = sky.Task(
