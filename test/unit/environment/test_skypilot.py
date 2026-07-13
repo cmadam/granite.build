@@ -375,6 +375,178 @@ class TestLaunchSkypilot:
         step_storage_mock.update_fields.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_reattach_skips_launch_when_alive(self, skypilot_env):
+        """A relaunch that finds the stored cluster/job alive adopts it and
+        skips a fresh sky.launch (F1, epic #46)."""
+        running = MagicMock()
+        running.is_terminal = MagicMock(return_value=False)
+        running.name = "RUNNING"
+
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-alive")
+        mock_sky.stream_and_get = MagicMock(return_value=(99, MagicMock()))
+        mock_sky.job_status = MagicMock(return_value="rq")
+        mock_sky.get = MagicMock(return_value={9: running})
+
+        stored = MagicMock()
+        stored.skypilot_handle = {
+            "cluster_name": "gb-bob-h-mybuild-t-s0-abc123",
+            "job_id": 9,
+            "done_marker": None,
+        }
+        step_storage_mock = MagicMock()
+        step_storage_mock.get_by_uuid = MagicMock(return_value=stored)
+        admin_storage_mock = MagicMock(step_storage=step_storage_mock)
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+            patch(
+                "gbserver.environment.skypilot.get_admin_storage",
+                return_value=admin_storage_mock,
+            ),
+            patch.object(skypilot_env, "_build_name_for", return_value="mybuild"),
+        ):
+            launch_id = "test-launch-reattach"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "tsr-1",
+                },
+            )
+
+        mock_sky.launch.assert_not_called()
+        assert (
+            skypilot_env._cluster_names[launch_id]
+            == "gb-bob-h-mybuild-t-s0-abc123"
+        )
+        assert skypilot_env._job_ids[launch_id] == 9
+        # Reattach must not re-persist the handle (would clobber done_marker).
+        step_storage_mock.update_fields.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reattach_falls_through_when_cluster_gone(self, skypilot_env):
+        """If the stored cluster no longer exists, fall through to a fresh
+        launch and persist the fresh handle."""
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-gone")
+        mock_sky.stream_and_get = MagicMock(return_value=(11, MagicMock()))
+        mock_sky.job_status = MagicMock(
+            side_effect=Exception(
+                "Cluster gb-bob-h-mybuild-t-s0-abc123 does not exist"
+            )
+        )
+        mock_sky.get = MagicMock(return_value={})
+
+        stored = MagicMock()
+        stored.skypilot_handle = {
+            "cluster_name": "gb-bob-h-mybuild-t-s0-abc123",
+            "job_id": 9,
+            "done_marker": None,
+        }
+        step_storage_mock = MagicMock()
+        step_storage_mock.get_by_uuid = MagicMock(return_value=stored)
+        admin_storage_mock = MagicMock(step_storage=step_storage_mock)
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+            patch(
+                "gbserver.environment.skypilot.get_admin_storage",
+                return_value=admin_storage_mock,
+            ),
+            patch.object(skypilot_env, "_build_name_for", return_value="mybuild"),
+        ):
+            launch_id = "test-launch-gone"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "tsr-1",
+                },
+            )
+
+        mock_sky.launch.assert_called_once()
+        assert skypilot_env._job_ids[launch_id] == 11
+        # Fresh launch persists the fresh handle exactly once.
+        step_storage_mock.update_fields.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_reattach_falls_through_when_job_terminal(self, skypilot_env):
+        """If the stored job is terminal, fall through to a fresh launch."""
+        done = MagicMock()
+        done.is_terminal = MagicMock(return_value=True)
+        done.name = "SUCCEEDED"
+
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-term")
+        mock_sky.stream_and_get = MagicMock(return_value=(12, MagicMock()))
+        mock_sky.job_status = MagicMock(return_value="rq")
+        mock_sky.get = MagicMock(return_value={9: done})
+
+        stored = MagicMock()
+        stored.skypilot_handle = {
+            "cluster_name": "gb-bob-h-mybuild-t-s0-abc123",
+            "job_id": 9,
+            "done_marker": None,
+        }
+        step_storage_mock = MagicMock()
+        step_storage_mock.get_by_uuid = MagicMock(return_value=stored)
+        admin_storage_mock = MagicMock(step_storage=step_storage_mock)
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+            patch(
+                "gbserver.environment.skypilot.get_admin_storage",
+                return_value=admin_storage_mock,
+            ),
+            patch.object(skypilot_env, "_build_name_for", return_value="mybuild"),
+        ):
+            launch_id = "test-launch-term"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "tsr-1",
+                },
+            )
+
+        mock_sky.launch.assert_called_once()
+        assert skypilot_env._job_ids[launch_id] == 12
+
+    @pytest.mark.asyncio
     async def test_launch_uses_legacy_name_when_not_standalone(self, skypilot_env):
         """Non-standalone launches keep the legacy gb-<launch_id[:12]> scheme."""
         mock_sky = MagicMock()
