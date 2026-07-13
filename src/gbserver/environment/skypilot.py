@@ -25,9 +25,11 @@ from tenacity import (
     wait_exponential,
 )
 
+from gbcommon.types.gbenvconfig import is_standalone
 from gbcommon.types.testing import get_exported_gbtest_env_vars
 from gbcommon.uri.uri import URI
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
+from gbserver.storage.singleton_storage import get_admin_storage
 from gbserver.types.buildconfig import BuildTargetStepConfig
 from gbserver.types.buildevent import EntityRunMetadata
 from gbserver.types.environmentconfig import EnvironmentConfig
@@ -435,6 +437,19 @@ class Skypilot(Environment):
         name = f"gb-{user}-{hostv}-{build}-{target}-s{idx}-{h}"
         return name if attempt <= 0 else f"{name}-r{attempt}"
 
+    def _build_name_for(self: Self, build_id: str) -> str:
+        """Look up StoredBuild.name by build_id, cached per process."""
+        if build_id in self._build_names:
+            return self._build_names[build_id]
+        name = ""
+        try:
+            stored = get_admin_storage().build_storage.get_by_uuid(build_id)
+            name = getattr(stored, "name", "") or ""
+        except Exception as e:  # storage unavailable in some paths; degrade
+            logger.warning("Could not resolve build name for %s: %s", build_id, e)
+        self._build_names[build_id] = name
+        return name
+
     async def setup_skypilot(
         self: Self,
         setup_id: str,
@@ -588,7 +603,14 @@ class Skypilot(Environment):
             config = kwargs.get("config", {}) or {}
 
             attempt = self._relaunch_attempts.get(launch_id, 0)
-            cluster_name = self._cluster_name_for(launch_id, attempt)
+            run_metadata = kwargs.get("run_metadata") or {}
+            if is_standalone() and run_metadata:
+                build_name = self._build_name_for(run_metadata.get("build_id", ""))
+                cluster_name = self._standalone_cluster_name(
+                    run_metadata, build_name, attempt=attempt
+                )
+            else:
+                cluster_name = self._cluster_name_for(launch_id, attempt)
             cloud = (
                 launcher_config.get("resources", {}).get("cloud") or self._get_cloud()
             )

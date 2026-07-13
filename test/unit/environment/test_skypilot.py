@@ -255,6 +255,76 @@ class TestLaunchSkypilot:
         mock_sky.stream_and_get.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
+    async def test_launch_uses_deterministic_name_in_standalone(self, skypilot_env):
+        """Standalone launches with run_metadata get the human-readable name."""
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-det")
+        mock_sky.stream_and_get = MagicMock(return_value=(7, MagicMock()))
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+            patch.object(skypilot_env, "_build_name_for", return_value="mybuild"),
+        ):
+            launch_id = "test-launch-det"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hello"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "aaaa1111",
+                },
+            )
+
+        name = skypilot_env._cluster_names[launch_id]
+        assert name.startswith("gb-bob-")
+        assert "-s0-" in name
+
+    @pytest.mark.asyncio
+    async def test_launch_uses_legacy_name_when_not_standalone(self, skypilot_env):
+        """Non-standalone launches keep the legacy gb-<launch_id[:12]> scheme."""
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-leg")
+        mock_sky.stream_and_get = MagicMock(return_value=(8, MagicMock()))
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=False),
+        ):
+            launch_id = "test-launch-legacy"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hello"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "aaaa1111",
+                },
+            )
+
+        assert (
+            skypilot_env._cluster_names[launch_id]
+            == skypilot_env._cluster_name_for(launch_id, 0)
+        )
+
+    @pytest.mark.asyncio
     async def test_launch_sets_readiness_on_error(self, skypilot_env):
         """release_monitors must be called even if launch fails."""
         with patch("gbserver.environment.skypilot.HAS_SKYPILOT", False):
