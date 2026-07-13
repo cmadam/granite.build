@@ -208,3 +208,49 @@ async def test_restart_relaunches_when_cluster_gone():
         # env2 could not reattach, so it did a FRESH relaunch.
         mock_sky.launch.assert_called_once()
         assert env2._job_ids[launch_id] == 7
+
+
+@pytest.mark.asyncio
+async def test_fresh_launch_persists_done_marker_path():
+    """A fresh launch records the completion-marker path in the persisted
+    handle (F2, #48) so a restarted gbserver can read the marker even after the
+    cluster is gone."""
+    fake_store = _FakeStepStore()
+    admin_storage_mock = MagicMock(step_storage=fake_store, build_storage=MagicMock())
+
+    mock_sky = MagicMock()
+    mock_sky.Resources = MagicMock(return_value=MagicMock())
+    mock_sky.Task = MagicMock(return_value=MagicMock())
+    mock_sky.launch = MagicMock(return_value="req-1")
+    mock_sky.stream_and_get = MagicMock(return_value=(7, MagicMock()))
+
+    launch_id = "lid-1"
+    build_workdir = "/shared/builds/b-1/runs/tr-1"
+
+    with (
+        patch("gbserver.environment.skypilot.sky", mock_sky),
+        patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+        patch(
+            "gbserver.environment.skypilot.get_admin_storage",
+            return_value=admin_storage_mock,
+        ),
+    ):
+        env = _make_env()
+        with patch.object(env, "_build_name_for", return_value="mybuild"):
+            env._get_launch_ready_event(launch_id)
+            await env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                run_metadata=_RUN_METADATA,
+                setup_config={"skypilot": {"build_workdir": build_workdir}},
+            )
+
+        stored = fake_store.get_by_uuid("tsr-1")
+        assert stored is not None
+        assert stored.skypilot_handle is not None
+        # done_marker is the exact path the epilogue writes to on success.
+        assert (
+            stored.skypilot_handle["done_marker"]
+            == f"{build_workdir}/.gb_done/tsr-1"
+        )

@@ -956,7 +956,9 @@ class Skypilot(Environment):
 
             # Persist the launch handle so a restarted standalone gbserver can
             # reattach to this exact cluster instead of relaunching a duplicate
-            # (F1, epic #46). done_marker is owned by F2 (#48); left None here.
+            # (F1, epic #46). done_marker (F2, #48) records where the job will
+            # drop its success marker so a restarted gbserver can read it even
+            # after the cluster is gone; None when no per-run workdir exists.
             if (
                 not reattached
                 and is_standalone()
@@ -968,7 +970,7 @@ class Skypilot(Environment):
                     handle = {
                         "cluster_name": cluster_name,
                         "job_id": job_id,
-                        "done_marker": None,
+                        "done_marker": env_vars.get("GB_STEP_DONE_MARKER"),
                     }
                     try:
                         await asyncio.to_thread(
