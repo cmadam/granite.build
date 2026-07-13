@@ -135,9 +135,7 @@ class TestSkypilotClusterNaming:
         from gbserver.utils.utils import normalize_to_filename
 
         def expected_slug(value, n):
-            return (
-                normalize_to_filename(str(value or ""))[:n].strip("-") or "x"
-            )
+            return normalize_to_filename(str(value or ""))[:n].strip("-") or "x"
 
         user = expected_slug("alice-longusername", 8)
         hostv = expected_slug("gbhost01.example", 10)
@@ -427,10 +425,7 @@ class TestLaunchSkypilot:
             )
 
         mock_sky.launch.assert_not_called()
-        assert (
-            skypilot_env._cluster_names[launch_id]
-            == "gb-bob-h-mybuild-t-s0-abc123"
-        )
+        assert skypilot_env._cluster_names[launch_id] == "gb-bob-h-mybuild-t-s0-abc123"
         assert skypilot_env._job_ids[launch_id] == 9
         # Reattach must not re-persist the handle (would clobber done_marker).
         step_storage_mock.update_fields.assert_not_called()
@@ -445,9 +440,7 @@ class TestLaunchSkypilot:
         mock_sky.launch = MagicMock(return_value="req-gone")
         mock_sky.stream_and_get = MagicMock(return_value=(11, MagicMock()))
         mock_sky.job_status = MagicMock(
-            side_effect=Exception(
-                "Cluster gb-bob-h-mybuild-t-s0-abc123 does not exist"
-            )
+            side_effect=Exception("Cluster gb-bob-h-mybuild-t-s0-abc123 does not exist")
         )
         mock_sky.get = MagicMock(return_value={})
 
@@ -576,9 +569,8 @@ class TestLaunchSkypilot:
                 },
             )
 
-        assert (
-            skypilot_env._cluster_names[launch_id]
-            == skypilot_env._cluster_name_for(launch_id, 0)
+        assert skypilot_env._cluster_names[launch_id] == skypilot_env._cluster_name_for(
+            launch_id, 0
         )
 
     @pytest.mark.asyncio

@@ -907,7 +907,12 @@ class Skypilot(Environment):
             # Persist the launch handle so a restarted standalone gbserver can
             # reattach to this exact cluster instead of relaunching a duplicate
             # (F1, epic #46). done_marker is owned by F2 (#48); left None here.
-            if not reattached and is_standalone() and run_metadata and job_id is not None:
+            if (
+                not reattached
+                and is_standalone()
+                and run_metadata
+                and job_id is not None
+            ):
                 tsr_id = run_metadata.get("targetsteprun_id")
                 if tsr_id:
                     handle = {

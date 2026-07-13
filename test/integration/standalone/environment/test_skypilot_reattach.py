@@ -58,9 +58,7 @@ class _FakeStepStore:
         self._rows = {}  # uuid -> SimpleNamespace with .skypilot_handle
 
     def update_fields(self, uuid, fields, *args, **kwargs):
-        row = self._rows.setdefault(
-            uuid, types.SimpleNamespace(skypilot_handle=None)
-        )
+        row = self._rows.setdefault(uuid, types.SimpleNamespace(skypilot_handle=None))
         for k, v in fields.items():
             setattr(row, k, v)
         return row
@@ -90,9 +88,7 @@ async def test_restart_adopts_existing_cluster():
     """After a simulated restart, a fresh Skypilot instance reads the persisted
     handle and reattaches to the running cluster instead of relaunching."""
     fake_store = _FakeStepStore()
-    admin_storage_mock = MagicMock(
-        step_storage=fake_store, build_storage=MagicMock()
-    )
+    admin_storage_mock = MagicMock(step_storage=fake_store, build_storage=MagicMock())
 
     # A sky mock supporting BOTH a fresh launch and a reattach probe.
     mock_sky = MagicMock()
@@ -131,10 +127,7 @@ async def test_restart_adopts_existing_cluster():
         stored = fake_store.get_by_uuid("tsr-1")
         assert stored is not None
         assert stored.skypilot_handle is not None
-        assert (
-            stored.skypilot_handle["cluster_name"]
-            == env1._cluster_names[launch_id]
-        )
+        assert stored.skypilot_handle["cluster_name"] == env1._cluster_names[launch_id]
         assert stored.skypilot_handle["job_id"] == 7
 
         mock_sky.launch.reset_mock()
@@ -162,9 +155,7 @@ async def test_restart_relaunches_when_cluster_gone():
     """If the persisted cluster no longer exists after restart, the fresh
     instance falls through to a brand-new launch."""
     fake_store = _FakeStepStore()
-    admin_storage_mock = MagicMock(
-        step_storage=fake_store, build_storage=MagicMock()
-    )
+    admin_storage_mock = MagicMock(step_storage=fake_store, build_storage=MagicMock())
 
     mock_sky = MagicMock()
     mock_sky.Resources = MagicMock(return_value=MagicMock())
