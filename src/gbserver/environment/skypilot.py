@@ -824,6 +824,36 @@ class Skypilot(Environment):
             if job_id is not None:
                 self._job_ids[launch_id] = job_id
 
+            # Persist the launch handle so a restarted standalone gbserver can
+            # reattach to this exact cluster instead of relaunching a duplicate
+            # (F1, epic #46). done_marker is owned by F2 (#48); left None here.
+            if is_standalone() and run_metadata and job_id is not None:
+                tsr_id = run_metadata.get("targetsteprun_id")
+                if tsr_id:
+                    handle = {
+                        "cluster_name": cluster_name,
+                        "job_id": job_id,
+                        "done_marker": None,
+                    }
+                    try:
+                        await asyncio.to_thread(
+                            get_admin_storage().step_storage.update_fields,
+                            tsr_id,
+                            {"skypilot_handle": handle},
+                        )
+                        logger.info(
+                            "Persisted SkyPilot handle for %s: %s (job_id=%s)",
+                            tsr_id,
+                            cluster_name,
+                            job_id,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to persist SkyPilot handle for %s: %s",
+                            tsr_id,
+                            e,
+                        )
+
             logger.info(
                 "SkyPilot cluster %s launched: job_id=%s launch_id=%s",
                 cluster_name,

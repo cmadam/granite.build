@@ -290,6 +290,91 @@ class TestLaunchSkypilot:
         assert "-s0-" in name
 
     @pytest.mark.asyncio
+    async def test_handle_persisted_after_provision(self, skypilot_env):
+        """Standalone provision persists the launch handle to the StoredStepRun."""
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-persist")
+        mock_sky.stream_and_get = MagicMock(return_value=(7, MagicMock()))
+
+        step_storage_mock = MagicMock()
+        admin_storage_mock = MagicMock(step_storage=step_storage_mock)
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+            patch(
+                "gbserver.environment.skypilot.get_admin_storage",
+                return_value=admin_storage_mock,
+            ),
+            patch.object(skypilot_env, "_build_name_for", return_value="mybuild"),
+        ):
+            launch_id = "test-launch-persist"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "tsr-xyz",
+                },
+            )
+
+        step_storage_mock.update_fields.assert_called_once()
+        args, _ = step_storage_mock.update_fields.call_args
+        assert args[0] == "tsr-xyz"
+        handle = args[1]["skypilot_handle"]
+        assert handle["cluster_name"] == skypilot_env._cluster_names[launch_id]
+        assert handle["job_id"] == 7
+        assert handle["done_marker"] is None
+
+    @pytest.mark.asyncio
+    async def test_handle_not_persisted_when_not_standalone(self, skypilot_env):
+        """Non-standalone launches do not persist a handle."""
+        mock_sky = MagicMock()
+        mock_sky.Resources = MagicMock(return_value=MagicMock())
+        mock_sky.Task = MagicMock(return_value=MagicMock())
+        mock_sky.launch = MagicMock(return_value="req-nostand")
+        mock_sky.stream_and_get = MagicMock(return_value=(9, MagicMock()))
+
+        step_storage_mock = MagicMock()
+        admin_storage_mock = MagicMock(step_storage=step_storage_mock)
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=False),
+            patch(
+                "gbserver.environment.skypilot.get_admin_storage",
+                return_value=admin_storage_mock,
+            ),
+        ):
+            launch_id = "test-launch-nostand"
+            skypilot_env._get_launch_ready_event(launch_id)
+
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi"},
+                config={},
+                run_metadata={
+                    "build_id": "b-1",
+                    "username": "bob",
+                    "target_name": "t",
+                    "target_step_index": 0,
+                    "targetsteprun_id": "tsr-xyz",
+                },
+            )
+
+        step_storage_mock.update_fields.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_launch_uses_legacy_name_when_not_standalone(self, skypilot_env):
         """Non-standalone launches keep the legacy gb-<launch_id[:12]> scheme."""
         mock_sky = MagicMock()
