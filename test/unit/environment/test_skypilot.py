@@ -1720,6 +1720,140 @@ class TestInlineConfigMaterialization:
         assert calls[:2] == ["materialize", "api"]
 
 
+class TestPollHardening:
+    """F3: _poll_skypilot_job distinguishes transient (retry) from terminal.
+
+    Standalone treats a genuinely-gone cluster (typed ClusterDoesNotExist) as
+    FAILED, but a generic API/network blip as transient — it keeps retrying and
+    never marks a healthy job FAILED. Non-standalone (k8s/prod) keeps the legacy
+    "3 consecutive failures -> FAILED" semantics.
+    """
+
+    @pytest.fixture
+    def poll_env(self):
+        from gbserver.environment.skypilot import Skypilot
+        from gbserver.types.environmentconfig import EnvironmentConfig
+
+        event_q = asyncio.Queue()
+        config = EnvironmentConfig(
+            name="test-skypilot",
+            type="Skypilot",
+            config={"default_cloud": "k8s"},
+        )
+        env = Skypilot(event_q=event_q, environment_config=config)
+        launch_id = "poll-hardening-001"
+        env._cluster_names[launch_id] = "gb-poll-hardening"
+        env._job_ids[launch_id] = 42
+        env._release_monitors(launch_id)
+        return env, launch_id, event_q
+
+    @staticmethod
+    def _terminal_status(mock_sky, label):
+        status = MagicMock()
+        status.is_terminal.return_value = True
+        status.__str__ = lambda s: label
+        return status
+
+    @pytest.mark.asyncio
+    async def test_standalone_transient_blip_does_not_fail(self, poll_env):
+        """API unreachable for >3 polls while healthy -> not FAILED; recovers."""
+        env, launch_id, event_q = poll_env
+
+        succeeded = self._terminal_status(None, "JobStatus.SUCCEEDED")
+        mock_sky = MagicMock()
+        call_count = [0]
+
+        def mock_job_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 4:  # more than the legacy max_poll_failures (3)
+                raise ConnectionError("API server unreachable")
+            return "req-ok"
+
+        mock_sky.job_status = mock_job_status
+        mock_sky.get = lambda req_id: {42: succeeded}
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+        ):
+            # Returns normally (no WorkloadFailedException) once the job succeeds.
+            await env._poll_skypilot_job(
+                launch_id=launch_id,
+                event_q=event_q,
+                entityrun_metadata=EntityRunMetadata(build_id="build-1"),
+                poll_interval_seconds=0.01,
+            )
+
+        # Kept polling past the legacy 3-failure threshold and recovered.
+        assert call_count[0] >= 5
+
+    @pytest.mark.asyncio
+    async def test_standalone_cluster_gone_fails(self, poll_env):
+        """Typed ClusterDoesNotExist -> terminal FAILED (raises)."""
+        env, launch_id, event_q = poll_env
+
+        class _ClusterGone(Exception):
+            pass
+
+        mock_sky = MagicMock()
+        mock_sky.exceptions.ClusterDoesNotExist = _ClusterGone
+        mock_sky.JobStatus.FAILED = self._terminal_status(None, "JobStatus.FAILED")
+
+        def mock_job_status(*args, **kwargs):
+            raise _ClusterGone("cluster gb-poll-hardening does not exist")
+
+        mock_sky.job_status = mock_job_status
+
+        from gbserver.types.errors import WorkloadFailedException
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=True),
+        ):
+            with pytest.raises(WorkloadFailedException):
+                await env._poll_skypilot_job(
+                    launch_id=launch_id,
+                    event_q=event_q,
+                    entityrun_metadata=EntityRunMetadata(build_id="build-1"),
+                    poll_interval_seconds=0.01,
+                )
+
+    @pytest.mark.asyncio
+    async def test_non_standalone_three_failures_fail(self, poll_env):
+        """k8s/prod semantics unchanged: 3 consecutive poll errors -> FAILED."""
+        env, launch_id, event_q = poll_env
+
+        mock_sky = MagicMock()
+        mock_sky.JobStatus.FAILED = self._terminal_status(None, "JobStatus.FAILED")
+        call_count = [0]
+
+        def mock_job_status(*args, **kwargs):
+            call_count[0] += 1
+            raise ConnectionError("API server unreachable")
+
+        mock_sky.job_status = mock_job_status
+
+        from gbserver.types.errors import WorkloadFailedException
+
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+            patch("gbserver.environment.skypilot.is_standalone", return_value=False),
+        ):
+            with pytest.raises(WorkloadFailedException):
+                await env._poll_skypilot_job(
+                    launch_id=launch_id,
+                    event_q=event_q,
+                    entityrun_metadata=EntityRunMetadata(build_id="build-1"),
+                    poll_interval_seconds=0.01,
+                )
+
+        # Failed exactly at the 3rd consecutive failure (legacy threshold).
+        assert call_count[0] == 3
+
+
 def test_done_marker_env_and_epilogue_injected():
     """When build_workdir is set, the run script gets the workdir preamble +
     a success-gated epilogue, and the marker path lands under

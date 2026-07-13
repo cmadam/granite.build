@@ -126,6 +126,13 @@ _LOG_RETRIEVAL_MODES = frozenset(
 )
 _DEFAULT_STARTUP_WINDOW_SECONDS = 120.0
 
+# Standalone poll hardening: on a transient (non-cluster-gone) poll error we
+# back off with a capped exponential delay before retrying, rather than counting
+# toward a FAILED threshold. The delay grows from _TRANSIENT_POLL_BACKOFF_BASE
+# seconds and is capped at the step's poll_interval so a blip retries quickly
+# without hammering an unreachable API server.
+_TRANSIENT_POLL_BACKOFF_BASE_SECONDS = 30.0
+
 
 def _coerce_float(value, default: float) -> float:
     """Best-effort float coercion (templated configs may pass strings)."""
@@ -1393,10 +1400,47 @@ class Skypilot(Environment):
                 )
                 poll_failed = True
                 consecutive_poll_failures += 1
-                if (
-                    "does not exist" in str(e)
-                    or consecutive_poll_failures >= max_poll_failures
-                ):
+
+                # Distinguish the genuinely-gone cluster (terminal) from a
+                # transient API-server/network blip (retry). Prefer the typed
+                # ``ClusterDoesNotExist`` (mirrors _teardown_skypilot_cluster);
+                # fall back to the legacy substring for SkyPilot builds that
+                # don't surface the typed exception.
+                cluster_gone_type = (
+                    getattr(sky.exceptions, "ClusterDoesNotExist", ())
+                    if sky is not None
+                    else ()
+                )
+                cluster_is_gone = (
+                    isinstance(cluster_gone_type, type)
+                    and isinstance(e, cluster_gone_type)
+                ) or "does not exist" in str(e)
+
+                if is_standalone():
+                    # Standalone: a transient blip must NOT kill a healthy job.
+                    # Only a genuinely-gone cluster is terminal; generic errors
+                    # are logged and retried (with backoff, below) without
+                    # counting toward any FAILED threshold.
+                    if cluster_is_gone:
+                        logger.warning(
+                            "Cluster %s is gone (ClusterDoesNotExist). "
+                            "Treating as FAILED for launch_id %s.",
+                            cluster_name,
+                            launch_id,
+                        )
+                        status = sky.JobStatus.FAILED
+                        poll_failed = False
+                    else:
+                        logger.warning(
+                            "Transient poll error for launch_id %s (failure #%d); "
+                            "assuming cluster %s is healthy, backing off and retrying.",
+                            launch_id,
+                            consecutive_poll_failures,
+                            cluster_name,
+                        )
+                elif cluster_is_gone or consecutive_poll_failures >= max_poll_failures:
+                    # Non-standalone (k8s/prod): unchanged semantics -- any
+                    # "does not exist" text or 3 consecutive failures is FAILED.
                     logger.warning(
                         "Cluster %s is gone (preempted or terminated) after %d consecutive poll failures. "
                         "Treating as FAILED for launch_id %s.",
@@ -1649,9 +1693,19 @@ class Skypilot(Environment):
                 return
 
             try:
-                sleep_timeout = _effective_poll_timeout(
-                    poll_interval, log_mode, log_interval, pulls_active
-                )
+                if poll_failed and is_standalone():
+                    # Transient standalone poll failure: back off with a capped
+                    # exponential delay (still cancellable via stop_event) so we
+                    # retry quickly at first without hammering an unreachable API.
+                    sleep_timeout = min(
+                        _TRANSIENT_POLL_BACKOFF_BASE_SECONDS
+                        * (2 ** (consecutive_poll_failures - 1)),
+                        poll_interval,
+                    )
+                else:
+                    sleep_timeout = _effective_poll_timeout(
+                        poll_interval, log_mode, log_interval, pulls_active
+                    )
                 await asyncio.wait_for(stop_event.wait(), timeout=sleep_timeout)
                 # stop_event was set (retry or external cancellation) — clean up log stream
                 if log_stream_task is not None and not log_stream_task.done():
