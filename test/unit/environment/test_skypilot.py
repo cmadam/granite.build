@@ -7,6 +7,23 @@ from gbserver.environment.environment import Environment
 from gbserver.types.buildevent import BuildEventType, EntityRunMetadata
 
 
+def _make_env():
+    """Construct a Skypilot the same way the skypilot_env fixture does."""
+    from gbserver.environment.skypilot import Skypilot
+    from gbserver.types.environmentconfig import EnvironmentConfig
+
+    event_q = asyncio.Queue()
+    config = EnvironmentConfig(
+        name="test-skypilot",
+        type="Skypilot",
+        config={
+            "default_cloud": "k8s",
+            "idle_minutes_to_autostop": 15,
+        },
+    )
+    return Skypilot(event_q=event_q, environment_config=config)
+
+
 class TestStepSkypilotConfig:
     def test_default_values(self):
         from gbserver.types.environment.skypilot import StepSkypilotConfig
@@ -94,6 +111,97 @@ class TestSkypilotClusterNaming:
 
         name = Skypilot._cluster_name_for("short")
         assert name == "gb-short"
+
+    def test_standalone_name_shape_and_truncation(self):
+        env = _make_env()
+        run_metadata = {
+            "username": "alice-longusername",
+            "target_name": "train-the-really-long-target-name",
+            "target_step_index": 2,
+            "targetsteprun_id": "0f1e2d3c-1111-2222-3333-444455556666",
+        }
+        name = env._standalone_cluster_name(
+            run_metadata,
+            build_name="granite-4-350m-pipeline",
+            host="gbhost01.example",
+        )
+        assert name.startswith("gb-")
+        assert "-s2-" in name
+
+        # The -s<idx>- token and the trailing hash are reliable split points.
+        # Text fields contain internal dashes, so rather than split the prefix
+        # on "-" we compute the expected slug for each field independently and
+        # assert both its truncation length and its presence in the name.
+        from gbserver.utils.utils import normalize_to_filename
+
+        def expected_slug(value, n):
+            return (
+                normalize_to_filename(str(value or ""))[:n].strip("-") or "x"
+            )
+
+        user = expected_slug("alice-longusername", 8)
+        hostv = expected_slug("gbhost01.example", 10)
+        build = expected_slug("granite-4-350m-pipeline", 12)
+        target = expected_slug("train-the-really-long-target-name", 16)
+        assert len(user) <= 8
+        assert len(hostv) <= 10
+        assert len(build) <= 12
+        assert len(target) <= 16
+        assert name.startswith(f"gb-{user}-{hostv}-{build}-{target}-s2-")
+
+        # Trailing segment after -s2- is the hash (6-8 chars).
+        hash_seg = name.partition("-s2-")[2]
+        assert 6 <= len(hash_seg) <= 8
+
+    def test_standalone_name_passes_skypilot_regex(self):
+        from sky.utils.common_utils import check_cluster_name_is_valid
+
+        env = _make_env()
+        run_metadata = {
+            "username": "alice-longusername",
+            "target_name": "train-the-really-long-target-name",
+            "target_step_index": 2,
+            "targetsteprun_id": "0f1e2d3c-1111-2222-3333-444455556666",
+        }
+        name = env._standalone_cluster_name(
+            run_metadata,
+            build_name="granite-4-350m-pipeline",
+            host="gbhost01.example",
+        )
+        # Must not raise.
+        check_cluster_name_is_valid(name)
+
+    def test_standalone_name_retry_suffix(self):
+        env = _make_env()
+        run_metadata = {
+            "username": "alice",
+            "target_name": "train",
+            "target_step_index": 0,
+            "targetsteprun_id": "abc123",
+        }
+        name = env._standalone_cluster_name(
+            run_metadata,
+            build_name="pipeline",
+            host="gbhost01",
+            attempt=3,
+        )
+        assert name.endswith("-r3")
+
+    def test_standalone_name_two_hosts_distinct(self):
+        env = _make_env()
+        run_metadata = {
+            "username": "alice",
+            "target_name": "train",
+            "target_step_index": 1,
+            "targetsteprun_id": "abc123",
+        }
+        name_a = env._standalone_cluster_name(
+            run_metadata, build_name="pipeline", host="hostAAAA"
+        )
+        name_b = env._standalone_cluster_name(
+            run_metadata, build_name="pipeline", host="hostBBBB"
+        )
+        assert name_a != name_b
 
 
 class TestLaunchSkypilot:

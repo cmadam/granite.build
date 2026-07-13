@@ -10,6 +10,7 @@ import asyncio
 import glob
 import os
 import shlex
+import socket
 import threading
 import time
 import urllib.parse
@@ -32,6 +33,10 @@ from gbserver.types.buildevent import EntityRunMetadata
 from gbserver.types.environmentconfig import EnvironmentConfig
 from gbserver.types.errors import WorkloadFailedException
 from gbserver.utils.logger import get_logger
+from gbserver.utils.utils import (
+    normalize_to_filename,
+    short_alphanumeric_lower_hash,
+)
 
 if TYPE_CHECKING:
     from gbserver.monitoring.logfile_monitor import LogFileMonitor
@@ -327,6 +332,11 @@ class Skypilot(Environment):
         # periodic/startup pull resumes after the lines it last emitted events
         # for instead of re-emitting from the top each time.
         self._log_lines_parsed: Dict[str, int] = {}
+        # Standalone reattach (F1, epic #46). Captured once; the gbserver
+        # machine's hostname disambiguates clusters owned by different hosts
+        # on a shared backend.
+        self._gbserver_host: str = socket.gethostname()
+        self._build_names: Dict[str, str] = {}  # build_id -> StoredBuild.name
         super().__init__(
             event_q=event_q,
             environment_config=environment_config,
@@ -396,6 +406,34 @@ class Skypilot(Environment):
         """
         base = f"gb-{launch_id[:12]}"
         return base if attempt <= 0 else f"{base}-r{attempt}"
+
+    def _standalone_cluster_name(
+        self: Self,
+        run_metadata: Dict,
+        build_name: str,
+        host: Optional[str] = None,
+        attempt: int = 0,
+    ) -> str:
+        """Human-readable, restart-stable cluster name for standalone mode.
+
+        Shape: ``gb-<user>-<host>-<build>-<target>-s<idx>-<hash>[-r<attempt>]``.
+        Each text field is slugified with ``normalize_to_filename`` then
+        truncated per field; the trailing hash guarantees the name ends
+        alphanumeric so it passes SkyPilot's ``check_cluster_name_is_valid``.
+        """
+
+        def slug(value: str, n: int) -> str:
+            return normalize_to_filename(str(value or ""))[:n].strip("-") or "x"
+
+        user = slug(run_metadata.get("username", ""), 8)
+        hostv = slug(host if host is not None else self._gbserver_host, 10)
+        build = slug(build_name, 12)
+        target = slug(run_metadata.get("target_name", ""), 16)
+        idx = run_metadata.get("target_step_index", 0)
+        tsr_id = run_metadata.get("targetsteprun_id", "")
+        h = short_alphanumeric_lower_hash(str(tsr_id))[:8]
+        name = f"gb-{user}-{hostv}-{build}-{target}-s{idx}-{h}"
+        return name if attempt <= 0 else f"{name}-r{attempt}"
 
     async def setup_skypilot(
         self: Self,
