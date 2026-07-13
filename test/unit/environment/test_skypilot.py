@@ -1852,3 +1852,42 @@ class TestPollHardening:
 
         # Failed exactly at the 3rd consecutive failure (legacy threshold).
         assert call_count[0] == 3
+
+
+def test_done_marker_env_and_epilogue_injected():
+    """When build_workdir is set, the run script gets the workdir preamble +
+    a success-gated epilogue, and the marker path lands under
+    <build_workdir>/.gb_done/<targetsteprun_id>."""
+    from gbserver.environment.skypilot import (
+        _done_marker_path,
+        _wrap_run_script_with_marker,
+    )
+
+    build_workdir = "/shared/builds/b-1/runs/tr-1"
+    tsr_id = "tsr-1"
+    marker = _done_marker_path(build_workdir, tsr_id)
+    assert marker == "/shared/builds/b-1/runs/tr-1/.gb_done/tsr-1"
+
+    wrapped = _wrap_run_script_with_marker("echo hi", build_workdir)
+    assert 'mkdir -p "$GB_BUILD_WORKDIR"' in wrapped
+    assert 'cd "$GB_BUILD_WORKDIR"' in wrapped
+    assert "echo hi" in wrapped
+    assert "__gb_on_exit()" in wrapped
+    assert "trap __gb_on_exit EXIT" in wrapped
+    assert '[ "$rc" -eq 0 ]' in wrapped
+    assert '[ -n "$GB_STEP_DONE_MARKER" ]' in wrapped
+    assert wrapped.index("trap __gb_on_exit EXIT") < wrapped.index("echo hi")
+
+
+def test_marker_helpers_noop_without_workdir():
+    """No build_workdir → no marker path, run script returned unchanged."""
+    from gbserver.environment.skypilot import (
+        _done_marker_path,
+        _wrap_run_script_with_marker,
+    )
+
+    assert _done_marker_path(None, "tsr-1") is None
+    assert _done_marker_path("", "tsr-1") is None
+    assert _done_marker_path("/wd", "") is None
+    assert _wrap_run_script_with_marker("echo hi", None) == "echo hi"
+    assert _wrap_run_script_with_marker("echo hi", "") == "echo hi"
