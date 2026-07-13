@@ -10,6 +10,7 @@ import asyncio
 import glob
 import os
 import shlex
+import socket
 import threading
 import time
 import urllib.parse
@@ -24,14 +25,20 @@ from tenacity import (
     wait_exponential,
 )
 
+from gbcommon.types.gbenvconfig import is_standalone
 from gbcommon.types.testing import get_exported_gbtest_env_vars
 from gbcommon.uri.uri import URI
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
+from gbserver.storage.singleton_storage import get_admin_storage
 from gbserver.types.buildconfig import BuildTargetStepConfig
 from gbserver.types.buildevent import EntityRunMetadata
 from gbserver.types.environmentconfig import EnvironmentConfig
 from gbserver.types.errors import WorkloadFailedException
 from gbserver.utils.logger import get_logger
+from gbserver.utils.utils import (
+    normalize_to_filename,
+    short_alphanumeric_lower_hash,
+)
 
 if TYPE_CHECKING:
     from gbserver.monitoring.logfile_monitor import LogFileMonitor
@@ -327,6 +334,11 @@ class Skypilot(Environment):
         # periodic/startup pull resumes after the lines it last emitted events
         # for instead of re-emitting from the top each time.
         self._log_lines_parsed: Dict[str, int] = {}
+        # Standalone reattach (F1, epic #46). Captured once; the gbserver
+        # machine's hostname disambiguates clusters owned by different hosts
+        # on a shared backend.
+        self._gbserver_host: str = socket.gethostname()
+        self._build_names: Dict[str, str] = {}  # build_id -> StoredBuild.name
         super().__init__(
             event_q=event_q,
             environment_config=environment_config,
@@ -396,6 +408,113 @@ class Skypilot(Environment):
         """
         base = f"gb-{launch_id[:12]}"
         return base if attempt <= 0 else f"{base}-r{attempt}"
+
+    def _standalone_cluster_name(
+        self: Self,
+        run_metadata: Dict,
+        build_name: str,
+        host: Optional[str] = None,
+        attempt: int = 0,
+    ) -> str:
+        """Human-readable, restart-stable cluster name for standalone mode.
+
+        Shape: ``gb-<user>-<host>-<build>-<target>-s<idx>-<hash>[-r<attempt>]``.
+        Each text field is slugified with ``normalize_to_filename`` then
+        truncated per field; the trailing hash guarantees the name ends
+        alphanumeric so it passes SkyPilot's ``check_cluster_name_is_valid``.
+        """
+
+        def slug(value: str, n: int) -> str:
+            return normalize_to_filename(str(value or ""))[:n].strip("-") or "x"
+
+        user = slug(run_metadata.get("username", ""), 8)
+        hostv = slug(host if host is not None else self._gbserver_host, 10)
+        build = slug(build_name, 12)
+        target = slug(run_metadata.get("target_name", ""), 16)
+        idx = run_metadata.get("target_step_index", 0)
+        tsr_id = run_metadata.get("targetsteprun_id", "")
+        h = short_alphanumeric_lower_hash(str(tsr_id))[:8]
+        name = f"gb-{user}-{hostv}-{build}-{target}-s{idx}-{h}"
+        return name if attempt <= 0 else f"{name}-r{attempt}"
+
+    def _build_name_for(self: Self, build_id: str) -> str:
+        """Look up StoredBuild.name by build_id, cached per process."""
+        if build_id in self._build_names:
+            return self._build_names[build_id]
+        name = ""
+        try:
+            stored = get_admin_storage().build_storage.get_by_uuid(build_id)
+            name = getattr(stored, "name", "") or ""
+        except Exception as e:  # storage unavailable in some paths; degrade
+            logger.warning("Could not resolve build name for %s: %s", build_id, e)
+        self._build_names[build_id] = name
+        return name
+
+    def _read_stored_handle(self: Self, run_metadata: Dict) -> Optional[dict]:
+        """Read the persisted SkyPilot handle for this step, if any."""
+        tsr_id = (run_metadata or {}).get("targetsteprun_id")
+        if not tsr_id:
+            return None
+        try:
+            stored = get_admin_storage().step_storage.get_by_uuid(tsr_id)
+            return getattr(stored, "skypilot_handle", None)
+        except Exception as e:
+            logger.warning("Could not read stored handle for %s: %s", tsr_id, e)
+            return None
+
+    async def _try_reattach(self: Self, launch_id: str, handle: dict) -> bool:
+        """Probe a persisted handle; if the job is still alive, adopt it into the
+        in-memory dicts and return True so the caller skips a fresh sky.launch.
+        Returns False if the cluster is gone or the job is terminal/missing."""
+        cluster_name = handle.get("cluster_name")
+        job_id = handle.get("job_id")
+        if not cluster_name or job_id is None:
+            return False
+        try:
+            request_id = await asyncio.to_thread(
+                lambda: sky.job_status(cluster_name, job_ids=[job_id])
+            )
+            statuses = await asyncio.to_thread(sky.get, request_id)
+            status = statuses.get(job_id) if statuses else None
+        except Exception as e:
+            logger.info(
+                "Reattach probe for %s failed (%s); will relaunch.", cluster_name, e
+            )
+            return False
+        if status is None or self._job_status_is_terminal(status):
+            logger.info(
+                "Stored job %s on %s is terminal/missing (status=%s); will relaunch.",
+                job_id,
+                cluster_name,
+                status,
+            )
+            return False
+        self._cluster_names[launch_id] = cluster_name
+        self._job_ids[launch_id] = job_id
+        logger.info(
+            "Reattached to existing cluster %s (job_id=%s, status=%s)",
+            cluster_name,
+            job_id,
+            status,
+        )
+        return True
+
+    @staticmethod
+    def _job_status_is_terminal(status) -> bool:
+        """True if a sky JobStatus is a terminal state."""
+        is_term = getattr(status, "is_terminal", None)
+        if callable(is_term):
+            return bool(is_term())
+        # Fallback: compare against known terminal enum members if present.
+        terminal_names = {
+            "SUCCEEDED",
+            "FAILED",
+            "FAILED_SETUP",
+            "CANCELLED",
+            "FAILED_DRIVER",
+        }
+        name = getattr(status, "name", None)
+        return name in terminal_names
 
     async def setup_skypilot(
         self: Self,
@@ -550,7 +669,14 @@ class Skypilot(Environment):
             config = kwargs.get("config", {}) or {}
 
             attempt = self._relaunch_attempts.get(launch_id, 0)
-            cluster_name = self._cluster_name_for(launch_id, attempt)
+            run_metadata = kwargs.get("run_metadata") or {}
+            if is_standalone() and run_metadata:
+                build_name = self._build_name_for(run_metadata.get("build_id", ""))
+                cluster_name = self._standalone_cluster_name(
+                    run_metadata, build_name, attempt=attempt
+                )
+            else:
+                cluster_name = self._cluster_name_for(launch_id, attempt)
             cloud = (
                 launcher_config.get("resources", {}).get("cloud") or self._get_cloud()
             )
@@ -753,16 +879,65 @@ class Skypilot(Environment):
             no_autostop_clouds = ("slurm", "lsf")
             autostop = None if cloud_for_infra in no_autostop_clouds else idle_minutes
 
-            # Launch and wait for provisioning, retrying transient
-            # resource-acquisition failures (e.g. a just-torn-down slurm/lsf
-            # allocation not yet released on retry). See _provision_with_retry.
-            job_id, _handle = await self._provision_with_retry(
-                task, cluster_name, autostop
-            )
+            # In standalone mode, a relaunch may find the original cluster still
+            # running (host restarted mid-job). Probe the persisted handle and,
+            # if the job is alive, adopt it and skip a duplicate sky.launch
+            # (F1, epic #46).
+            reattached = False
+            if is_standalone() and run_metadata:
+                stored_handle = self._read_stored_handle(run_metadata)
+                if stored_handle:
+                    reattached = await self._try_reattach(launch_id, stored_handle)
+
+            if reattached:
+                cluster_name = self._cluster_names[launch_id]
+                job_id = self._job_ids.get(launch_id)
+            else:
+                # Launch and wait for provisioning, retrying transient
+                # resource-acquisition failures (e.g. a just-torn-down slurm/lsf
+                # allocation not yet released on retry). See _provision_with_retry.
+                job_id, _handle = await self._provision_with_retry(
+                    task, cluster_name, autostop
+                )
 
             self._cluster_names[launch_id] = cluster_name
             if job_id is not None:
                 self._job_ids[launch_id] = job_id
+
+            # Persist the launch handle so a restarted standalone gbserver can
+            # reattach to this exact cluster instead of relaunching a duplicate
+            # (F1, epic #46). done_marker is owned by F2 (#48); left None here.
+            if (
+                not reattached
+                and is_standalone()
+                and run_metadata
+                and job_id is not None
+            ):
+                tsr_id = run_metadata.get("targetsteprun_id")
+                if tsr_id:
+                    handle = {
+                        "cluster_name": cluster_name,
+                        "job_id": job_id,
+                        "done_marker": None,
+                    }
+                    try:
+                        await asyncio.to_thread(
+                            get_admin_storage().step_storage.update_fields,
+                            tsr_id,
+                            {"skypilot_handle": handle},
+                        )
+                        logger.info(
+                            "Persisted SkyPilot handle for %s: %s (job_id=%s)",
+                            tsr_id,
+                            cluster_name,
+                            job_id,
+                        )
+                    except Exception as e:
+                        logger.error(
+                            "Failed to persist SkyPilot handle for %s: %s",
+                            tsr_id,
+                            e,
+                        )
 
             logger.info(
                 "SkyPilot cluster %s launched: job_id=%s launch_id=%s",
