@@ -1875,7 +1875,7 @@ def test_done_marker_env_and_epilogue_injected():
     assert "__gb_on_exit()" in wrapped
     assert "trap __gb_on_exit EXIT" in wrapped
     assert '[ "$rc" -eq 0 ]' in wrapped
-    assert '[ -n "$GB_STEP_DONE_MARKER" ]' in wrapped
+    assert '[ -n "${GB_STEP_DONE_MARKER:-}" ]' in wrapped
     assert wrapped.index("trap __gb_on_exit EXIT") < wrapped.index("echo hi")
 
 

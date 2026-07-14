@@ -282,7 +282,7 @@ from gbserver.environment._skypilot_ssh import (
 _GB_DONE_EPILOGUE = (
     "__gb_on_exit() { "
     "rc=$?; "
-    'if [ "$rc" -eq 0 ] && [ -n "$GB_STEP_DONE_MARKER" ]; then '
+    'if [ "$rc" -eq 0 ] && [ -n "${GB_STEP_DONE_MARKER:-}" ]; then '
     'mkdir -p "$(dirname "$GB_STEP_DONE_MARKER")"; '
     'echo "$rc" > "$GB_STEP_DONE_MARKER"; '
     "fi; }\n"
@@ -523,6 +523,7 @@ class Skypilot(Environment):
         run_metadata: Dict,
         infra: str,
         build_workdir: Optional[str],
+        stored_handle: Optional[dict] = None,
     ) -> bool:
         """True if the job already wrote its success marker (finished while
         gbserver was offline). Read over SSH to the persistent login node, since
@@ -530,11 +531,19 @@ class Skypilot(Environment):
 
         Standalone-only concern; the caller gates on ``is_standalone()``. Never
         raises — any failure returns False so the caller falls through to the
-        F1 reattach / fresh-launch path (F2, epic #48)."""
+        F1 reattach / fresh-launch path (F2, epic #48).
+
+        ``stored_handle`` lets the caller pass an already-read handle so the
+        step row isn't fetched twice on the same relaunch; when omitted it is
+        read here."""
         tsr_id = (run_metadata or {}).get("targetsteprun_id", "")
         # Prefer the path persisted in the F1 handle; fall back to recomputing
         # from build_workdir (both yield the same deterministic path).
-        handle = self._read_stored_handle(run_metadata) or {}
+        handle = (
+            stored_handle
+            if stored_handle is not None
+            else self._read_stored_handle(run_metadata)
+        ) or {}
         marker_path = handle.get("done_marker") or _done_marker_path(
             build_workdir, tsr_id
         )
@@ -974,8 +983,14 @@ class Skypilot(Environment):
             # monitors; the poller no-ops with no cluster recorded). Downstream
             # artifact-binding reconstruction on restart is out of scope here
             # (owned by F4 resume) — this only prevents a wrongful re-run.
+            reattached = False
             if is_standalone() and run_metadata:
-                if await self._marker_completed(run_metadata, infra, build_workdir):
+                # One storage read of the step row serves both the
+                # completion-marker check and the reattach probe below.
+                stored_handle = self._read_stored_handle(run_metadata)
+                if await self._marker_completed(
+                    run_metadata, infra, build_workdir, stored_handle
+                ):
                     logger.info(
                         "Completion marker present for %s; step already "
                         "succeeded — skipping relaunch (launch_id=%s).",
@@ -984,12 +999,10 @@ class Skypilot(Environment):
                     )
                     return
 
-            # Otherwise a relaunch may find the original cluster still running
-            # (host restarted mid-job). Probe the persisted handle and, if the
-            # job is alive, adopt it and skip a duplicate sky.launch (F1).
-            reattached = False
-            if is_standalone() and run_metadata:
-                stored_handle = self._read_stored_handle(run_metadata)
+                # Otherwise a relaunch may find the original cluster still
+                # running (host restarted mid-job). Probe the persisted handle
+                # and, if the job is alive, adopt it and skip a duplicate
+                # sky.launch (F1).
                 if stored_handle:
                     reattached = await self._try_reattach(launch_id, stored_handle)
 
@@ -1055,9 +1068,12 @@ class Skypilot(Environment):
             # Ensure log directory exists for job log streaming
             os.makedirs(f"/tmp/sky-logs/{cluster_name}", exist_ok=True)
 
-            # Execute post-launch tasks (e.g., start evaluator sidecars) if defined
+            # Execute post-launch tasks (e.g., start evaluator sidecars) if
+            # defined. Skip on reattach: the cluster is already running and its
+            # post-launch sidecars were started by the original launch, so
+            # re-running would double them.
             post_launch_task = launcher_config.get("post_launch_task")
-            if post_launch_task:
+            if post_launch_task and not reattached:
                 try:
                     logger.info(
                         "Executing post-launch task on cluster %s (launch_id=%s)",
