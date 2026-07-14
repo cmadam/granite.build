@@ -1,0 +1,87 @@
+# Default parameters for the granite4-350m SFT + full-eval build on a
+# NATIVE Granite.build Kubernetes environment (type: K8s, helm launchers) —
+# NOT the SkyPilot-on-k8s backend.
+#
+# This is the k8s port of recipes/granite4-350m/lsf/sft-eval-full-dataset.
+# The LSF recipe ran open-instruct + the 26-target SAGE suite + BFCL on
+# BlueVela via the SkyPilot LSF backend, reading/writing a shared /proj GPFS
+# filesystem. On k8s there is no shared FS: models, data and checkpoints are
+# Lakehouse (lh://) / HuggingFace (hf:///) artifacts wired through bindings.
+#
+# Override any value with: gb build start --param KEY=VALUE
+# Run with:
+#   gb build start \
+#     -f recipes/granite4-350m/k8s/sft-eval-full-dataset/build.yaml \
+#     --parameters-path recipes/granite4-350m/k8s/sft-eval-full-dataset/parameters.yaml \
+#     --space <your-k8s-space>
+
+# ─── Base model + training data (consumed by sft-training / open-instruct) ───
+# k8s uses artifact URIs, not shared-FS paths. Point these at Lakehouse tables/
+# models or HF repos registered for your space. The LSF equivalents were
+# /proj/granite-build/g4os/granite-4.0-350m-base and the tokenized dataset.
+MODEL_URI: "lh://prod/base_training/models/model_shared/granite-4.0-350m-base/r251014a"
+# open-instruct tokenizes on the fly via dataset_transform_fn, so this should
+# be a raw SFT table/fileset (the LSF recipe consumed pre-tokenized data — see
+# README "Divergences" if you must reuse an already-tokenized dataset).
+TUNING_DATA_URI: "lh://prod/granite_dot_build.public/tables/tulu3"
+
+# ─── SFT hyperparameters (mapped from the LSF sft_config) ───────────────────
+# NUM_EPOCHS=2 in LSF; evals consume the final checkpoint via the binding.
+NUM_EPOCHS: 2
+PER_DEVICE_BATCH_SIZE: "4"
+GRADIENT_ACCUMULATION_STEPS: "2"
+LEARNING_RATE: "1e-5"
+LR_SCHEDULER_TYPE: "linear"
+WARMUP_RATIO: "0.03"
+WEIGHT_DECAY: "0.0"
+CLIP_GRAD_NORM: "1.0"
+MAX_SEQ_LEN: 8192
+SEED: 123
+REDUCE_LOSS: "sum"
+CHECKPOINTING_STEPS: "epoch"
+KEEP_LAST_N_CHECKPOINTS: "5"
+LOGGING_STEPS: "1"
+# Granite-4 chat template used at SFT time. The LSF recipe passed a
+# chat_template.jinja file; on k8s open-instruct selects a named template.
+CHAT_TEMPLATE_NAME: "granite3dot1wodefaultsysmsg"
+
+# ─── Compute (replaces LSF accelerators/zone/memory) ────────────────────────
+# LSF used SFT_ACCELERATORS=H100:8 (tied-embedding FSDP needs >1 process) and
+# EVAL_ACCELERATORS=H100:1. On k8s this is expressed as GPUs-per-node/nodes;
+# the helm launcher requests GPUs from the cluster.
+SFT_NUM_GPUS: 8
+SFT_NUM_NODES: 1
+EVAL_NUM_GPUS: 1
+
+# ─── Eval settings (consumed by the SAGE custom_code targets) ───────────────
+EXPERIMENT: "g4-350m-sft-eval-full"
+BATCH_SIZE: "10"
+MAX_LENGTH: "4096"
+
+# ─── SAGE framework (github.ibm.com/ai-models-architectures/sage) ───────────
+# custom_code clones this repo and runs the same gb_scripts the LSF sage-eval
+# step ran (sage/cluster/gb/scripts/*_slim.sh).
+SAGE_REPO_URL: "github.ibm.com/ai-models-architectures/sage.git"
+SAGE_SETUP_COMMAND: 'git checkout v1.1.2 && pip install -U pip "setuptools<80" wheel && pip install -e .'
+# Fileset holding sage_wrapper.sh + env (HF/GIT tokens). Same artifact used by
+# the BYOSSage / SageLeaderboard templates — replace with your namespace copy.
+SAGE_CONFIG_URI: "lh://prod/granite_dot_build.public/filesets/fileset_shared/sage_prod_config/20250616T191714"
+
+# Per-category SAGE images (carry the sage repo + language toolchains the
+# multiple-* code benchmarks need). These are the same images the LSF step
+# baked in; set as the custom_code k8s.image so the toolchains are present.
+SAGE_OLMES_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025"
+SAGE_CODE_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-code:0.025"
+SAGE_SAFETY_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-safety:0.025"
+SAGE_MULTILINGUAL_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025"
+
+# BigCodeBench external evaluation API (consumed by olmes-bigcodebench).
+OE_EVAL_BCB_API_URL: "http://bigcodebench-server:7860/evaluate/"
+
+# ─── BFCL (function-calling eval) ───────────────────────────────────────────
+# No native-k8s BFCL template exists; this target runs BFCL via custom_code.
+# See README — verify the BFCL repo/entrypoint for your environment.
+BFCL_REPO_URL: "github.ibm.com/ai-models-architectures/sage.git"
+BFCL_MODEL_ID: "ibm-granite/granite-4"
+BFCL_EVAL_NAME: "bfclv3"
+BFCL_TEST_CATEGORIES: "all"

@@ -1,0 +1,672 @@
+######
+# granite4-350m — SFT + full eval suite on a NATIVE Granite.build Kubernetes
+# environment (type: K8s, helm launchers). Port of
+# recipes/granite4-350m/lsf/sft-eval-full-dataset.
+#
+# What changed vs the LSF recipe (environment-specific parts only):
+#   • environment_uri: skypilot/lsf/ibm-bluevela
+#         -> space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+#     (your space must set DEFAULT_ENVIRONMENT to a type:K8s environment).
+#   • SFT step: openinstruct-sft (SkyPilot) -> open-instruct (native k8s step).
+#   • Eval step: sage-eval (SkyPilot) -> custom_code running the SAGE repo
+#     (github.ibm.com/ai-models-architectures/sage) — same gb_scripts, same
+#     26-benchmark suite; only the launcher/plumbing changed.
+#   • Resources: launcher_config.resources{accelerators,cluster,zone,memory}
+#         -> compute_config{num_gpus_per_node,num_nodes} + k8s.image.
+#   • Storage: env:// /proj/... shared-FS paths -> lh:// / hf:/// artifacts
+#     wired through target output->input bindings.
+#
+# The SFT target emits its final checkpoint as the `tuned_checkpoint`
+# artifact; every eval target binds `model: sft-training.tuned_checkpoint`,
+# so the 27 evals stay blocked until training finishes (same DAG as LSF).
+######
+granite.build:
+  name: g4-350m-sft-eval-full-k8s
+  retries:
+    max_retries: 5
+  targets:
+    # ─── SFT training (1) ────────────────────────────────────────────────────
+    sft-training:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model_to_tune:
+          uri: "$${MODEL_URI}"
+        tuning_data:
+          uri: "$${TUNING_DATA_URI}"
+      outputs:
+        tuned_checkpoint:
+          type: model
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/models/{{ space.variables.DEFAULT_LH_MODEL_TABLE }}/g4-350m-sft_{{ run_metadata.targetsteprun_id | short_hash }}_{{ binding.path | path_basename }}
+      steps:
+        - step_uri: space://steps/open-instruct
+          config:
+            tuning_config:
+              chat_template_name: "$${CHAT_TEMPLATE_NAME}"
+              add_special_tokens: ["<|start_of_role|>", "<|end_of_role|>"]
+              use_flash_attn: true
+              gradient_checkpointing: true
+              num_train_epochs: $${NUM_EPOCHS}
+              per_device_train_batch_size: "$${PER_DEVICE_BATCH_SIZE}"
+              gradient_accumulation_steps: "$${GRADIENT_ACCUMULATION_STEPS}"
+              learning_rate: "$${LEARNING_RATE}"
+              lr_scheduler_type: "$${LR_SCHEDULER_TYPE}"
+              warmup_ratio: "$${WARMUP_RATIO}"
+              weight_decay: "$${WEIGHT_DECAY}"
+              clip_grad_norm: "$${CLIP_GRAD_NORM}"
+              max_seq_length: $${MAX_SEQ_LEN}
+              seed: $${SEED}
+              reduce_loss: "$${REDUCE_LOSS}"
+              checkpointing_steps: "$${CHECKPOINTING_STEPS}"
+              keep_last_n_checkpoints: "$${KEEP_LAST_N_CHECKPOINTS}"
+              logging_steps: "$${LOGGING_STEPS}"
+              dataset_local_cache_dir: "/gb-afm-read-write/outputs/open-instruct/dataset_local_cache_dir"
+              dataset_transform_fn: ["sft_tulu_tokenize_and_truncate_v1", "sft_tulu_filter_v1"]
+              dataset_mixer_list:
+                - "{{ bindings.tuning_data.binding.path }}"
+                - "1.0"
+            compute_config:
+              num_gpus_per_node: $${SFT_NUM_GPUS}
+              num_nodes: $${SFT_NUM_NODES}
+
+    # ─── Code (9) ─────────────────────────────────────────────────────────────
+    olmes-cruxeval:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-cruxeval-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_olmes_cruxeval_slim.sh'
+              dir_to_save: "."
+
+    olmes-bigcodebench:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-bigcodebench-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} OE_EVAL_BCB_API_URL=$${OE_EVAL_BCB_API_URL} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_olmes_bigcodebench_slim.sh'
+              dir_to_save: "."
+
+    evalplus-humaneval:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-evalplus-humaneval-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_evalplus_humaneval_slim.sh'
+              dir_to_save: "."
+
+    evalplus-mbpp:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-evalplus-mbpp-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_evalplus_mbpp_slim.sh'
+              dir_to_save: "."
+
+    multiple-sh:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-multiple-sh-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=512 NUM_GPUS=$${EVAL_NUM_GPUS} MULTIPLE_LANG=sh {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_multiple_slim.sh'
+              dir_to_save: "."
+
+    multiple-cpp:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-multiple-cpp-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=512 NUM_GPUS=$${EVAL_NUM_GPUS} MULTIPLE_LANG=cpp {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_multiple_slim.sh'
+              dir_to_save: "."
+
+    multiple-java:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-multiple-java-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=512 NUM_GPUS=$${EVAL_NUM_GPUS} MULTIPLE_LANG=java {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_multiple_slim.sh'
+              dir_to_save: "."
+
+    multiple-js:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-multiple-js-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=512 NUM_GPUS=$${EVAL_NUM_GPUS} MULTIPLE_LANG=js {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_multiple_slim.sh'
+              dir_to_save: "."
+
+    multiple-rs:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-code-multiple-rs-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_CODE_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=512 NUM_GPUS=$${EVAL_NUM_GPUS} MULTIPLE_LANG=rs {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/code_multiple_slim.sh'
+              dir_to_save: "."
+
+    # ─── General (5) ──────────────────────────────────────────────────────────
+    olmes-agi-eval:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-general-agi-eval-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/general_olmes_agi_eval_slim.sh'
+              dir_to_save: "."
+
+    olmes-bbh:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-general-bbh-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/general_olmes_bbh_slim.sh'
+              dir_to_save: "."
+
+    olmes-mmlu-pro:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-general-mmlu-pro-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/general_olmes_mmlu_pro_slim.sh'
+              dir_to_save: "."
+
+    olmes-ifeval:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-general-ifeval-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              # ifeval used batch_size 30 in the LSF recipe.
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=30 MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/general_olmes_ifeval_slim.sh'
+              dir_to_save: "."
+
+    olmes-mmlu-mc:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-general-mmlu-mc-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/general_olmes_mmlu_mc_slim.sh'
+              dir_to_save: "."
+
+    # ─── Math (5) ─────────────────────────────────────────────────────────────
+    olmes-deepmind-math:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-math-deepmind-math-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/math_olmes_deepmind_math_slim.sh'
+              dir_to_save: "."
+
+    olmes-gpqa:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-math-gpqa-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/math_olmes_gpqa_slim.sh'
+              dir_to_save: "."
+
+    olmes-gsm8k:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-math-gsm8k-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/math_olmes_gsm8k_slim.sh'
+              dir_to_save: "."
+
+    olmes-gsm-symbolic:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-math-gsm-symbolic-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/math_olmes_gsm_symbolic_slim.sh'
+              dir_to_save: "."
+
+    olmes-minerva-math:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-math-minerva-math-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/math_olmes_minerva_math_slim.sh'
+              dir_to_save: "."
+
+    # ─── Safety (2) ───────────────────────────────────────────────────────────
+    attaq:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-safety-attaq-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_SAFETY_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/safety_attaq_slim.sh'
+              dir_to_save: "."
+
+    salad-bench:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-safety-salad-bench-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_SAFETY_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/safety_salad_bench_slim.sh'
+              dir_to_save: "."
+
+    # ─── Multilingual (5) ─────────────────────────────────────────────────────
+    global-mmlu:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-global-mmlu-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_MULTILINGUAL_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/multilingual_global_mmlu_slim.sh'
+              dir_to_save: "."
+
+    mgsm:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-mgsm-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_MULTILINGUAL_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/multilingual_mgsm_slim.sh'
+              dir_to_save: "."
+
+    include-ar-de-es-fr:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-ar-de-es-fr-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_MULTILINGUAL_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/multilingual_include_arabic_german_spanish_french_slim.sh'
+              dir_to_save: "."
+
+    include-hi-bn-ta-te:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-hi-bn-ta-te-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_MULTILINGUAL_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/multilingual_include_hindi_bengali_tamil_telugu_slim.sh'
+              dir_to_save: "."
+
+    include-it-ja-ko-nl-pt-zh:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        sage_eval_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-it-ja-ko-nl-pt-zh-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_MULTILINGUAL_IMAGE}"}
+            custom_code_config:
+              github_url: "$${SAGE_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} EXPERIMENT=$${EXPERIMENT} OUTPUT_BASE_PATH=$OUTPUT_PATH BATCH_SIZE=$${BATCH_SIZE} MAX_LENGTH=$${MAX_LENGTH} NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/multilingual_include_italian_japanese_korean_dutch_portuguese_chinese_slim.sh'
+              dir_to_save: "."
+
+    # ─── BFCL (1) ──────────────────────────────────────────────────────────────
+    # No native-k8s BFCL step/template exists yet. This runs BFCL via custom_code;
+    # verify BFCL_REPO_URL and the entrypoint against your environment (see README).
+    bfcl:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+        script: {uri: "$${SAGE_CONFIG_URI}"}
+      outputs:
+        bfcl_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-bfcl-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/custom_code
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+            k8s: {image: "$${SAGE_OLMES_IMAGE}"}
+            custom_code_config:
+              github_url: "$${BFCL_REPO_URL}"
+              setup_command: "$${SAGE_SETUP_COMMAND}"
+              start_command: 'MODEL_PATH={{ bindings.model.binding.path }} MODEL_ID=$${BFCL_MODEL_ID} EXPERIMENT=$${EXPERIMENT} EVAL_NAME=$${BFCL_EVAL_NAME} TEST_CATEGORIES=$${BFCL_TEST_CATEGORIES} OUTPUT_BASE_PATH=$OUTPUT_PATH NUM_GPUS=$${EVAL_NUM_GPUS} {{ bindings.script.binding.path }}/sage_wrapper.sh {{ bindings.script.binding.path }} $OUTPUT_PATH bash sage/cluster/gb/scripts/bfcl_slim.sh'
+              dir_to_save: "."
