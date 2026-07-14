@@ -718,10 +718,36 @@ class BuildWatcher:
         logger.info("filtering by BUILD_ONLY_THIS_NAME: %s", BUILD_ONLY_THIS_NAME)
         return [b for b in pending_builds if b.name == BUILD_ONLY_THIS_NAME]
 
-    def __start_build(self: Self, build: StoredBuild) -> None:
+    def resume_running_builds(self: Self) -> int:
+        """Re-dispatch builds left in RUNNING state by a crashed/stopped runner.
+
+        Standalone startup calls this to recover builds whose runner died while
+        the build was still RUNNING (the normal dispatch loop only picks up
+        SUBMITTED/PENDING/CANCEL_REQUESTED builds, so a RUNNING build is otherwise
+        stranded). Each recovered build is started with ``enable_resume=True`` so
+        the runner reattaches to in-flight targets instead of restarting them.
+
+        Returns the number of builds re-dispatched.
+        """
+        running_builds = self.__get_builds_matching_status(Status.RUNNING)
+        resumed = 0
+        for b in running_builds:
+            if b.name == COMMAND_RUN_BUILD_WATCH_BUILD_NAME:
+                logger.info("local build: %s , skipping resume", b.uuid)
+                continue
+            try:
+                logger.info("resuming RUNNING build id %s", b.uuid)
+                self.__start_build(b, enable_resume=True)
+                resumed += 1
+            except Exception as e:
+                logger.error("failed to resume build %s, error: %s", b.uuid, e)
+        logger.info("BuildWatcher.resume_running_builds re-dispatched %d build(s)", resumed)
+        return resumed
+
+    def __start_build(self: Self, build: StoredBuild, enable_resume: bool = False) -> None:
         build_id = build.uuid
 
-        build_runner = self.__create_build_runner(build)
+        build_runner = self.__create_build_runner(build, enable_resume=enable_resume)
 
         build_thread = threading.Thread(
             target=build_runner.start_and_wait,
@@ -742,8 +768,15 @@ class BuildWatcher:
                 self.all_build_space_uri,
             )
 
-    def __create_build_runner(self: Self, build: StoredBuild) -> AbstractBuildRunner:
-        """Return the AbstractBuildRunner implementation configured for this instance (thread, process, or job)."""
+    def __create_build_runner(
+        self: Self, build: StoredBuild, enable_resume: bool = False
+    ) -> AbstractBuildRunner:
+        """Return the AbstractBuildRunner implementation configured for this instance (thread, process, or job).
+
+        ``enable_resume`` is only honored by the thread runner (the standalone
+        default); the process and job runners do not support it, so a request to
+        resume under those runner types is logged and ignored.
+        """
         runner_type = self.config.buildrunner_type
         if runner_type == "thread":
             return BuildRunner(
@@ -754,6 +787,14 @@ class BuildWatcher:
                 workspace_dir=self.config.workspace_dir,
                 space_uri=self.all_build_space_uri,
                 create_pr=bool(self.gh_token),
+                enable_resume=enable_resume,
+            )
+        if enable_resume:
+            logger.warning(
+                "enable_resume requested for build %s but runner type %s does not "
+                "support resume; starting without resume",
+                build.uuid,
+                runner_type,
             )
         if runner_type == "process":
             self.__warn_space_uri_not_supported(runner_type)

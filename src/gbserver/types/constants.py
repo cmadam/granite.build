@@ -453,6 +453,12 @@ GBSERVER_IBM_CLOUD_SERVER_LOGS_API_KEY = os.getenv("IBM_CLOUD_SERVER_LOGS_API_KE
 GBSERVER_IBM_CLOUD_SERVER_LOGS_API_URL = os.getenv("IBM_CLOUD_SERVER_LOGS_API_URL", "")
 GBSERVER_DEBUG_MODE = os.getenv(ENV_VAR_DEBUG_MODE, None)
 GBSERVER_GIT_COMMIT = os.getenv(ENV_VAR_PREFIX + "_GIT_COMMIT", "")
+# When true, a restarting standalone gbserver scans SQLite for builds left in
+# RUNNING state by a crashed/stopped runner and re-dispatches each with
+# enable_resume=True, so a build that outlived the host process is reattached
+# instead of stranded. Default false: the operator opts in via this env var or
+# forces a one-off scan with `gbserver standalone --resume`.
+ENV_VAR_STANDALONE_AUTO_RESUME = ENV_VAR_PREFIX + "_STANDALONE_AUTO_RESUME"
 # Standalone env-var defaults — the single source of truth for "what does
 # STANDALONE default to". Applied two ways, both via setdefault() so explicit
 # user overrides are always preserved:
@@ -467,6 +473,7 @@ STANDALONE_ENV_DEFAULTS = {
     ENV_VAR_PREFIX + "_PROCEED_WITHOUT_SECRETS": "true",
     ENV_VAR_AUTH_MODE: "apikey",
     ENV_VAR_PREFIX + "_EVENT_PUBLISHING_ENABLED": "true",
+    ENV_VAR_STANDALONE_AUTO_RESUME: "false",
 }
 if is_standalone():
     for _k, _v in STANDALONE_ENV_DEFAULTS.items():
@@ -482,6 +489,13 @@ if is_standalone():
 
 GBSERVER_PROCEED_WITHOUT_SECRETS = getenv_boolean(
     ENV_VAR_PREFIX + "_PROCEED_WITHOUT_SECRETS", False
+)  # default False
+
+# Standalone-only: auto-resume RUNNING builds on startup (see the env-var doc
+# above). Read at call time in the standalone entry path so a runtime-established
+# standalone mode (and check_and_init_for_standalone's constants reload) is honored.
+GBSERVER_STANDALONE_AUTO_RESUME = getenv_boolean(
+    ENV_VAR_STANDALONE_AUTO_RESUME, False
 )  # default False
 
 # Per-user secret manager selection and config. These are read from the

@@ -124,10 +124,33 @@ def _stop_nats_server(proc: "subprocess.Popen | None") -> None:
     logger.info("Embedded nats-server stopped")
 
 
+def _maybe_resume_running_builds(build_watcher, resume: bool) -> None:
+    """Re-dispatch builds left in RUNNING state, if resume is requested.
+
+    The scan runs when either the ``--resume`` flag is passed (``resume=True``) or
+    GBSERVER_STANDALONE_AUTO_RESUME is set. Otherwise nothing is re-dispatched and
+    a hint about ``--resume`` is logged. The config is read fresh here (after
+    check_and_init_for_standalone reloaded constants) so a runtime-established
+    standalone mode is honored.
+    """
+    from gbserver.types.constants import GBSERVER_STANDALONE_AUTO_RESUME
+
+    if resume or GBSERVER_STANDALONE_AUTO_RESUME:
+        trigger = "--resume" if resume else "GBSERVER_STANDALONE_AUTO_RESUME"
+        logger.info("Scanning for RUNNING builds to resume (triggered by %s)", trigger)
+        build_watcher.resume_running_builds()
+    else:
+        logger.info(
+            "Auto-resume disabled; any RUNNING builds left by a prior run will not "
+            "be re-dispatched. Run `gbserver standalone --resume` to recover them."
+        )
+
+
 def _run_standalone(
     port: int,
     space_dir: str,
     host: str = "127.0.0.1",
+    resume: bool = False,
     on_started: Optional[Callable[[], None]] = None,
     on_server_created: Optional[Callable[["uvicorn.Server"], None]] = None,
 ) -> None:
@@ -135,13 +158,17 @@ def _run_standalone(
 
     1. Apply standalone-friendly env var defaults.
     2. Register the "standalone" space in SQLite storage.
-    3. Start a BuildWatcher in a background daemon thread.
-    4. Start the REST API via uvicorn (single worker, in-process).
+    3. Scan for RUNNING builds and, if resume is requested, re-dispatch them.
+    4. Start a BuildWatcher in a background daemon thread.
+    5. Start the REST API via uvicorn (single worker, in-process).
 
     Args:
         port: TCP port for the REST API.
         space_dir: Path to the space directory (contains space.yaml, environments/, steps/).
         host: Bind address for the REST API (default: 127.0.0.1).
+        resume: Force a one-off scan that re-dispatches builds left in RUNNING
+            state (from `gbserver standalone --resume`). Regardless of this flag,
+            the scan also runs when GBSERVER_STANDALONE_AUTO_RESUME is set.
         on_started: Optional callback fired once the uvicorn server has finished startup.
         on_server_created: Optional callback fired with the ``uvicorn.Server`` as
             soon as it is constructed (before ``server.run()``).  Tests that run
@@ -181,6 +208,10 @@ def _run_standalone(
         watch_for_config_changes=False,
         gh_token="",
     )
+
+    # 3.5. Recover builds left RUNNING by a crashed/stopped runner. Run before the
+    #      watcher thread starts so recovery happens once, deterministically.
+    _maybe_resume_running_builds(build_watcher, resume)
 
     watcher_thread = threading.Thread(
         target=build_watcher.start_and_wait,
@@ -250,8 +281,18 @@ def _run_standalone(
     "GBSERVER_CONFIGURATIONS_DIR to point discovery at a different "
     "configurations/ tree.",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    default=False,
+    help="On startup, scan for builds left in RUNNING state by a prior run and "
+    "re-dispatch them with resume enabled. Forces the scan regardless of "
+    "GBSERVER_STANDALONE_AUTO_RESUME.",
+)
 @pass_environment
-def cli(ctx: CliEnvironment, port: int, host: str, space_dir: Optional[str]):
+def cli(
+    ctx: CliEnvironment, port: int, host: str, space_dir: Optional[str], resume: bool
+):
     """Run gbserver standalone -- REST API + BuildWatcher in one process."""
     if space_dir is None:
         space_dir = _default_space_dir()
@@ -264,4 +305,10 @@ def cli(ctx: CliEnvironment, port: int, host: str, space_dir: Optional[str]):
         url = f"http://{browse_host}:{port}"
         logger.info("Frontend + API available at \x1b[1m%s\x1b[0m", url)
 
-    _run_standalone(port=port, host=host, space_dir=space_dir, on_started=_log_ready)
+    _run_standalone(
+        port=port,
+        host=host,
+        space_dir=space_dir,
+        resume=resume,
+        on_started=_log_ready,
+    )
