@@ -21,7 +21,7 @@ import socket
 import threading
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -132,3 +132,83 @@ class TestStandaloneCommand:
                 if server is not None:
                     server.should_exit = True
                 thread.join(timeout=15)
+
+
+class TestAutoResumeConfig:
+    """The GBSERVER_STANDALONE_AUTO_RESUME standalone default (issue #50)."""
+
+    def test_env_var_in_standalone_defaults(self):
+        """Auto-resume is part of STANDALONE_ENV_DEFAULTS, defaulting to 'false'."""
+        from gbserver.types.constants import (
+            ENV_VAR_STANDALONE_AUTO_RESUME,
+            STANDALONE_ENV_DEFAULTS,
+        )
+
+        assert ENV_VAR_STANDALONE_AUTO_RESUME in STANDALONE_ENV_DEFAULTS
+        assert STANDALONE_ENV_DEFAULTS[ENV_VAR_STANDALONE_AUTO_RESUME] == "false"
+
+    def test_parsed_constant_defaults_false(self):
+        """With the env var unset, the parsed boolean constant is False."""
+        from gbserver.types.constants import (
+            ENV_VAR_STANDALONE_AUTO_RESUME,
+            getenv_boolean,
+        )
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(ENV_VAR_STANDALONE_AUTO_RESUME, None)
+            assert getenv_boolean(ENV_VAR_STANDALONE_AUTO_RESUME, False) is False
+
+
+class TestResumeFlagWiring:
+    """The `standalone --resume` flag is threaded through to _run_standalone."""
+
+    def _invoke(self, *args):
+        # Invoke via cli.main(standalone_mode=False) rather than CliRunner: the
+        # latter swaps sys.stdout for a buffer it later closes, which collides with
+        # the module's logging StreamHandler ("I/O operation on closed file").
+        from gbserver.commands import command_standalone
+
+        with patch.object(command_standalone, "_run_standalone") as mock_run:
+            command_standalone.cli.main(
+                ["--space-dir", str(STANDALONE_SPACE_DIR), *args],
+                standalone_mode=False,
+            )
+        assert mock_run.called
+        return mock_run
+
+    def test_resume_flag_forwards_true(self):
+        mock_run = self._invoke("--resume")
+        assert mock_run.call_args.kwargs["resume"] is True
+
+    def test_no_resume_flag_forwards_false(self):
+        mock_run = self._invoke()
+        assert mock_run.call_args.kwargs["resume"] is False
+
+
+class TestMaybeResumeRunningBuilds:
+    """The startup resume trigger: --resume flag OR the auto-resume config."""
+
+    def _run(self, resume, auto_resume_env):
+        import gbserver.types.constants as constants
+        from gbserver.commands import command_standalone
+
+        watcher = MagicMock()
+        # The helper imports GBSERVER_STANDALONE_AUTO_RESUME from constants at call
+        # time, so patching the module attribute controls the config branch.
+        with patch.object(
+            constants, "GBSERVER_STANDALONE_AUTO_RESUME", auto_resume_env
+        ):
+            command_standalone._maybe_resume_running_builds(watcher, resume)
+        return watcher
+
+    def test_resume_flag_triggers_scan(self):
+        watcher = self._run(resume=True, auto_resume_env=False)
+        watcher.resume_running_builds.assert_called_once_with()
+
+    def test_auto_resume_env_triggers_scan(self):
+        watcher = self._run(resume=False, auto_resume_env=True)
+        watcher.resume_running_builds.assert_called_once_with()
+
+    def test_disabled_does_not_scan(self):
+        watcher = self._run(resume=False, auto_resume_env=False)
+        watcher.resume_running_builds.assert_not_called()
