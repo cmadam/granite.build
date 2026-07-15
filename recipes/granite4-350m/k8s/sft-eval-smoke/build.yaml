@@ -1,0 +1,354 @@
+######
+# granite4-350m — SMOKE build: fast SFT (tiny data fraction) + hfpush + only the
+# multilingual (5) and bfcl (1) evals. Purpose: validate the full train→hfpush→eval
+# path end-to-end quickly (this is the path that previously failed on hfpush).
+#
+# Same steps/images as sft-eval-full-dataset; training uses DATA_FRACTION=0.00001
+# and NUM_EPOCHS=1. Evals: byoi with the SAGE repo baked into the images.
+#
+# Run:
+#   gb build start -f recipes/granite4-350m/k8s/sft-eval-smoke/build.yaml \
+#     --parameters-path recipes/granite4-350m/k8s/sft-eval-smoke/parameters.yaml \
+#     --space <your-k8s-space>
+######
+granite.build:
+  name: g4-350m-sft-eval-smoke-k8s
+  retries:
+    max_retries: 5
+  targets:
+    # ─── SFT training (full fine-tune) ───────────────────────────────────────
+    sft-training:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model_to_tune:
+          uri: "$${MODEL_URI}"
+        tuning_data:
+          uri: "$${TUNING_DATA_URI}"
+      outputs:
+        tuned_checkpoint:
+          type: model
+          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-sft_{{ run_metadata.targetsteprun_id | short_hash }}_{{ binding.path | path_basename }}
+      steps:
+        - step_uri: space://steps/open-instruct
+          config:
+            k8s:
+              image: "$${SFT_IMAGE}"
+            tuning_config:
+              chat_template_name: "$${CHAT_TEMPLATE_NAME}"
+              add_special_tokens: ["<|start_of_role|>", "<|end_of_role|>"]
+              use_flash_attn: true
+              gradient_checkpointing: true
+              num_train_epochs: $${NUM_EPOCHS}
+              per_device_train_batch_size: "$${PER_DEVICE_BATCH_SIZE}"
+              gradient_accumulation_steps: "$${GRADIENT_ACCUMULATION_STEPS}"
+              learning_rate: "$${LEARNING_RATE}"
+              lr_scheduler_type: "$${LR_SCHEDULER_TYPE}"
+              warmup_ratio: "$${WARMUP_RATIO}"
+              weight_decay: "$${WEIGHT_DECAY}"
+              clip_grad_norm: "$${CLIP_GRAD_NORM}"
+              max_seq_length: $${MAX_SEQ_LEN}
+              seed: $${SEED}
+              reduce_loss: "$${REDUCE_LOSS}"
+              checkpointing_steps: "$${CHECKPOINTING_STEPS}"
+              keep_last_n_checkpoints: "$${KEEP_LAST_N_CHECKPOINTS}"
+              logging_steps: "$${LOGGING_STEPS}"
+              dataset_transform_fn: ["sft_tulu_tokenize_and_truncate_v1", "sft_tulu_filter_v1"]
+              dataset_mixer_list: ["{{ bindings.tuning_data.binding.path }}/data/*.parquet", "$${DATA_FRACTION}"]
+            compute_config:
+              num_gpus_per_node: $${SFT_NUM_GPUS}
+              num_nodes: $${SFT_NUM_NODES}
+    global-mmlu:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        eval_log:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-global-mmlu-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_MULTILINGUAL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+                UV_CACHE_DIR:
+                  value: "/tmp/uv-cache"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  export EXPERIMENT=$${EXPERIMENT}
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export NUM_GPUS=$${EVAL_NUM_GPUS}
+                  export MAX_LENGTH=$${MAX_LENGTH}
+                  export BATCH_SIZE=$${BATCH_SIZE}
+                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
+                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-global-mmlu.log
+                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_global_mmlu.sh 2>&1 | tee "$LOG"
+                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    mgsm:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        eval_log:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-mgsm-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_MULTILINGUAL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+                UV_CACHE_DIR:
+                  value: "/tmp/uv-cache"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  export EXPERIMENT=$${EXPERIMENT}
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export NUM_GPUS=$${EVAL_NUM_GPUS}
+                  export MAX_LENGTH=$${MAX_LENGTH}
+                  export BATCH_SIZE=$${BATCH_SIZE}
+                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
+                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-mgsm.log
+                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_mgsm.sh 2>&1 | tee "$LOG"
+                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-ar-de-es-fr:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        eval_log:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-european-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_MULTILINGUAL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+                UV_CACHE_DIR:
+                  value: "/tmp/uv-cache"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  export EXPERIMENT=$${EXPERIMENT}
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export NUM_GPUS=$${EVAL_NUM_GPUS}
+                  export MAX_LENGTH=$${MAX_LENGTH}
+                  export BATCH_SIZE=$${BATCH_SIZE}
+                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
+                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-european.log
+                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_arabic_german_spanish_french.sh 2>&1 | tee "$LOG"
+                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-hi-bn-ta-te:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        eval_log:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-south-asian-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_MULTILINGUAL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+                UV_CACHE_DIR:
+                  value: "/tmp/uv-cache"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  export EXPERIMENT=$${EXPERIMENT}
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export NUM_GPUS=$${EVAL_NUM_GPUS}
+                  export MAX_LENGTH=$${MAX_LENGTH}
+                  export BATCH_SIZE=$${BATCH_SIZE}
+                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
+                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-south-asian.log
+                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_hindi_bengali_tamil_telugu.sh 2>&1 | tee "$LOG"
+                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-it-ja-ko-nl-pt-zh:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        eval_log:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-multilingual-include-cjk-others-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_MULTILINGUAL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+                UV_CACHE_DIR:
+                  value: "/tmp/uv-cache"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  export EXPERIMENT=$${EXPERIMENT}
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export NUM_GPUS=$${EVAL_NUM_GPUS}
+                  export MAX_LENGTH=$${MAX_LENGTH}
+                  export BATCH_SIZE=$${BATCH_SIZE}
+                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
+                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-cjk-others.log
+                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_italian_japanese_korean_dutch_portuguese_chinese.sh 2>&1 | tee "$LOG"
+                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    bfcl:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        model: {binding: sft-training.tuned_checkpoint}
+      outputs:
+        bfcl_results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-bfcl-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+              num_nodes: 1
+              total_memory_per_node: 96Gi
+              num_cpus_per_node: 8
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${BFCL_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+                  export MODEL_PATH="{{ bindings.model.binding.path }}"
+                  export MODEL_ID="$${BFCL_MODEL_ID}"
+                  export EXP_NAME="$${EXPERIMENT}"
+                  export OUTPUT_DIR="${OUTPUT_BASE_PATH}/$${EXPERIMENT}/$${BFCL_EVAL_NAME}"
+                  export TEST_CATEGORIES="$${BFCL_TEST_CATEGORIES}"
+                  export NUM_GPUS_GENERATE=$${EVAL_NUM_GPUS}
+                  export NUM_GPUS_EVALUATE=$${EVAL_NUM_GPUS}
+                  export GPU_MEMORY_UTILIZATION="0.5"
+                  export VLLM_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+                  export VLLM_WORKER_MULTIPROC_METHOD=spawn
+                  export VLLM_SKIP_P2P_CHECK=1
+                  export NCCL_IGNORE_DISABLED_P2P=1
+                  export PYTHONUNBUFFERED=1
+                  mkdir -p "$OUTPUT_DIR"
+                  bash /workspace/scripts/run-bfcl.sh 2>&1 | tee "${OUTPUT_DIR}/${EXP_NAME}-bfcl.log"
+                  RESULT_FILE=$(find "$OUTPUT_DIR" -type f \( -name '*score*.json' -o -name '*summary*.json' -o -name 'BFCL_*.json' \) -printf '%T@ %p\n' | sort -nr | awk 'NR==1{print $2}')
+                  if [ -z "$RESULT_FILE" ]; then echo "ERROR: no BFCL result json in $OUTPUT_DIR"; find "$OUTPUT_DIR" -maxdepth 2 -type f | head -20; exit 1; fi
+                  echo "LLMB_ARTIFACT_ID:bfcl_results LLMB_ARTIFACT_PATH:${RESULT_FILE}"
+    # ─── Result exporter (runs after all evals via wait_for_push) ─────────────
+    export-results:
+      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      inputs:
+        wait_global_mmlu: {binding: global-mmlu.eval_log, wait_for_push: true}
+        wait_mgsm: {binding: mgsm.eval_log, wait_for_push: true}
+        wait_include_ar_de_es_fr: {binding: include-ar-de-es-fr.eval_log, wait_for_push: true}
+        wait_include_hi_bn_ta_te: {binding: include-hi-bn-ta-te.eval_log, wait_for_push: true}
+        wait_include_it_ja_ko_nl_pt_zh: {binding: include-it-ja-ko-nl-pt-zh.eval_log, wait_for_push: true}
+        wait_bfcl: {binding: bfcl.bfcl_results, wait_for_push: true}
+      outputs:
+        results:
+          type: fileset
+          uri: lh://{{ space.variables.DEFAULT_LH_ENVIRONMENT }}/{{ space.variables.DEFAULT_LH_NAMESPACE }}/filesets/{{ space.variables.DEFAULT_LH_FILESET_TABLE }}/g4-350m-eval-results-{{ run_metadata.targetsteprun_id | short_hash }}
+      steps:
+        - step_uri: space://steps/byoi
+          config:
+            compute_config:
+              num_gpus_per_node: 0
+              num_nodes: 1
+              total_memory_per_node: 10Gi
+              num_cpus_per_node: 1
+            byoi_config:
+              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+            k8s:
+              image: "$${SAGE_OLMES_IMAGE}"
+              env:
+                OUTPUT_BASE_PATH:
+                  value: "/gb-read-write/sage"
+              additional_files:
+                "/tmp/command.sh": |
+                  set -e
+                  cd /workspace/sage/sage/exporters/
+                  python exporter.py -in-folder ${OUTPUT_BASE_PATH}/$${EXPERIMENT} -stack granite4-instruct -o ${OUTPUT_BASE_PATH}/$${EXPERIMENT}/$${EXPERIMENT}.csv
+                  echo "LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:${OUTPUT_BASE_PATH}/$${EXPERIMENT}"

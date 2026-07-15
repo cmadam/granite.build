@@ -1,0 +1,58 @@
+# Parameters for the granite4-350m SMOKE build (native k8s, type: K8s).
+#
+# Purpose: validate the full train → hfpush → eval path quickly. Training runs on a
+# tiny fraction of the dataset for 1 epoch; only the multilingual (5) + bfcl (1)
+# evals run. Same steps and images as ../sft-eval-full-dataset.
+#
+# Run:
+#   gb build start \
+#     -f recipes/granite4-350m/k8s/sft-eval-smoke/build.yaml \
+#     --parameters-path recipes/granite4-350m/k8s/sft-eval-smoke/parameters.yaml \
+#     --space <your-k8s-space>
+
+# ─── Base model + training data (HuggingFace) ───────────────────────────────
+MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
+TUNING_DATA_URI: "hf://huggingface.co/datasets/allenai/tulu-3-sft-mixture"
+# Tiny fraction — smoke only. This trains on a handful of examples so the whole
+# train → hfpush → eval path completes fast.
+DATA_FRACTION: "0.00001"
+
+# ─── Training image (pinned — matches BlueVela) ─────────────────────────────
+SFT_IMAGE: "us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda"
+
+# ─── SFT hyperparameters (fast) ─────────────────────────────────────────────
+NUM_EPOCHS: 1
+PER_DEVICE_BATCH_SIZE: "4"
+GRADIENT_ACCUMULATION_STEPS: "2"
+LEARNING_RATE: "1e-5"
+LR_SCHEDULER_TYPE: "linear"
+WARMUP_RATIO: "0.03"
+WEIGHT_DECAY: "0.0"
+CLIP_GRAD_NORM: "1.0"
+MAX_SEQ_LEN: 8192
+SEED: 123
+REDUCE_LOSS: "sum"
+CHECKPOINTING_STEPS: "epoch"
+KEEP_LAST_N_CHECKPOINTS: "1"
+LOGGING_STEPS: "1"
+CHAT_TEMPLATE_NAME: "granite3dot1wodefaultsysmsg"
+
+# ─── Compute (small for a fast smoke run) ───────────────────────────────────
+SFT_NUM_GPUS: 2
+SFT_NUM_NODES: 1
+EVAL_NUM_GPUS: 1
+
+# ─── Eval settings (multilingual + bfcl only) ───────────────────────────────
+EXPERIMENT: "g4-350m-sft-eval-smoke"
+BATCH_SIZE: "10"
+MAX_LENGTH: "4096"
+
+# Multilingual eval image (SAGE repo baked in) + exporter (uses the olmes image).
+SAGE_MULTILINGUAL_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025"
+SAGE_OLMES_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025"
+
+# ─── BFCL (byoi with the bfcl image) ────────────────────────────────────────
+BFCL_IMAGE: "us.icr.io/cil15-shared-registry/bfcl-py311:0.02"
+BFCL_MODEL_ID: "ibm-granite/granite-4"
+BFCL_EVAL_NAME: "bfclv3"
+BFCL_TEST_CATEGORIES: "all"
