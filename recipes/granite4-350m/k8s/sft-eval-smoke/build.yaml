@@ -33,9 +33,14 @@ granite.build:
           config:
             k8s:
               image: "$${SFT_IMAGE}"
+              env:
+                HF_TOKEN:
+                  valueFrom:
+                    secretKeyRef:
+                      name: "{{ setup_config.space.secret }}"
+                      key: "HF_TOKEN"
             tuning_config:
               chat_template_name: "$${CHAT_TEMPLATE_NAME}"
-              add_special_tokens: ["<|start_of_role|>", "<|end_of_role|>"]
               use_flash_attn: true
               gradient_checkpointing: true
               num_train_epochs: $${NUM_EPOCHS}
@@ -53,7 +58,7 @@ granite.build:
               keep_last_n_checkpoints: "$${KEEP_LAST_N_CHECKPOINTS}"
               logging_steps: "$${LOGGING_STEPS}"
               dataset_transform_fn: ["sft_tulu_tokenize_and_truncate_v1", "sft_tulu_filter_v1"]
-              dataset_mixer_list: ["{{ bindings.tuning_data.binding.path }}/data/*.parquet", "$${DATA_FRACTION}"]
+              dataset_mixer_list: ["allenai/tulu-3-sft-mixture", "$${DATA_FRACTION}"]
             compute_config:
               num_gpus_per_node: $${SFT_NUM_GPUS}
               num_nodes: $${SFT_NUM_NODES}

@@ -15,7 +15,7 @@ MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
 TUNING_DATA_URI: "hf://huggingface.co/datasets/allenai/tulu-3-sft-mixture"
 # Tiny fraction — smoke only. This trains on a handful of examples so the whole
 # train → hfpush → eval path completes fast.
-DATA_FRACTION: "0.00001"
+DATA_FRACTION: "0.0001"
 
 # ─── Training image (pinned — matches BlueVela) ─────────────────────────────
 SFT_IMAGE: "us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda"
