@@ -241,7 +241,7 @@ granite.build:
                 NCCL_P2P_DISABLE:
                   value: "1"
                 NCCL_DEBUG:
-                  value: "INFO"
+                  value: "WARN"
             tuning_config:
               # Pre-tokenized dataset produced by `tokenize`, pushed to HF and pulled back
               # here (binding.path = local download dir); load_from_disk-compatible, so this
