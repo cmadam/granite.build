@@ -22,7 +22,7 @@ SFT_IMAGE: "us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda"
 
 # ─── SFT hyperparameters (fast) ─────────────────────────────────────────────
 NUM_EPOCHS: 1
-PER_DEVICE_BATCH_SIZE: "4"
+PER_DEVICE_BATCH_SIZE: "1"
 GRADIENT_ACCUMULATION_STEPS: "2"
 LEARNING_RATE: "1e-5"
 LR_SCHEDULER_TYPE: "linear"
@@ -34,7 +34,13 @@ SEED: 123
 REDUCE_LOSS: "sum"
 CHECKPOINTING_STEPS: "epoch"
 KEEP_LAST_N_CHECKPOINTS: "1"
-LOGGING_STEPS: "1"
+# Set larger than the smoke's total steps (~23) so the per-step logging block never
+# fires: the pinned open-instruct image's finetune.py bugs out there
+# (accelerator.reduce(total_grad_norm_sq) is passed a float, which this accelerate
+# version rejects), crashing training at the first logging step. NOTE: "0" does NOT
+# work — falsy values are dropped in the config merge and fall back to the step
+# default (1). A real run needs a fixed image. See build.yaml sft-training note.
+LOGGING_STEPS: "100000"
 CHAT_TEMPLATE_NAME: "granite3dot1wodefaultsysmsg"
 
 # ─── Compute (small for a fast smoke run) ───────────────────────────────────

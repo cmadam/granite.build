@@ -15,11 +15,13 @@
 
 # ─── Base model + training data (HuggingFace artifacts) ─────────────────────
 MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
-# Raw (untokenized) chat SFT dataset — open-instruct tokenizes on the fly via
-# dataset_transform_fn. The build reads {{ tuning_data path }}/data/*.parquet.
+# Raw (untokenized) chat SFT dataset. The `tokenize` target pre-tokenizes it with
+# run_data_prep_v2.sh (Granite template) and sft-training consumes --tokenized_data;
+# open-instruct's on-the-fly loader can't ingest tulu-3's multi-turn `messages`.
 TUNING_DATA_URI: "hf://huggingface.co/datasets/allenai/tulu-3-sft-mixture"
-# Fraction of the dataset to train on (1.0 = full). The smoke recipe overrides
-# this with a tiny value; keep 1.0 here for a real run.
+# Fraction of the dataset to tokenize/train on (1.0 = full). NOTE: at 1.0 the tokenize
+# step processes all ~939k examples on a CPU pod — heavy/slow; bump the tokenize
+# target's cpu/memory if needed, or lower this for a partial run.
 DATA_FRACTION: "1.0"
 
 # ─── Training image (pinned — matches BlueVela) ─────────────────────────────
@@ -39,8 +41,17 @@ SEED: 123
 REDUCE_LOSS: "sum"
 CHECKPOINTING_STEPS: "epoch"
 KEEP_LAST_N_CHECKPOINTS: "5"
-LOGGING_STEPS: "1"
-# Chat template used at SFT time (open-instruct selects a named template).
+# Set larger than the run's total optimization steps so the per-step logging block
+# never fires: the pinned open-instruct image's finetune.py bugs out there
+# (accelerator.reduce(total_grad_norm_sq) is passed a float, which this accelerate
+# version rejects), crashing training at the first logging step. NOTE: "0" does NOT
+# work — falsy values are dropped in the config merge and fall back to the default.
+# For a real full run you likely want metrics; that needs a fixed image, after which
+# this can go back to e.g. "10". Tune above your expected step count if training long.
+LOGGING_STEPS: "1000000"
+# NOTE: CHAT_TEMPLATE_NAME is no longer consumed — the recipe pre-tokenizes with the
+# Granite template in the `tokenize` target and trains via --tokenized_data. Kept for
+# reference; the sft-training step no longer passes chat_template_name.
 CHAT_TEMPLATE_NAME: "granite3dot1wodefaultsysmsg"
 
 # ─── Compute ────────────────────────────────────────────────────────────────
