@@ -14,7 +14,7 @@
 granite.build:
   name: g4-350m-sft-eval-smoke-k8s
   retries:
-    max_retries: 1
+    max_retries: 2
   targets:
     # ─── Tokenize tulu-3 with the Granite template (CPU) → --tokenized_data ───
     # Merged seed+tokenize: decode the embedded Granite template, subsample tulu-3,
@@ -221,7 +221,11 @@ granite.build:
           type: model
           uri: hf://huggingface.co/datasets/ibm-research/g4-350m-sft_{{ run_metadata.targetsteprun_id | short_hash }}_{{ binding.path | path_basename }}
       steps:
-        - step_uri: space://steps/open-instruct
+        # Forked open-instruct step: narrows the tuned_checkpoint log_monitor
+        # regex to the final HF checkpoint (…epoch_hf…) so it fires once, not
+        # twice. Override lives in cmadam/assets@gbspace-config-dev; everything
+        # else still resolves from the registered space.
+        - step_uri: git+ssh://github.ibm.com/cmadam/assets.git@gbspace-config-dev#subdirectory=steps/open-instruct
           config:
             k8s:
               image: "$${SFT_IMAGE}"
@@ -244,6 +248,10 @@ granite.build:
               # here (binding.path = local download dir); load_from_disk-compatible, so this
               # bypasses open-instruct's raw-data loader entirely.
               tokenized_data: "{{ bindings.tokenized_dataset.binding.path }}"
+              # Granite chat template — applied to the tokenizer so that
+              # save_pretrained() bakes it into tokenizer_config.json; evals
+              # need it for apply_chat_template(). The base model ships without one.
+              chat_template_name: "$${CHAT_TEMPLATE_NAME}"
               # Destination for the HF-converted checkpoint. The k8s open-instruct step
               # (unlike the LSF one) never sets --hf_dir, so at epoch end the HF conversion
               # does os.path.join(args.hf_dir, ...) with hf_dir=None → TypeError. Set it to a
@@ -563,4 +571,7 @@ granite.build:
                   set -e
                   cd /workspace/sage/sage/exporters/
                   python exporter.py -in-folder ${OUTPUT_BASE_PATH}/$${EXPERIMENT} -stack granite4-instruct -o ${OUTPUT_BASE_PATH}/$${EXPERIMENT}/$${EXPERIMENT}.csv
+                  # Redact HF tokens from SAGE-generated scripts before hfpush;
+                  # HuggingFace rejects commits containing valid hf_* secrets.
+                  find ${OUTPUT_BASE_PATH}/$${EXPERIMENT} -name "*.sh" -exec sed -i 's/hf_[A-Za-z0-9]\{10,\}/REDACTED/g' {} +
                   echo "LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:${OUTPUT_BASE_PATH}/$${EXPERIMENT}"
