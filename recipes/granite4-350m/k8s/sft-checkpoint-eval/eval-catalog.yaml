@@ -1,0 +1,309 @@
+# Evaluation catalog for the k8s sft-checkpoint-eval generator.
+#
+# Single source of truth for the 27 evaluations, transcribed from the k8s
+# byoi targets in
+# recipes/granite4-350m/k8s/sft-eval-full-dataset/build.yaml. generate_build.py
+# reads this file to emit per-epoch checkpoint eval targets; keep it in sync if
+# the sft-eval-full-dataset suite changes.
+#
+# Unlike the LSF rl-checkpoint-eval catalog (which describes sage-eval/bfcl-eval
+# step configs), this catalog describes the k8s byoi world: each sage eval runs
+# a non-slim gb script inside a per-category image and tees a log; bfcl runs
+# run-bfcl.sh in its own image. The eval NAMES, per-eval `category`, and named
+# `sets` MUST match lsf/rl-checkpoint-eval/eval-catalog.yaml exactly.
+#
+# Each eval entry:
+#   category    — one of: code, general, math, safety, multilingual, bfcl.
+#   image       — parameter NAME whose value is the byoi container image; the
+#                 build references it as "$${<image>}" (e.g. SAGE_OLMES_IMAGE).
+#   script      — non-slim sage gb script basename run as
+#                 `bash /workspace/sage/sage/cluster/gb/scripts/<script>`
+#                 (sage evals only; omitted for bfcl).
+#   log_suffix  — the tee'd log is
+#                 <OUTPUT_BASE_PATH>/$${EXPERIMENT}-ep_<M>-<log_suffix>.log
+#                 (sage evals only; omitted for bfcl).
+#   extra_env   — dict of extra or overriding exports layered on top of the
+#                 standard EXPERIMENT/MODEL_PATH/NUM_GPUS/MAX_LENGTH/BATCH_SIZE
+#                 exports (a key here may override one of those, e.g.
+#                 MAX_LENGTH or BATCH_SIZE). {} if none. Values may be literals
+#                 or "$${PARAM}" placeholders substituted at `gb build start`
+#                 time. Recognized overrides:
+#                   MULTIPLE_LANG + MAX_LENGTH (multiple-*, MAX_LENGTH=512)
+#                   BATCH_SIZE (olmes-ifeval hardcodes 30 in the k8s build)
+#                   OE_EVAL_BCB_API_URL (olmes-bigcodebench)
+
+evals:
+  # ─── Code (9) ───────────────────────────────────────────────────────────────
+  olmes-cruxeval:
+    category: code
+    image: SAGE_OLMES_IMAGE
+    script: code_olmes_cruxeval.sh
+    log_suffix: code-olmes-cruxeval
+    extra_env: {}
+
+  olmes-bigcodebench:
+    category: code
+    image: SAGE_OLMES_IMAGE
+    script: code_olmes_bigcodebench.sh
+    log_suffix: code-olmes-bigcodebench
+    extra_env:
+      OE_EVAL_BCB_API_URL: "$${OE_EVAL_BCB_API_URL}"
+
+  evalplus-humaneval:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_evalplus_humaneval.sh
+    log_suffix: code-evalplus-humaneval
+    extra_env: {}
+
+  evalplus-mbpp:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_evalplus_mbpp.sh
+    log_suffix: code-evalplus-mbpp
+    extra_env: {}
+
+  multiple-sh:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_multiple.sh
+    log_suffix: multi-sh
+    extra_env:
+      MULTIPLE_LANG: "sh"
+      MAX_LENGTH: "512"
+
+  multiple-cpp:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_multiple.sh
+    log_suffix: multi-cpp
+    extra_env:
+      MULTIPLE_LANG: "cpp"
+      MAX_LENGTH: "512"
+
+  multiple-java:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_multiple.sh
+    log_suffix: multi-java
+    extra_env:
+      MULTIPLE_LANG: "java"
+      MAX_LENGTH: "512"
+
+  multiple-js:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_multiple.sh
+    log_suffix: multi-js
+    extra_env:
+      MULTIPLE_LANG: "js"
+      MAX_LENGTH: "512"
+
+  multiple-rs:
+    category: code
+    image: SAGE_CODE_IMAGE
+    script: code_multiple.sh
+    log_suffix: multi-rs
+    extra_env:
+      MULTIPLE_LANG: "rs"
+      MAX_LENGTH: "512"
+
+  # ─── General (5) ──────────────────────────────────────────────────────────────
+  olmes-agi-eval:
+    category: general
+    image: SAGE_OLMES_IMAGE
+    script: general_olmes_agi_eval.sh
+    log_suffix: general-olmes-agi-eval
+    extra_env: {}
+
+  olmes-bbh:
+    category: general
+    image: SAGE_OLMES_IMAGE
+    script: general_olmes_bbh.sh
+    log_suffix: general-olmes-bbh
+    extra_env: {}
+
+  olmes-mmlu-pro:
+    category: general
+    image: SAGE_OLMES_IMAGE
+    script: general_olmes_mmlu_pro.sh
+    log_suffix: general-olmes-mmlu-pro
+    extra_env: {}
+
+  olmes-ifeval:
+    category: general
+    image: SAGE_OLMES_IMAGE
+    script: general_olmes_ifeval.sh
+    log_suffix: general-olmes-ifeval
+    # The k8s build hardcodes BATCH_SIZE=30 for ifeval (overriding the standard
+    # $${BATCH_SIZE} export).
+    extra_env:
+      BATCH_SIZE: "30"
+
+  olmes-mmlu-mc:
+    category: general
+    image: SAGE_OLMES_IMAGE
+    script: general_olmes_mmlu_mc.sh
+    log_suffix: general-olmes-mmlu-mc
+    extra_env: {}
+
+  # ─── Math (5) ───────────────────────────────────────────────────────────────
+  olmes-deepmind-math:
+    category: math
+    image: SAGE_OLMES_IMAGE
+    script: math_olmes_deepmind_math.sh
+    log_suffix: math-olmes-deepmind-math
+    extra_env: {}
+
+  olmes-gpqa:
+    category: math
+    image: SAGE_OLMES_IMAGE
+    script: math_olmes_gpqa.sh
+    log_suffix: math-olmes-gpqa
+    extra_env: {}
+
+  olmes-gsm8k:
+    category: math
+    image: SAGE_OLMES_IMAGE
+    script: math_olmes_gsm8k.sh
+    log_suffix: math-olmes-gsm8k
+    extra_env: {}
+
+  olmes-gsm-symbolic:
+    category: math
+    image: SAGE_OLMES_IMAGE
+    script: math_olmes_gsm_symbolic.sh
+    log_suffix: math-olmes-gsm-symbolic
+    extra_env: {}
+
+  olmes-minerva-math:
+    category: math
+    image: SAGE_OLMES_IMAGE
+    script: math_olmes_minerva_math.sh
+    log_suffix: math-olmes-minerva-math
+    extra_env: {}
+
+  # ─── Safety (2) ─────────────────────────────────────────────────────────────
+  attaq:
+    category: safety
+    image: SAGE_SAFETY_IMAGE
+    script: safety_attaq.sh
+    log_suffix: safety-attaq
+    extra_env: {}
+
+  salad-bench:
+    category: safety
+    image: SAGE_SAFETY_IMAGE
+    script: safety_salad_bench.sh
+    log_suffix: safety-salad-bench
+    extra_env: {}
+
+  # ─── Multilingual (5) ─────────────────────────────────────────────────────────
+  global-mmlu:
+    category: multilingual
+    image: SAGE_MULTILINGUAL_IMAGE
+    script: multilingual_global_mmlu.sh
+    log_suffix: multilingual-global-mmlu
+    extra_env: {}
+
+  mgsm:
+    category: multilingual
+    image: SAGE_MULTILINGUAL_IMAGE
+    script: multilingual_mgsm.sh
+    log_suffix: multilingual-mgsm
+    extra_env: {}
+
+  include-ar-de-es-fr:
+    category: multilingual
+    image: SAGE_MULTILINGUAL_IMAGE
+    script: multilingual_include_arabic_german_spanish_french.sh
+    log_suffix: multilingual-include-european
+    extra_env: {}
+
+  include-hi-bn-ta-te:
+    category: multilingual
+    image: SAGE_MULTILINGUAL_IMAGE
+    script: multilingual_include_hindi_bengali_tamil_telugu.sh
+    log_suffix: multilingual-include-south-asian
+    extra_env: {}
+
+  include-it-ja-ko-nl-pt-zh:
+    category: multilingual
+    image: SAGE_MULTILINGUAL_IMAGE
+    script: multilingual_include_italian_japanese_korean_dutch_portuguese_chinese.sh
+    log_suffix: multilingual-include-cjk-others
+    extra_env: {}
+
+  # ─── BFCL (1) ─────────────────────────────────────────────────────────────────
+  bfcl:
+    category: bfcl
+    # The bfcl image runs run-bfcl.sh (not a sage gb script); no script or
+    # log_suffix. The byoi image is "$${BFCL_IMAGE}".
+    image: BFCL_IMAGE
+    extra_env: {}
+
+# Named selections referenced by the EVAL_SETS parameter. A set name expands to
+# its list of eval names; individual eval names may also be listed directly in
+# EVAL_SETS. full-eval is all 27. These MUST match the RL catalog's sets.
+sets:
+  code-eval:
+    - olmes-cruxeval
+    - olmes-bigcodebench
+    - evalplus-humaneval
+    - evalplus-mbpp
+    - multiple-sh
+    - multiple-cpp
+    - multiple-java
+    - multiple-js
+    - multiple-rs
+  general-eval:
+    - olmes-agi-eval
+    - olmes-bbh
+    - olmes-mmlu-pro
+    - olmes-ifeval
+    - olmes-mmlu-mc
+  math-eval:
+    - olmes-deepmind-math
+    - olmes-gpqa
+    - olmes-gsm8k
+    - olmes-gsm-symbolic
+    - olmes-minerva-math
+  safety-eval:
+    - attaq
+    - salad-bench
+  multilingual-eval:
+    - global-mmlu
+    - mgsm
+    - include-ar-de-es-fr
+    - include-hi-bn-ta-te
+    - include-it-ja-ko-nl-pt-zh
+  bfcl:
+    - bfcl
+  full-eval:
+    - olmes-cruxeval
+    - olmes-bigcodebench
+    - evalplus-humaneval
+    - evalplus-mbpp
+    - multiple-sh
+    - multiple-cpp
+    - multiple-java
+    - multiple-js
+    - multiple-rs
+    - olmes-agi-eval
+    - olmes-bbh
+    - olmes-mmlu-pro
+    - olmes-ifeval
+    - olmes-mmlu-mc
+    - olmes-deepmind-math
+    - olmes-gpqa
+    - olmes-gsm8k
+    - olmes-gsm-symbolic
+    - olmes-minerva-math
+    - attaq
+    - salad-bench
+    - global-mmlu
+    - mgsm
+    - include-ar-de-es-fr
+    - include-hi-bn-ta-te
+    - include-it-ja-ko-nl-pt-zh
+    - bfcl
