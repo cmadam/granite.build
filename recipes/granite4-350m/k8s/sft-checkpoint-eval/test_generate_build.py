@@ -431,3 +431,36 @@ def test_main_bumps_keep_last_n_in_resolved_params(tmp_path):
     resolved = yaml.safe_load(params_out.read_text())
     assert int(resolved["KEEP_LAST_N_CHECKPOINTS"]) >= int(resolved["NUM_EPOCHS"])
     assert int(resolved["KEEP_LAST_N_CHECKPOINTS"]) == 3
+
+
+# ─── generate_build.py: emitted artifact id must match a declared output ──────
+def _iter_target_commands(target):
+    """Yield every additional_files command string in a target's byoi step."""
+    for step in target.get("steps", []):
+        files = step.get("config", {}).get("k8s", {}).get("additional_files", {})
+        for value in files.values():
+            yield str(value)
+
+
+def test_emitted_artifact_ids_match_declared_outputs(catalog):
+    # full-eval x 2 epochs exercises every builder (tokenize, sage, bfcl, per-epoch
+    # export, combined export).
+    params = {
+        "NUM_EPOCHS": 2,
+        "EVAL_EPOCHS": "all",
+        "EVAL_SETS": ["full-eval"],
+    }
+    build, _, _ = gb.generate(params, catalog)
+    targets = build["granite.build"]["targets"]
+    checked = 0
+    for tname, target in targets.items():
+        outputs = set(target.get("outputs", {}))
+        for cmd in _iter_target_commands(target):
+            for artifact_id in re.findall(r"LLMB_ARTIFACT_ID:(\S+)", cmd):
+                checked += 1
+                assert artifact_id in outputs, (
+                    f"target {tname!r} emits LLMB_ARTIFACT_ID:{artifact_id} "
+                    f"but declares outputs {sorted(outputs)}"
+                )
+    # Sanity: we actually inspected emit lines (tokenize + 54 evals + 2 exports + 1).
+    assert checked == 1 + 2 * 27 + 2 + 1

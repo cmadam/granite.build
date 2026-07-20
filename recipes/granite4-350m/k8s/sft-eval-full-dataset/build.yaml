@@ -2962,4 +2962,4 @@ granite.build:
                 mkdir -p /gb-read-write/sage/$${EXPERIMENT}
                 python exporter.py -in-folder /gb-read-write/sage/$${EXPERIMENT}-ep_1 /gb-read-write/sage/$${EXPERIMENT}-ep_2 -stack $${EXPORT_STACK} -o /gb-read-write/sage/$${EXPERIMENT}/combined.csv
                 find /gb-read-write/sage/$${EXPERIMENT} -name "*.sh" -exec sed -i 's/hf_[A-Za-z0-9]\{10,\}/REDACTED/g' {} +
-                echo "LLMB_ARTIFACT_ID:combined LLMB_ARTIFACT_PATH:/gb-read-write/sage/$${EXPERIMENT}/combined.csv"
+                echo "LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:/gb-read-write/sage/$${EXPERIMENT}/combined.csv"

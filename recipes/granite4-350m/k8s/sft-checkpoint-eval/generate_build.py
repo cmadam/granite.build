@@ -570,7 +570,7 @@ def build_combined_export_target(epoch_export_names, eval_epochs):
             f"python exporter.py -in-folder {folders} -stack $${{EXPORT_STACK}} "
             f"-o {out_dir}/combined.csv",
             _REDACT_LINE % out_dir,
-            f'echo "LLMB_ARTIFACT_ID:combined LLMB_ARTIFACT_PATH:{out_dir}/combined.csv"',
+            f'echo "LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:{out_dir}/combined.csv"',
         ]
     ) + "\n"
     return {
