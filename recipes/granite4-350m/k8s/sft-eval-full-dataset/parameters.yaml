@@ -1,17 +1,38 @@
 # Default parameters for the granite4-350m full-dataset SFT + full-eval build on a
 # native Granite.build Kubernetes environment (type: K8s, helm launchers).
 #
-# Training runs space://steps/open-instruct as a FULL fine-tune (no LoRA, no merge
-# step) on a HuggingFace base model + HF SFT dataset, and pushes the checkpoint to
-# HuggingFace. Evals run space://steps/byoi against the trained checkpoint, using
-# the per-category SAGE images (the SAGE repo is baked into each image).
+# This is a per-epoch checkpoint-eval build: the generator
+# (../sft-checkpoint-eval/generate_build.py) pre-tokenizes the data once,
+# fine-tunes granite4-350m for NUM_EPOCHS as a FULL fine-tune (no LoRA, no merge
+# step) emitting one HF checkpoint per evaluated epoch, then fans the full 27-eval
+# suite out over EVERY epoch (EVAL_EPOCHS=all) via space://steps/byoi, and rolls
+# the results up per-epoch + into a combined benchmark×epoch CSV. Each eval runs
+# in a per-category SAGE image (the SAGE repo is baked into each image).
 #
-# Override any value with: gb build start --param KEY=VALUE
-# Run with:
+# build.yaml is GENERATED from this file — do not hand-edit it. Regenerate with:
+#   cd recipes/granite4-350m/k8s/sft-checkpoint-eval
+#   python generate_build.py \
+#     --parameters-path ../sft-eval-full-dataset/parameters.yaml \
+#     --catalog-path eval-catalog.yaml \
+#     --output ../sft-eval-full-dataset/build.yaml \
+#     --params-out ../sft-eval-full-dataset/parameters-resolved.yaml
+#
+# Override any value at generation time with --param KEY=VALUE. Run with the
+# RESOLVED params the generator writes (they carry those overrides):
 #   gb build start \
 #     -f recipes/granite4-350m/k8s/sft-eval-full-dataset/build.yaml \
-#     --parameters-path recipes/granite4-350m/k8s/sft-eval-full-dataset/parameters.yaml \
+#     --parameters-path recipes/granite4-350m/k8s/sft-eval-full-dataset/parameters-resolved.yaml \
 #     --space <your-k8s-space>
+
+# ─── Per-epoch fanout selection (generator knobs) ───────────────────────────
+# Which 1-indexed epochs to evaluate: 'all', a CSV '2,4', or a YAML list [2, 4].
+# 'all' evaluates every one of the NUM_EPOCHS checkpoints. [--eval-epochs]
+EVAL_EPOCHS: all
+# Which evaluations to fan out over each epoch: catalog `sets` names and/or
+# individual eval names (see ../sft-checkpoint-eval/eval-catalog.yaml). The full
+# recipe runs all 27 evals. WARNING: eval targets = #epochs × #evals, so
+# full-eval over NUM_EPOCHS=2 is 54 eval clusters. [--eval-sets]
+EVAL_SETS: [full-eval]
 
 # ─── Base model + training data (HuggingFace artifacts) ─────────────────────
 MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
@@ -72,8 +93,12 @@ SAGE_CODE_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-code:0.025"
 SAGE_SAFETY_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-safety:0.025"
 SAGE_MULTILINGUAL_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025"
 
-# BigCodeBench external evaluation API (consumed by olmes-bigcodebench).
+# BigCodeBench external evaluation API (consumed by olmes-bigcodebench, which is
+# part of full-eval).
 OE_EVAL_BCB_API_URL: "http://bigcodebench-server:7860/evaluate/"
+
+# Aggregation: the exporter.py `-stack` for the per-epoch + combined CSVs.
+EXPORT_STACK: "granite4-instruct"
 
 # ─── BFCL (function-calling eval — byoi with the bfcl image) ────────────────
 # Command transcribed from the bluevela bfcl-eval step (runs run-bfcl.sh).

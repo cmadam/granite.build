@@ -1,577 +1,603 @@
-######
-# granite4-350m — SMOKE build: fast SFT (tiny data fraction) + hfpush + only the
-# multilingual (5) and bfcl (1) evals. Purpose: validate the full train→hfpush→eval
-# path end-to-end quickly (this is the path that previously failed on hfpush).
-#
-# Same steps/images as sft-eval-full-dataset; training uses DATA_FRACTION=0.00001
-# and NUM_EPOCHS=1. Evals: byoi with the SAGE repo baked into the images.
-#
-# Run:
-#   gb build start -f recipes/granite4-350m/k8s/sft-eval-smoke/build.yaml \
-#     --parameters-path recipes/granite4-350m/k8s/sft-eval-smoke/parameters.yaml \
-#     --space <your-k8s-space>
-######
 granite.build:
-  name: g4-350m-sft-eval-smoke-k8s
+  name: g4-350m-sft-ckpt-eval-k8s
   retries:
     max_retries: 2
   targets:
-    # ─── Tokenize tulu-3 with the Granite template (CPU) → --tokenized_data ───
-    # Merged seed+tokenize: decode the embedded Granite template, subsample tulu-3,
-    # and pre-tokenize with run_data_prep_v2.sh (the pinned open-instruct image's
-    # raw-data loader can't ingest tulu-3's multi-turn `messages`). The tokenized
-    # dataset is written to a fixed PVC path that sft-training reads via
-    # --tokenized_data; only a tiny lh:// 'ready' marker is emitted for ordering
-    # (env:///file:// aren't supported stores on the k8s environment).
     tokenize:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
         tuning_data:
           uri: "$${TUNING_DATA_URI}"
         model_to_tune:
           uri: "$${MODEL_URI}"
       outputs:
-        # Push the tokenized dataset dir to HF (upload_folder → verbatim, preserves the
-        # save_to_disk layout). sft-training pulls it back and load_from_disk's it.
-        # lh:// was Forbidden (no lakehouse write perms); env://file:// aren't configured.
         tokenized_dataset:
-          type: dataset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-tokenized_{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "dataset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-tokenized_{{ run_metadata.targetsteprun_id\
+            \ | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: 0
-              num_nodes: 1
-              total_memory_per_node: 32Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SFT_IMAGE}"   # open-instruct image ships /stage/data_prep + base64
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  # HF datasets writes to ~/.cache by default (/.cache, not writable in-pod).
-                  export HOME=/tmp XDG_CACHE_HOME=/tmp/.cache HF_HOME=/tmp/hf HF_DATASETS_CACHE=/tmp/hf/datasets
-                  export HF_DATASETS_DISABLE_PROGRESS_BARS=1
-                  EXP="$${EXPERIMENT}"
-                  CTX="$${MAX_SEQ_LEN}"
-                  export FRAC="$${DATA_FRACTION}"
-                  export SRC="{{ bindings.tuning_data.binding.path }}"
-                  MODEL="{{ bindings.model_to_tune.binding.path }}"
-                  WORK="/gb-read-write/outputs/tokenize/${EXP}"
-                  export IN="${WORK}/input"
-                  OUT="${WORK}/out"
-                  TEMPLATE="${WORK}/chat_template.jinja"
-                  rm -rf "$WORK"; mkdir -p "$IN/general"
-                  # Granite chat template (merged from the former seed step); Granite-format so
-                  # run_data_prep_v2.sh's label masking finds the assistant spans.
-                  base64 -d > "$TEMPLATE" <<'B64'
-                  eyUtIHNldCB0b29sc19zeXN0ZW1fbWVzc2FnZV9wcmVmaXggPSAnWW91IGFyZSBhIGhlbHBmdWwg
-                  YXNzaXN0YW50IHdpdGggYWNjZXNzIHRvIHRoZSBmb2xsb3dpbmcgdG9vbHMuIFlvdSBtYXkgY2Fs
-                  bCBvbmUgb3IgbW9yZSB0b29scyB0byBhc3Npc3Qgd2l0aCB0aGUgdXNlciBxdWVyeS5cblxuWW91
-                  IGFyZSBwcm92aWRlZCB3aXRoIGZ1bmN0aW9uIHNpZ25hdHVyZXMgd2l0aGluIDx0b29scz48L3Rv
-                  b2xzPiBYTUwgdGFnczpcbjx0b29scz4nICAlfQp7JS0gc2V0IHRvb2xzX3N5c3RlbV9tZXNzYWdl
-                  X3N1ZmZpeCA9ICdcbjwvdG9vbHM+XG5cbkZvciBlYWNoIHRvb2wgY2FsbCwgcmV0dXJuIGEganNv
-                  biBvYmplY3Qgd2l0aCBmdW5jdGlvbiBuYW1lIGFuZCBhcmd1bWVudHMgd2l0aGluIDx0b29sX2Nh
-                  bGw+PC90b29sX2NhbGw+IFhNTCB0YWdzOlxuPHRvb2xfY2FsbD5cbntcIm5hbWVcIjogPGZ1bmN0
-                  aW9uLW5hbWU+LCBcImFyZ3VtZW50c1wiOiA8YXJncy1qc29uLW9iamVjdD59XG48L3Rvb2xfY2Fs
-                  bD4uIElmIGEgdG9vbCBkb2VzIG5vdCBleGlzdCBpbiB0aGUgcHJvdmlkZWQgbGlzdCBvZiB0b29s
-                  cywgbm90aWZ5IHRoZSB1c2VyIHRoYXQgeW91IGRvIG5vdCBoYXZlIHRoZSBhYmlsaXR5IHRvIGZ1
-                  bGZpbGwgdGhlIHJlcXVlc3QuJyAlfQp7JS0gc2V0IGRvY3VtZW50c19zeXN0ZW1fbWVzc2FnZV9w
-                  cmVmaXggPSAnWW91IGFyZSBhIGhlbHBmdWwgYXNzaXN0YW50IHdpdGggYWNjZXNzIHRvIHRoZSBm
-                  b2xsb3dpbmcgZG9jdW1lbnRzLiBZb3UgbWF5IHVzZSBvbmUgb3IgbW9yZSBkb2N1bWVudHMgdG8g
-                  YXNzaXN0IHdpdGggdGhlIHVzZXIgcXVlcnkuXG5cbllvdSBhcmUgZ2l2ZW4gYSBsaXN0IG9mIGRv
-                  Y3VtZW50cyB3aXRoaW4gPGRvY3VtZW50cz48L2RvY3VtZW50cz4gWE1MIHRhZ3M6XG48ZG9jdW1l
-                  bnRzPicgJX0KeyUtIHNldCBkb2N1bWVudHNfc3lzdGVtX21lc3NhZ2Vfc3VmZml4ID0gJ1xuPC9k
-                  b2N1bWVudHM+XG5cbldyaXRlIHRoZSByZXNwb25zZSB0byB0aGUgdXNlclwncyBpbnB1dCBieSBz
-                  dHJpY3RseSBhbGlnbmluZyB3aXRoIHRoZSBmYWN0cyBpbiB0aGUgcHJvdmlkZWQgZG9jdW1lbnRz
-                  LiBJZiB0aGUgaW5mb3JtYXRpb24gbmVlZGVkIHRvIGFuc3dlciB0aGUgcXVlc3Rpb24gaXMgbm90
-                  IGF2YWlsYWJsZSBpbiB0aGUgZG9jdW1lbnRzLCBpbmZvcm0gdGhlIHVzZXIgdGhhdCB0aGUgcXVl
-                  c3Rpb24gY2Fubm90IGJlIGFuc3dlcmVkIGJhc2VkIG9uIHRoZSBhdmFpbGFibGUgZGF0YS4nICV9
-                  CnslLSBzZXQgZzRfZGVmYXVsdF9zeXN0ZW1fbWVzc2FnZSA9ICdZb3UgYXJlIGEgaGVscGZ1bCBh
-                  c3Npc3RhbnQuIFBsZWFzZSBlbnN1cmUgcmVzcG9uc2VzIGFyZSBwcm9mZXNzaW9uYWwsIGFjY3Vy
-                  YXRlLCBhbmQgc2FmZS4nICV9CnslLSBpZiBhdmFpbGFibGVfdG9vbHMgaXMgZGVmaW5lZCBhbmQg
-                  YXZhaWxhYmxlX3Rvb2xzICV9CiAgICB7JS0gc2V0IHRvb2xzID0gYXZhaWxhYmxlX3Rvb2xzICV9
-                  CnslLSBlbmRpZiAlfQp7JS0gc2V0IG5zID0gbmFtZXNwYWNlKHRvb2xzX3N5c3RlbV9tZXNzYWdl
-                  PXRvb2xzX3N5c3RlbV9tZXNzYWdlX3ByZWZpeCwKICAgICAgICAgICAgICAgICAgICAgICBkb2N1
-                  bWVudHNfc3lzdGVtX21lc3NhZ2U9ZG9jdW1lbnRzX3N5c3RlbV9tZXNzYWdlX3ByZWZpeCwKICAg
-                  ICAgICAgICAgICAgICAgICAgICBkZWZhdWx0X3N5c3RlbV9tZXNzYWdlPWc0X2RlZmF1bHRfc3lz
-                  dGVtX21lc3NhZ2UsCiAgICAgICAgICAgICAgICAgICAgICAgc3lzdGVtX21lc3NhZ2U9JycKICAg
-                  ICAgICAgICAgICAgICAgICAgICApICV9CnslLSBpZiB0b29scyAlfQogICAgeyUtIGZvciB0b29s
-                  IGluIHRvb2xzICV9CiAgICAgICAgeyUtIHNldCBucy50b29sc19zeXN0ZW1fbWVzc2FnZSA9IG5z
-                  LnRvb2xzX3N5c3RlbV9tZXNzYWdlICsgJ1xuJyArICh0b29sIHwgdG9qc29uKSAlfQogICAgeyUt
-                  IGVuZGZvciAlfQogICAgeyUtIHNldCBucy50b29sc19zeXN0ZW1fbWVzc2FnZSA9IG5zLnRvb2xz
-                  X3N5c3RlbV9tZXNzYWdlICsgdG9vbHNfc3lzdGVtX21lc3NhZ2Vfc3VmZml4ICV9CnslLSBlbHNl
-                  ICV9CiAgICB7JS0gc2V0IG5zLnRvb2xzX3N5c3RlbV9tZXNzYWdlID0gJycgJX0KeyUtIGVuZGlm
-                  ICV9CnslLSBpZiBkb2N1bWVudHMgJX0KICAgIHslLSBmb3IgZG9jdW1lbnQgaW4gZG9jdW1lbnRz
-                  ICV9CiAgICAgICAgeyUtIHNldCBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgPSBucy5kb2N1
-                  bWVudHNfc3lzdGVtX21lc3NhZ2UgKyAnXG4nICsgKGRvY3VtZW50IHwgdG9qc29uKSAlfQogICAg
-                  eyUtIGVuZGZvciAlfQogICAgeyUtIHNldCBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgPSBu
-                  cy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgKyBkb2N1bWVudHNfc3lzdGVtX21lc3NhZ2Vfc3Vm
-                  Zml4ICV9CnslLSBlbHNlICV9CiAgICB7JS0gc2V0IG5zLmRvY3VtZW50c19zeXN0ZW1fbWVzc2Fn
-                  ZSA9ICcnICV9CnslLSBlbmRpZiAlfQp7JS0gaWYgbWVzc2FnZXNbMF0ucm9sZSA9PSAnc3lzdGVt
-                  JyAlfQogICAgeyUtIGlmIG1lc3NhZ2VzWzBdLmNvbnRlbnQgaXMgc3RyaW5nICV9CiAgICAgICAg
-                  eyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG1lc3NhZ2VzWzBdLmNvbnRlbnQgJX0KICAgIHsl
-                  LSBlbGlmIG1lc3NhZ2VzWzBdLmNvbnRlbnQgaXMgaXRlcmFibGUgJX0KICAgICAgICB7JS0gZm9y
-                  IGVudHJ5IGluIG1lc3NhZ2VzWzBdLmNvbnRlbnQgJX0KICAgICAgICAgICAgeyUtIGlmIGVudHJ5
-                  LnR5cGU9PSAndGV4dCcgJX0KICAgICAgICAgICAgICAgIHslLSBpZiBucy5zeXN0ZW1fbWVzc2Fn
-                  ZSAhPSAnJyAlfQogICAgICAgICAgICAgICAgICAgIHslLSBzZXQgbnMuc3lzdGVtX21lc3NhZ2Ug
-                  PSBucy5zeXN0ZW1fbWVzc2FnZSArICdcbicgJX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAl
-                  fQogICAgICAgICAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG5zLnN5c3RlbV9t
-                  ZXNzYWdlICsgZW50cnkudGV4dCAlfQogICAgICAgICAgICB7JS0gZW5kaWYgJX0KICAgICAgICB7
-                  JS0gZW5kZm9yICV9CiAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBpZiB0b29scyBhbmQgZG9jdW1l
-                  bnRzICV9CiAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG5zLnN5c3RlbV9tZXNz
-                  YWdlICsgJ1xuXG4nICsgIG5zLnRvb2xzX3N5c3RlbV9tZXNzYWdlICsgJ1xuXG4nICsgbnMuZG9j
-                  dW1lbnRzX3N5c3RlbV9tZXNzYWdlICV9CiAgICB7JS0gZWxpZiB0b29scyAlfQogICAgICAgIHsl
-                  LSBzZXQgbnMuc3lzdGVtX21lc3NhZ2UgPSBucy5zeXN0ZW1fbWVzc2FnZSArICdcblxuJyArIG5z
-                  LnRvb2xzX3N5c3RlbV9tZXNzYWdlICV9CiAgICB7JS0gZWxpZiBkb2N1bWVudHMgJX0KICAgICAg
-                  ICB7JS0gc2V0IG5zLnN5c3RlbV9tZXNzYWdlID0gbnMuc3lzdGVtX21lc3NhZ2UgKyAnXG5cbicg
-                  KyBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgJX0KICAgIHslLSBlbmRpZiAlfQp7JS0gZWxz
-                  ZSAlfQogICAgeyUtIGlmIHRvb2xzIGFuZCBkb2N1bWVudHMgJX0KICAgICAgICB7JS0gc2V0IG5z
-                  LnN5c3RlbV9tZXNzYWdlID0gbnMudG9vbHNfc3lzdGVtX21lc3NhZ2UgKyAnXG5cbicgKyBucy5k
-                  b2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgICV9CiAgICB7JS0gZWxpZiB0b29scyAlfQogICAgICAg
-                  IHslLSBzZXQgbnMuc3lzdGVtX21lc3NhZ2UgPSBucy50b29sc19zeXN0ZW1fbWVzc2FnZSAlfQog
-                  ICAgeyUtIGVsaWYgZG9jdW1lbnRzICV9CiAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2Fn
-                  ZSA9IG5zLmRvY3VtZW50c19zeXN0ZW1fbWVzc2FnZSAlfQogICAgeyUtIGVuZGlmICV9CnslLSBl
-                  bmRpZiAlfQp7JS0gaWYgbnMuc3lzdGVtX21lc3NhZ2UgJX0KICAgIHt7LSAnPHxzdGFydF9vZl9y
-                  b2xlfD5zeXN0ZW08fGVuZF9vZl9yb2xlfD4nICsgbnMuc3lzdGVtX21lc3NhZ2UgKyAnPHxlbmRf
-                  b2ZfdGV4dHw+XG4nIH19CnslLSBlbHNlICV9CiAgICB7ey0gJzx8c3RhcnRfb2Zfcm9sZXw+c3lz
-                  dGVtPHxlbmRfb2Zfcm9sZXw+JyArIG5zLmRlZmF1bHRfc3lzdGVtX21lc3NhZ2UgKyAnPHxlbmRf
-                  b2ZfdGV4dHw+XG4nIH19CnslLSBlbmRpZiAlfQp7JS0gZm9yIG1lc3NhZ2UgaW4gbWVzc2FnZXMg
-                  JX0KICAgIHslLSBzZXQgY29udGVudCA9IG5hbWVzcGFjZSh2YWw9JycpICV9CiAgICB7JS0gaWYg
-                  bWVzc2FnZS5jb250ZW50IGlzIHN0cmluZyAlfQogICAgICAgIHslLSBzZXQgY29udGVudC52YWwg
-                  PSBtZXNzYWdlLmNvbnRlbnQgJX0KICAgIHslLSBlbHNlICV9CiAgICAgICAgeyUtIGlmIG1lc3Nh
-                  Z2UuY29udGVudCBpcyBpdGVyYWJsZSAlfQogICAgICAgICAgICB7JS0gZm9yIGVudHJ5IGluIG1l
-                  c3NhZ2UuY29udGVudCAlfQogICAgICAgICAgICAgICAgeyUtIGlmIGVudHJ5LnR5cGU9PSAndGV4
-                  dCcgJX0KICAgICAgICAgICAgICAgICAgICB7JS0gaWYgY29udGVudC52YWwgIT0gJycgJX0KICAg
-                  ICAgICAgICAgICAgICAgICAgICAgeyUtIHNldCBjb250ZW50LnZhbCA9IGNvbnRlbnQudmFsICsg
-                  J1xuJyAlfQogICAgICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAg
-                  ICAgIHslLSBzZXQgY29udGVudC52YWwgPSBjb250ZW50LnZhbCArIGVudHJ5LnRleHQgJX0KICAg
-                  ICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICB7JS0gZW5kZm9yICV9CiAgICAg
-                  ICAgeyUtIGVuZGlmICV9CiAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBpZiAobWVzc2FnZS5yb2xl
-                  ID09ICd1c2VyJykgb3IgKG1lc3NhZ2Uucm9sZSA9PSAnc3lzdGVtJyBhbmQgbm90IGxvb3AuZmly
-                  c3QpICV9CiAgICAgICAge3stICc8fHN0YXJ0X29mX3JvbGV8PicgKyBtZXNzYWdlLnJvbGUgKyAn
-                  PHxlbmRfb2Zfcm9sZXw+JyArIGNvbnRlbnQudmFsICsgJzx8ZW5kX29mX3RleHR8PlxuJyB9fQog
-                  ICAgeyUtIGVsaWYgbWVzc2FnZS5yb2xlID09ICdhc3Npc3RhbnQnICV9CiAgICAgICAge3stICc8
-                  fHN0YXJ0X29mX3JvbGV8PicgKyBtZXNzYWdlLnJvbGUgKyAnPHxlbmRfb2Zfcm9sZXw+JyArIGNv
-                  bnRlbnQudmFsIH19CiAgICAgICAgeyUtIGlmIG1lc3NhZ2UudG9vbF9jYWxscyAlfQogICAgICAg
-                  ICAgICB7JS0gZm9yIHRvb2xfY2FsbCBpbiBtZXNzYWdlLnRvb2xfY2FsbHMgJX0KICAgICAgICAg
-                  ICAgICAgIHslLSBpZiAobG9vcC5maXJzdCBhbmQgY29udGVudC52YWwpIG9yIChub3QgbG9vcC5m
-                  aXJzdCkgJX0KICAgICAgICAgICAgICAgICAgICB7ey0gJ1xuJyB9fQogICAgICAgICAgICAgICAg
-                  eyUtIGVuZGlmICV9CiAgICAgICAgICAgICAgICB7JS0gaWYgdG9vbF9jYWxsLmZ1bmN0aW9uICV9
-                  CiAgICAgICAgICAgICAgICAgICAgeyUtIHNldCB0b29sX2NhbGwgPSB0b29sX2NhbGwuZnVuY3Rp
-                  b24gJX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAge3stICc8
-                  dG9vbF9jYWxsPlxueyJuYW1lIjogIicgfX0KICAgICAgICAgICAgICAgIHt7LSB0b29sX2NhbGwu
-                  bmFtZSB9fQogICAgICAgICAgICAgICAge3stICciLCAiYXJndW1lbnRzIjogJyB9fQogICAgICAg
-                  ICAgICAgICAgeyUtIGlmIHRvb2xfY2FsbC5hcmd1bWVudHMgaXMgc3RyaW5nICV9CiAgICAgICAg
-                  ICAgICAgICAgICAge3stIHRvb2xfY2FsbC5hcmd1bWVudHMgfX0KICAgICAgICAgICAgICAgIHsl
-                  LSBlbHNlICV9CiAgICAgICAgICAgICAgICAgICAge3stIHRvb2xfY2FsbC5hcmd1bWVudHMgfCB0
-                  b2pzb24gfX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAge3st
-                  ICd9XG48L3Rvb2xfY2FsbD4nIH19CiAgICAgICAgICAgIHslLSBlbmRmb3IgJX0KICAgICAgICB7
-                  JS0gZW5kaWYgJX0KICAgICAgICB7ey0gJzx8ZW5kX29mX3RleHR8PlxuJyB9fQogICAgeyUtIGVs
-                  aWYgbWVzc2FnZS5yb2xlID09ICd0b29sJyAlfQogICAgICAgIHslLSBpZiBsb29wLmZpcnN0IG9y
-                  IChtZXNzYWdlc1tsb29wLmluZGV4MCAtIDFdLnJvbGUgIT0gJ3Rvb2wnKSAlfQogICAgICAgICAg
-                  ICB7ey0gJzx8c3RhcnRfb2Zfcm9sZXw+dXNlcjx8ZW5kX29mX3JvbGV8PicgfX0KICAgICAgICB7
-                  JS0gZW5kaWYgJX0KICAgICAgICB7ey0gJ1xuPHRvb2xfcmVzcG9uc2U+XG4nIH19CiAgICAgICAg
-                  e3stIGNvbnRlbnQudmFsIH19CiAgICAgICAge3stICdcbjwvdG9vbF9yZXNwb25zZT4nIH19CiAg
-                  ICAgICAgeyUtIGlmIGxvb3AubGFzdCBvciAobWVzc2FnZXNbbG9vcC5pbmRleDAgKyAxXS5yb2xl
-                  ICE9ICd0b29sJykgJX0KICAgICAgICAgICAge3stICc8fGVuZF9vZl90ZXh0fD5cbicgfX0KICAg
-                  ICAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBlbmRpZiAlfQp7JS0gZW5kZm9yICV9CnslLSBpZiBh
-                  ZGRfZ2VuZXJhdGlvbl9wcm9tcHQgJX0KICAgIHt7LSAnPHxzdGFydF9vZl9yb2xlfD5hc3Npc3Rh
-                  bnQ8fGVuZF9vZl9yb2xlfD4nIH19CnslLSBlbmRpZiAlfQ==
-                  B64
-                  # Subsample tulu-3 parquet -> general/data.jsonl (keeps the `messages` schema);
-                  # stream + islice so we never load the full multi-GB dataset for a smoke run.
-                  python3 - <<'PY'
-                  import glob, os, json, itertools, datasets
-                  import pyarrow.parquet as pq
-                  src = os.environ["SRC"]; frac = float(os.environ["FRAC"])
-                  files = sorted(glob.glob(os.path.join(src, "data", "*.parquet")))
-                  assert files, f"no parquet under {src}/data"
-                  total = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
-                  n = max(1, int(total * frac)) if frac <= 1 else int(frac)
-                  ds = datasets.load_dataset("parquet", data_files=files, split="train", streaming=True)
-                  out = os.path.join(os.environ["IN"], "general", "data.jsonl")
-                  with open(out, "w") as fh:
-                      for ex in itertools.islice(ds, n):
-                          fh.write(json.dumps(ex) + "\n")
-                  print(f"wrote {n} of {total} examples to {out}")
-                  import sys; sys.stdout.flush(); os._exit(0)  # avoid pyarrow shutdown abort (exit 134)
-                  PY
-                  bash /stage/data_prep/run_data_prep_v2.sh -d "$IN" -t "$TEMPLATE" -s "$OUT" -m "$MODEL" -c "$CTX"
-                  FINAL="${OUT}/all_combined/tokenized/${CTX}/data_filtered"
-                  if [ ! -d "$FINAL" ]; then echo "ERROR: tokenized dataset not found at $FINAL"; find "$OUT" -maxdepth 4 -type d; exit 1; fi
-                  # Emit the tokenized dataset dir as the artifact; gbserver's hfpush
-                  # upload_folders it to the HF repo, and sft-training pulls it back.
-                  echo "tokenized dataset ready at $FINAL"
-                  echo "LLMB_ARTIFACT_ID:tokenized_dataset LLMB_ARTIFACT_PATH:${FINAL}"
-    # ─── SFT training (full fine-tune) ───────────────────────────────────────
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: 0
+            num_nodes: 1
+            total_memory_per_node: "32Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SFT_IMAGE}"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                # HF datasets writes to ~/.cache by default (/.cache, not writable in-pod).
+                export HOME=/tmp XDG_CACHE_HOME=/tmp/.cache HF_HOME=/tmp/hf HF_DATASETS_CACHE=/tmp/hf/datasets
+                export HF_DATASETS_DISABLE_PROGRESS_BARS=1
+                EXP="$${EXPERIMENT}"
+                CTX="$${MAX_SEQ_LEN}"
+                export FRAC="$${DATA_FRACTION}"
+                export SRC="{{ bindings.tuning_data.binding.path }}"
+                MODEL="{{ bindings.model_to_tune.binding.path }}"
+                WORK="/gb-read-write/outputs/tokenize/${EXP}"
+                export IN="${WORK}/input"
+                OUT="${WORK}/out"
+                TEMPLATE="${WORK}/chat_template.jinja"
+                rm -rf "$WORK"; mkdir -p "$IN/general"
+                # Granite chat template (merged from the former seed step); Granite-format so
+                # run_data_prep_v2.sh's label masking finds the assistant spans.
+                base64 -d > "$TEMPLATE" <<'B64'
+                eyUtIHNldCB0b29sc19zeXN0ZW1fbWVzc2FnZV9wcmVmaXggPSAnWW91IGFyZSBhIGhlbHBmdWwg
+                YXNzaXN0YW50IHdpdGggYWNjZXNzIHRvIHRoZSBmb2xsb3dpbmcgdG9vbHMuIFlvdSBtYXkgY2Fs
+                bCBvbmUgb3IgbW9yZSB0b29scyB0byBhc3Npc3Qgd2l0aCB0aGUgdXNlciBxdWVyeS5cblxuWW91
+                IGFyZSBwcm92aWRlZCB3aXRoIGZ1bmN0aW9uIHNpZ25hdHVyZXMgd2l0aGluIDx0b29scz48L3Rv
+                b2xzPiBYTUwgdGFnczpcbjx0b29scz4nICAlfQp7JS0gc2V0IHRvb2xzX3N5c3RlbV9tZXNzYWdl
+                X3N1ZmZpeCA9ICdcbjwvdG9vbHM+XG5cbkZvciBlYWNoIHRvb2wgY2FsbCwgcmV0dXJuIGEganNv
+                biBvYmplY3Qgd2l0aCBmdW5jdGlvbiBuYW1lIGFuZCBhcmd1bWVudHMgd2l0aGluIDx0b29sX2Nh
+                bGw+PC90b29sX2NhbGw+IFhNTCB0YWdzOlxuPHRvb2xfY2FsbD5cbntcIm5hbWVcIjogPGZ1bmN0
+                aW9uLW5hbWU+LCBcImFyZ3VtZW50c1wiOiA8YXJncy1qc29uLW9iamVjdD59XG48L3Rvb2xfY2Fs
+                bD4uIElmIGEgdG9vbCBkb2VzIG5vdCBleGlzdCBpbiB0aGUgcHJvdmlkZWQgbGlzdCBvZiB0b29s
+                cywgbm90aWZ5IHRoZSB1c2VyIHRoYXQgeW91IGRvIG5vdCBoYXZlIHRoZSBhYmlsaXR5IHRvIGZ1
+                bGZpbGwgdGhlIHJlcXVlc3QuJyAlfQp7JS0gc2V0IGRvY3VtZW50c19zeXN0ZW1fbWVzc2FnZV9w
+                cmVmaXggPSAnWW91IGFyZSBhIGhlbHBmdWwgYXNzaXN0YW50IHdpdGggYWNjZXNzIHRvIHRoZSBm
+                b2xsb3dpbmcgZG9jdW1lbnRzLiBZb3UgbWF5IHVzZSBvbmUgb3IgbW9yZSBkb2N1bWVudHMgdG8g
+                YXNzaXN0IHdpdGggdGhlIHVzZXIgcXVlcnkuXG5cbllvdSBhcmUgZ2l2ZW4gYSBsaXN0IG9mIGRv
+                Y3VtZW50cyB3aXRoaW4gPGRvY3VtZW50cz48L2RvY3VtZW50cz4gWE1MIHRhZ3M6XG48ZG9jdW1l
+                bnRzPicgJX0KeyUtIHNldCBkb2N1bWVudHNfc3lzdGVtX21lc3NhZ2Vfc3VmZml4ID0gJ1xuPC9k
+                b2N1bWVudHM+XG5cbldyaXRlIHRoZSByZXNwb25zZSB0byB0aGUgdXNlclwncyBpbnB1dCBieSBz
+                dHJpY3RseSBhbGlnbmluZyB3aXRoIHRoZSBmYWN0cyBpbiB0aGUgcHJvdmlkZWQgZG9jdW1lbnRz
+                LiBJZiB0aGUgaW5mb3JtYXRpb24gbmVlZGVkIHRvIGFuc3dlciB0aGUgcXVlc3Rpb24gaXMgbm90
+                IGF2YWlsYWJsZSBpbiB0aGUgZG9jdW1lbnRzLCBpbmZvcm0gdGhlIHVzZXIgdGhhdCB0aGUgcXVl
+                c3Rpb24gY2Fubm90IGJlIGFuc3dlcmVkIGJhc2VkIG9uIHRoZSBhdmFpbGFibGUgZGF0YS4nICV9
+                CnslLSBzZXQgZzRfZGVmYXVsdF9zeXN0ZW1fbWVzc2FnZSA9ICdZb3UgYXJlIGEgaGVscGZ1bCBh
+                c3Npc3RhbnQuIFBsZWFzZSBlbnN1cmUgcmVzcG9uc2VzIGFyZSBwcm9mZXNzaW9uYWwsIGFjY3Vy
+                YXRlLCBhbmQgc2FmZS4nICV9CnslLSBpZiBhdmFpbGFibGVfdG9vbHMgaXMgZGVmaW5lZCBhbmQg
+                YXZhaWxhYmxlX3Rvb2xzICV9CiAgICB7JS0gc2V0IHRvb2xzID0gYXZhaWxhYmxlX3Rvb2xzICV9
+                CnslLSBlbmRpZiAlfQp7JS0gc2V0IG5zID0gbmFtZXNwYWNlKHRvb2xzX3N5c3RlbV9tZXNzYWdl
+                PXRvb2xzX3N5c3RlbV9tZXNzYWdlX3ByZWZpeCwKICAgICAgICAgICAgICAgICAgICAgICBkb2N1
+                bWVudHNfc3lzdGVtX21lc3NhZ2U9ZG9jdW1lbnRzX3N5c3RlbV9tZXNzYWdlX3ByZWZpeCwKICAg
+                ICAgICAgICAgICAgICAgICAgICBkZWZhdWx0X3N5c3RlbV9tZXNzYWdlPWc0X2RlZmF1bHRfc3lz
+                dGVtX21lc3NhZ2UsCiAgICAgICAgICAgICAgICAgICAgICAgc3lzdGVtX21lc3NhZ2U9JycKICAg
+                ICAgICAgICAgICAgICAgICAgICApICV9CnslLSBpZiB0b29scyAlfQogICAgeyUtIGZvciB0b29s
+                IGluIHRvb2xzICV9CiAgICAgICAgeyUtIHNldCBucy50b29sc19zeXN0ZW1fbWVzc2FnZSA9IG5z
+                LnRvb2xzX3N5c3RlbV9tZXNzYWdlICsgJ1xuJyArICh0b29sIHwgdG9qc29uKSAlfQogICAgeyUt
+                IGVuZGZvciAlfQogICAgeyUtIHNldCBucy50b29sc19zeXN0ZW1fbWVzc2FnZSA9IG5zLnRvb2xz
+                X3N5c3RlbV9tZXNzYWdlICsgdG9vbHNfc3lzdGVtX21lc3NhZ2Vfc3VmZml4ICV9CnslLSBlbHNl
+                ICV9CiAgICB7JS0gc2V0IG5zLnRvb2xzX3N5c3RlbV9tZXNzYWdlID0gJycgJX0KeyUtIGVuZGlm
+                ICV9CnslLSBpZiBkb2N1bWVudHMgJX0KICAgIHslLSBmb3IgZG9jdW1lbnQgaW4gZG9jdW1lbnRz
+                ICV9CiAgICAgICAgeyUtIHNldCBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgPSBucy5kb2N1
+                bWVudHNfc3lzdGVtX21lc3NhZ2UgKyAnXG4nICsgKGRvY3VtZW50IHwgdG9qc29uKSAlfQogICAg
+                eyUtIGVuZGZvciAlfQogICAgeyUtIHNldCBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgPSBu
+                cy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgKyBkb2N1bWVudHNfc3lzdGVtX21lc3NhZ2Vfc3Vm
+                Zml4ICV9CnslLSBlbHNlICV9CiAgICB7JS0gc2V0IG5zLmRvY3VtZW50c19zeXN0ZW1fbWVzc2Fn
+                ZSA9ICcnICV9CnslLSBlbmRpZiAlfQp7JS0gaWYgbWVzc2FnZXNbMF0ucm9sZSA9PSAnc3lzdGVt
+                JyAlfQogICAgeyUtIGlmIG1lc3NhZ2VzWzBdLmNvbnRlbnQgaXMgc3RyaW5nICV9CiAgICAgICAg
+                eyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG1lc3NhZ2VzWzBdLmNvbnRlbnQgJX0KICAgIHsl
+                LSBlbGlmIG1lc3NhZ2VzWzBdLmNvbnRlbnQgaXMgaXRlcmFibGUgJX0KICAgICAgICB7JS0gZm9y
+                IGVudHJ5IGluIG1lc3NhZ2VzWzBdLmNvbnRlbnQgJX0KICAgICAgICAgICAgeyUtIGlmIGVudHJ5
+                LnR5cGU9PSAndGV4dCcgJX0KICAgICAgICAgICAgICAgIHslLSBpZiBucy5zeXN0ZW1fbWVzc2Fn
+                ZSAhPSAnJyAlfQogICAgICAgICAgICAgICAgICAgIHslLSBzZXQgbnMuc3lzdGVtX21lc3NhZ2Ug
+                PSBucy5zeXN0ZW1fbWVzc2FnZSArICdcbicgJX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAl
+                fQogICAgICAgICAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG5zLnN5c3RlbV9t
+                ZXNzYWdlICsgZW50cnkudGV4dCAlfQogICAgICAgICAgICB7JS0gZW5kaWYgJX0KICAgICAgICB7
+                JS0gZW5kZm9yICV9CiAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBpZiB0b29scyBhbmQgZG9jdW1l
+                bnRzICV9CiAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2FnZSA9IG5zLnN5c3RlbV9tZXNz
+                YWdlICsgJ1xuXG4nICsgIG5zLnRvb2xzX3N5c3RlbV9tZXNzYWdlICsgJ1xuXG4nICsgbnMuZG9j
+                dW1lbnRzX3N5c3RlbV9tZXNzYWdlICV9CiAgICB7JS0gZWxpZiB0b29scyAlfQogICAgICAgIHsl
+                LSBzZXQgbnMuc3lzdGVtX21lc3NhZ2UgPSBucy5zeXN0ZW1fbWVzc2FnZSArICdcblxuJyArIG5z
+                LnRvb2xzX3N5c3RlbV9tZXNzYWdlICV9CiAgICB7JS0gZWxpZiBkb2N1bWVudHMgJX0KICAgICAg
+                ICB7JS0gc2V0IG5zLnN5c3RlbV9tZXNzYWdlID0gbnMuc3lzdGVtX21lc3NhZ2UgKyAnXG5cbicg
+                KyBucy5kb2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgJX0KICAgIHslLSBlbmRpZiAlfQp7JS0gZWxz
+                ZSAlfQogICAgeyUtIGlmIHRvb2xzIGFuZCBkb2N1bWVudHMgJX0KICAgICAgICB7JS0gc2V0IG5z
+                LnN5c3RlbV9tZXNzYWdlID0gbnMudG9vbHNfc3lzdGVtX21lc3NhZ2UgKyAnXG5cbicgKyBucy5k
+                b2N1bWVudHNfc3lzdGVtX21lc3NhZ2UgICV9CiAgICB7JS0gZWxpZiB0b29scyAlfQogICAgICAg
+                IHslLSBzZXQgbnMuc3lzdGVtX21lc3NhZ2UgPSBucy50b29sc19zeXN0ZW1fbWVzc2FnZSAlfQog
+                ICAgeyUtIGVsaWYgZG9jdW1lbnRzICV9CiAgICAgICAgeyUtIHNldCBucy5zeXN0ZW1fbWVzc2Fn
+                ZSA9IG5zLmRvY3VtZW50c19zeXN0ZW1fbWVzc2FnZSAlfQogICAgeyUtIGVuZGlmICV9CnslLSBl
+                bmRpZiAlfQp7JS0gaWYgbnMuc3lzdGVtX21lc3NhZ2UgJX0KICAgIHt7LSAnPHxzdGFydF9vZl9y
+                b2xlfD5zeXN0ZW08fGVuZF9vZl9yb2xlfD4nICsgbnMuc3lzdGVtX21lc3NhZ2UgKyAnPHxlbmRf
+                b2ZfdGV4dHw+XG4nIH19CnslLSBlbHNlICV9CiAgICB7ey0gJzx8c3RhcnRfb2Zfcm9sZXw+c3lz
+                dGVtPHxlbmRfb2Zfcm9sZXw+JyArIG5zLmRlZmF1bHRfc3lzdGVtX21lc3NhZ2UgKyAnPHxlbmRf
+                b2ZfdGV4dHw+XG4nIH19CnslLSBlbmRpZiAlfQp7JS0gZm9yIG1lc3NhZ2UgaW4gbWVzc2FnZXMg
+                JX0KICAgIHslLSBzZXQgY29udGVudCA9IG5hbWVzcGFjZSh2YWw9JycpICV9CiAgICB7JS0gaWYg
+                bWVzc2FnZS5jb250ZW50IGlzIHN0cmluZyAlfQogICAgICAgIHslLSBzZXQgY29udGVudC52YWwg
+                PSBtZXNzYWdlLmNvbnRlbnQgJX0KICAgIHslLSBlbHNlICV9CiAgICAgICAgeyUtIGlmIG1lc3Nh
+                Z2UuY29udGVudCBpcyBpdGVyYWJsZSAlfQogICAgICAgICAgICB7JS0gZm9yIGVudHJ5IGluIG1l
+                c3NhZ2UuY29udGVudCAlfQogICAgICAgICAgICAgICAgeyUtIGlmIGVudHJ5LnR5cGU9PSAndGV4
+                dCcgJX0KICAgICAgICAgICAgICAgICAgICB7JS0gaWYgY29udGVudC52YWwgIT0gJycgJX0KICAg
+                ICAgICAgICAgICAgICAgICAgICAgeyUtIHNldCBjb250ZW50LnZhbCA9IGNvbnRlbnQudmFsICsg
+                J1xuJyAlfQogICAgICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAg
+                ICAgIHslLSBzZXQgY29udGVudC52YWwgPSBjb250ZW50LnZhbCArIGVudHJ5LnRleHQgJX0KICAg
+                ICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICB7JS0gZW5kZm9yICV9CiAgICAg
+                ICAgeyUtIGVuZGlmICV9CiAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBpZiAobWVzc2FnZS5yb2xl
+                ID09ICd1c2VyJykgb3IgKG1lc3NhZ2Uucm9sZSA9PSAnc3lzdGVtJyBhbmQgbm90IGxvb3AuZmly
+                c3QpICV9CiAgICAgICAge3stICc8fHN0YXJ0X29mX3JvbGV8PicgKyBtZXNzYWdlLnJvbGUgKyAn
+                PHxlbmRfb2Zfcm9sZXw+JyArIGNvbnRlbnQudmFsICsgJzx8ZW5kX29mX3RleHR8PlxuJyB9fQog
+                ICAgeyUtIGVsaWYgbWVzc2FnZS5yb2xlID09ICdhc3Npc3RhbnQnICV9CiAgICAgICAge3stICc8
+                fHN0YXJ0X29mX3JvbGV8PicgKyBtZXNzYWdlLnJvbGUgKyAnPHxlbmRfb2Zfcm9sZXw+JyArIGNv
+                bnRlbnQudmFsIH19CiAgICAgICAgeyUtIGlmIG1lc3NhZ2UudG9vbF9jYWxscyAlfQogICAgICAg
+                ICAgICB7JS0gZm9yIHRvb2xfY2FsbCBpbiBtZXNzYWdlLnRvb2xfY2FsbHMgJX0KICAgICAgICAg
+                ICAgICAgIHslLSBpZiAobG9vcC5maXJzdCBhbmQgY29udGVudC52YWwpIG9yIChub3QgbG9vcC5m
+                aXJzdCkgJX0KICAgICAgICAgICAgICAgICAgICB7ey0gJ1xuJyB9fQogICAgICAgICAgICAgICAg
+                eyUtIGVuZGlmICV9CiAgICAgICAgICAgICAgICB7JS0gaWYgdG9vbF9jYWxsLmZ1bmN0aW9uICV9
+                CiAgICAgICAgICAgICAgICAgICAgeyUtIHNldCB0b29sX2NhbGwgPSB0b29sX2NhbGwuZnVuY3Rp
+                b24gJX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAge3stICc8
+                dG9vbF9jYWxsPlxueyJuYW1lIjogIicgfX0KICAgICAgICAgICAgICAgIHt7LSB0b29sX2NhbGwu
+                bmFtZSB9fQogICAgICAgICAgICAgICAge3stICciLCAiYXJndW1lbnRzIjogJyB9fQogICAgICAg
+                ICAgICAgICAgeyUtIGlmIHRvb2xfY2FsbC5hcmd1bWVudHMgaXMgc3RyaW5nICV9CiAgICAgICAg
+                ICAgICAgICAgICAge3stIHRvb2xfY2FsbC5hcmd1bWVudHMgfX0KICAgICAgICAgICAgICAgIHsl
+                LSBlbHNlICV9CiAgICAgICAgICAgICAgICAgICAge3stIHRvb2xfY2FsbC5hcmd1bWVudHMgfCB0
+                b2pzb24gfX0KICAgICAgICAgICAgICAgIHslLSBlbmRpZiAlfQogICAgICAgICAgICAgICAge3st
+                ICd9XG48L3Rvb2xfY2FsbD4nIH19CiAgICAgICAgICAgIHslLSBlbmRmb3IgJX0KICAgICAgICB7
+                JS0gZW5kaWYgJX0KICAgICAgICB7ey0gJzx8ZW5kX29mX3RleHR8PlxuJyB9fQogICAgeyUtIGVs
+                aWYgbWVzc2FnZS5yb2xlID09ICd0b29sJyAlfQogICAgICAgIHslLSBpZiBsb29wLmZpcnN0IG9y
+                IChtZXNzYWdlc1tsb29wLmluZGV4MCAtIDFdLnJvbGUgIT0gJ3Rvb2wnKSAlfQogICAgICAgICAg
+                ICB7ey0gJzx8c3RhcnRfb2Zfcm9sZXw+dXNlcjx8ZW5kX29mX3JvbGV8PicgfX0KICAgICAgICB7
+                JS0gZW5kaWYgJX0KICAgICAgICB7ey0gJ1xuPHRvb2xfcmVzcG9uc2U+XG4nIH19CiAgICAgICAg
+                e3stIGNvbnRlbnQudmFsIH19CiAgICAgICAge3stICdcbjwvdG9vbF9yZXNwb25zZT4nIH19CiAg
+                ICAgICAgeyUtIGlmIGxvb3AubGFzdCBvciAobWVzc2FnZXNbbG9vcC5pbmRleDAgKyAxXS5yb2xl
+                ICE9ICd0b29sJykgJX0KICAgICAgICAgICAge3stICc8fGVuZF9vZl90ZXh0fD5cbicgfX0KICAg
+                ICAgICB7JS0gZW5kaWYgJX0KICAgIHslLSBlbmRpZiAlfQp7JS0gZW5kZm9yICV9CnslLSBpZiBh
+                ZGRfZ2VuZXJhdGlvbl9wcm9tcHQgJX0KICAgIHt7LSAnPHxzdGFydF9vZl9yb2xlfD5hc3Npc3Rh
+                bnQ8fGVuZF9vZl9yb2xlfD4nIH19CnslLSBlbmRpZiAlfQ==
+                B64
+                # Subsample tulu-3 parquet -> general/data.jsonl (keeps the `messages` schema);
+                # stream + islice so we never load the full multi-GB dataset for a smoke run.
+                python3 - <<'PY'
+                import glob, os, json, itertools, datasets
+                import pyarrow.parquet as pq
+                src = os.environ["SRC"]; frac = float(os.environ["FRAC"])
+                files = sorted(glob.glob(os.path.join(src, "data", "*.parquet")))
+                assert files, f"no parquet under {src}/data"
+                total = sum(pq.ParquetFile(f).metadata.num_rows for f in files)
+                n = max(1, int(total * frac)) if frac <= 1 else int(frac)
+                ds = datasets.load_dataset("parquet", data_files=files, split="train", streaming=True)
+                out = os.path.join(os.environ["IN"], "general", "data.jsonl")
+                with open(out, "w") as fh:
+                    for ex in itertools.islice(ds, n):
+                        fh.write(json.dumps(ex) + "\n")
+                print(f"wrote {n} of {total} examples to {out}")
+                import sys; sys.stdout.flush(); os._exit(0)  # avoid pyarrow shutdown abort (exit 134)
+                PY
+                bash /stage/data_prep/run_data_prep_v2.sh -d "$IN" -t "$TEMPLATE" -s "$OUT" -m "$MODEL" -c "$CTX"
+                FINAL="${OUT}/all_combined/tokenized/${CTX}/data_filtered"
+                if [ ! -d "$FINAL" ]; then echo "ERROR: tokenized dataset not found at $FINAL"; find "$OUT" -maxdepth 4 -type d; exit 1; fi
+                # Emit the tokenized dataset dir as the artifact; gbserver's hfpush
+                # upload_folders it to the HF repo, and sft-training pulls it back.
+                echo "tokenized dataset ready at $FINAL"
+                echo "LLMB_ARTIFACT_ID:tokenized_dataset LLMB_ARTIFACT_PATH:${FINAL}"
     sft-training:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
         model_to_tune:
           uri: "$${MODEL_URI}"
         tokenized_dataset:
-          binding: tokenize.tokenized_dataset
+          binding: "tokenize.tokenized_dataset"
           wait_for_push: true
       outputs:
-        tuned_checkpoint:
-          type: model
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-sft_{{ run_metadata.targetsteprun_id | short_hash }}_{{ binding.path | path_basename }}
+        epoch_1:
+          type: "model"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-sft_{{ run_metadata.targetsteprun_id\
+            \ | short_hash }}_epoch1"
       steps:
-        # Forked open-instruct step: narrows the tuned_checkpoint log_monitor
-        # regex to the final HF checkpoint (…epoch_hf…) so it fires once, not
-        # twice. Override lives in cmadam/assets@gbspace-config-dev; everything
-        # else still resolves from the registered space.
-        - step_uri: git+ssh://github.ibm.com/cmadam/assets.git@gbspace-config-dev#subdirectory=steps/open-instruct
-          config:
-            k8s:
-              image: "$${SFT_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                # GPU P2P is disabled/broken on these nodes (the bfcl eval step sets
-                # VLLM_SKIP_P2P_CHECK / NCCL_IGNORE_DISABLED_P2P). Without the training-side
-                # equivalent, DeepSpeed ZeRO-3's first reduce_scatter dies with an
-                # "unhandled cuda error". Force NCCL off P2P (use shared memory instead).
-                NCCL_P2P_DISABLE:
-                  value: "1"
-                NCCL_DEBUG:
-                  value: "WARN"
-            tuning_config:
-              # Pre-tokenized dataset produced by `tokenize`, pushed to HF and pulled back
-              # here (binding.path = local download dir); load_from_disk-compatible, so this
-              # bypasses open-instruct's raw-data loader entirely.
-              tokenized_data: "{{ bindings.tokenized_dataset.binding.path }}"
-              # Granite chat template — applied to the tokenizer so that
-              # save_pretrained() bakes it into tokenizer_config.json; evals
-              # need it for apply_chat_template(). The base model ships without one.
-              chat_template_name: "$${CHAT_TEMPLATE_NAME}"
-              # Destination for the HF-converted checkpoint. The k8s open-instruct step
-              # (unlike the LSF one) never sets --hf_dir, so at epoch end the HF conversion
-              # does os.path.join(args.hf_dir, ...) with hf_dir=None → TypeError. Set it to a
-              # writable PVC path; finetune writes <hf_dir>/epoch_hf_<N>, which the step
-              # scrapes ("tokenizer config file saved in …") to produce the tuned_checkpoint.
-              hf_dir: "/gb-read-write/outputs/open-instruct/hf/g4-350m-sft-{{ run_metadata.targetsteprun_id | short_hash }}"
-              use_flash_attn: true
-              gradient_checkpointing: true
-              num_train_epochs: $${NUM_EPOCHS}
-              per_device_train_batch_size: "$${PER_DEVICE_BATCH_SIZE}"
-              gradient_accumulation_steps: "$${GRADIENT_ACCUMULATION_STEPS}"
-              learning_rate: "$${LEARNING_RATE}"
-              lr_scheduler_type: "$${LR_SCHEDULER_TYPE}"
-              warmup_ratio: "$${WARMUP_RATIO}"
-              weight_decay: "$${WEIGHT_DECAY}"
-              clip_grad_norm: "$${CLIP_GRAD_NORM}"
-              max_seq_length: $${MAX_SEQ_LEN}
-              seed: $${SEED}
-              reduce_loss: "$${REDUCE_LOSS}"
-              checkpointing_steps: "$${CHECKPOINTING_STEPS}"
-              keep_last_n_checkpoints: "$${KEEP_LAST_N_CHECKPOINTS}"
-              logging_steps: "$${LOGGING_STEPS}"
-            compute_config:
-              num_gpus_per_node: $${SFT_NUM_GPUS}
-              num_nodes: $${SFT_NUM_NODES}
-    global-mmlu:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "git+ssh://github.ibm.com/cmadam/assets.git@gbspace-config-dev#subdirectory=steps/open-instruct"
+        config:
+          k8s:
+            image: "$${SFT_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              NCCL_P2P_DISABLE:
+                value: "1"
+              NCCL_DEBUG:
+                value: "WARN"
+          tuning_config:
+            tokenized_data: "{{ bindings.tokenized_dataset.binding.path }}"
+            chat_template_name: "$${CHAT_TEMPLATE_NAME}"
+            hf_dir: "/gb-read-write/outputs/open-instruct/hf/g4-350m-sft-{{ run_metadata.targetsteprun_id\
+              \ | short_hash }}"
+            use_flash_attn: true
+            gradient_checkpointing: true
+            num_train_epochs: "$${NUM_EPOCHS}"
+            per_device_train_batch_size: "$${PER_DEVICE_BATCH_SIZE}"
+            gradient_accumulation_steps: "$${GRADIENT_ACCUMULATION_STEPS}"
+            learning_rate: "$${LEARNING_RATE}"
+            lr_scheduler_type: "$${LR_SCHEDULER_TYPE}"
+            warmup_ratio: "$${WARMUP_RATIO}"
+            weight_decay: "$${WEIGHT_DECAY}"
+            clip_grad_norm: "$${CLIP_GRAD_NORM}"
+            max_seq_length: "$${MAX_SEQ_LEN}"
+            seed: "$${SEED}"
+            reduce_loss: "$${REDUCE_LOSS}"
+            checkpointing_steps: "$${CHECKPOINTING_STEPS}"
+            keep_last_n_checkpoints: "$${KEEP_LAST_N_CHECKPOINTS}"
+            logging_steps: "$${LOGGING_STEPS}"
+          compute_config:
+            num_gpus_per_node: "$${SFT_NUM_GPUS}"
+            num_nodes: "$${SFT_NUM_NODES}"
+    global-mmlu-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         eval_log:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-global-mmlu-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-global-mmlu-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_MULTILINGUAL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-                UV_CACHE_DIR:
-                  value: "/tmp/uv-cache"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  export EXPERIMENT=$${EXPERIMENT}
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export NUM_GPUS=$${EVAL_NUM_GPUS}
-                  export MAX_LENGTH=$${MAX_LENGTH}
-                  export BATCH_SIZE=$${BATCH_SIZE}
-                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
-                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-global-mmlu.log
-                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_global_mmlu.sh 2>&1 | tee "$LOG"
-                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
-    mgsm:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_MULTILINGUAL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+              UV_CACHE_DIR:
+                value: "/tmp/uv-cache"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                export EXPERIMENT=$${EXPERIMENT}-ep_1
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export NUM_GPUS=$${EVAL_NUM_GPUS}
+                export MAX_LENGTH=$${MAX_LENGTH}
+                export BATCH_SIZE=$${BATCH_SIZE}
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}-ep_1
+                LOG=/gb-read-write/sage/$${EXPERIMENT}-ep_1-multilingual-global-mmlu.log
+                bash /workspace/sage/sage/cluster/gb/scripts/multilingual_global_mmlu.sh 2>&1 | tee "$LOG"
+                echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    mgsm-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         eval_log:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-mgsm-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-mgsm-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_MULTILINGUAL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-                UV_CACHE_DIR:
-                  value: "/tmp/uv-cache"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  export EXPERIMENT=$${EXPERIMENT}
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export NUM_GPUS=$${EVAL_NUM_GPUS}
-                  export MAX_LENGTH=$${MAX_LENGTH}
-                  export BATCH_SIZE=$${BATCH_SIZE}
-                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
-                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-mgsm.log
-                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_mgsm.sh 2>&1 | tee "$LOG"
-                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
-    include-ar-de-es-fr:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_MULTILINGUAL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+              UV_CACHE_DIR:
+                value: "/tmp/uv-cache"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                export EXPERIMENT=$${EXPERIMENT}-ep_1
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export NUM_GPUS=$${EVAL_NUM_GPUS}
+                export MAX_LENGTH=$${MAX_LENGTH}
+                export BATCH_SIZE=$${BATCH_SIZE}
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}-ep_1
+                LOG=/gb-read-write/sage/$${EXPERIMENT}-ep_1-multilingual-mgsm.log
+                bash /workspace/sage/sage/cluster/gb/scripts/multilingual_mgsm.sh 2>&1 | tee "$LOG"
+                echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-ar-de-es-fr-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         eval_log:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-european-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-european-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_MULTILINGUAL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-                UV_CACHE_DIR:
-                  value: "/tmp/uv-cache"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  export EXPERIMENT=$${EXPERIMENT}
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export NUM_GPUS=$${EVAL_NUM_GPUS}
-                  export MAX_LENGTH=$${MAX_LENGTH}
-                  export BATCH_SIZE=$${BATCH_SIZE}
-                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
-                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-european.log
-                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_arabic_german_spanish_french.sh 2>&1 | tee "$LOG"
-                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
-    include-hi-bn-ta-te:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_MULTILINGUAL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+              UV_CACHE_DIR:
+                value: "/tmp/uv-cache"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                export EXPERIMENT=$${EXPERIMENT}-ep_1
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export NUM_GPUS=$${EVAL_NUM_GPUS}
+                export MAX_LENGTH=$${MAX_LENGTH}
+                export BATCH_SIZE=$${BATCH_SIZE}
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}-ep_1
+                LOG=/gb-read-write/sage/$${EXPERIMENT}-ep_1-multilingual-include-european.log
+                bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_arabic_german_spanish_french.sh 2>&1 | tee "$LOG"
+                echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-hi-bn-ta-te-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         eval_log:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-south-asian-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-south-asian-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_MULTILINGUAL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-                UV_CACHE_DIR:
-                  value: "/tmp/uv-cache"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  export EXPERIMENT=$${EXPERIMENT}
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export NUM_GPUS=$${EVAL_NUM_GPUS}
-                  export MAX_LENGTH=$${MAX_LENGTH}
-                  export BATCH_SIZE=$${BATCH_SIZE}
-                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
-                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-south-asian.log
-                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_hindi_bengali_tamil_telugu.sh 2>&1 | tee "$LOG"
-                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
-    include-it-ja-ko-nl-pt-zh:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_MULTILINGUAL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+              UV_CACHE_DIR:
+                value: "/tmp/uv-cache"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                export EXPERIMENT=$${EXPERIMENT}-ep_1
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export NUM_GPUS=$${EVAL_NUM_GPUS}
+                export MAX_LENGTH=$${MAX_LENGTH}
+                export BATCH_SIZE=$${BATCH_SIZE}
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}-ep_1
+                LOG=/gb-read-write/sage/$${EXPERIMENT}-ep_1-multilingual-include-south-asian.log
+                bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_hindi_bengali_tamil_telugu.sh 2>&1 | tee "$LOG"
+                echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    include-it-ja-ko-nl-pt-zh-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         eval_log:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-cjk-others-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-multilingual-include-cjk-others-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_MULTILINGUAL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-                UV_CACHE_DIR:
-                  value: "/tmp/uv-cache"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  export EXPERIMENT=$${EXPERIMENT}
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export NUM_GPUS=$${EVAL_NUM_GPUS}
-                  export MAX_LENGTH=$${MAX_LENGTH}
-                  export BATCH_SIZE=$${BATCH_SIZE}
-                  mkdir -p ${OUTPUT_BASE_PATH}/$${EXPERIMENT}
-                  LOG=${OUTPUT_BASE_PATH}/$${EXPERIMENT}-multilingual-include-cjk-others.log
-                  bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_italian_japanese_korean_dutch_portuguese_chinese.sh 2>&1 | tee "$LOG"
-                  echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
-    bfcl:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_MULTILINGUAL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+              UV_CACHE_DIR:
+                value: "/tmp/uv-cache"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                export EXPERIMENT=$${EXPERIMENT}-ep_1
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export NUM_GPUS=$${EVAL_NUM_GPUS}
+                export MAX_LENGTH=$${MAX_LENGTH}
+                export BATCH_SIZE=$${BATCH_SIZE}
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}-ep_1
+                LOG=/gb-read-write/sage/$${EXPERIMENT}-ep_1-multilingual-include-cjk-others.log
+                bash /workspace/sage/sage/cluster/gb/scripts/multilingual_include_italian_japanese_korean_dutch_portuguese_chinese.sh 2>&1 | tee "$LOG"
+                echo "LLMB_ARTIFACT_ID:eval_log LLMB_ARTIFACT_PATH:$LOG"
+    bfcl-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        model: {binding: sft-training.tuned_checkpoint}
+        model:
+          binding: "sft-training.epoch_1"
       outputs:
         bfcl_results:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-bfcl-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-bfcl-ep1-{{ run_metadata.targetsteprun_id\
+            \ | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: $${EVAL_NUM_GPUS}
-              num_nodes: 1
-              total_memory_per_node: 96Gi
-              num_cpus_per_node: 8
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${BFCL_IMAGE}"
-              env:
-                HF_TOKEN:
-                  valueFrom:
-                    secretKeyRef:
-                      name: "{{ setup_config.space.secret }}"
-                      key: "HF_TOKEN"
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
-                  export MODEL_PATH="{{ bindings.model.binding.path }}"
-                  export MODEL_ID="$${BFCL_MODEL_ID}"
-                  export EXP_NAME="$${EXPERIMENT}"
-                  export OUTPUT_DIR="${OUTPUT_BASE_PATH}/$${EXPERIMENT}/$${BFCL_EVAL_NAME}"
-                  export TEST_CATEGORIES="$${BFCL_TEST_CATEGORIES}"
-                  export NUM_GPUS_GENERATE=$${EVAL_NUM_GPUS}
-                  export NUM_GPUS_EVALUATE=$${EVAL_NUM_GPUS}
-                  export GPU_MEMORY_UTILIZATION="0.5"
-                  export VLLM_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
-                  export VLLM_WORKER_MULTIPROC_METHOD=spawn
-                  export VLLM_SKIP_P2P_CHECK=1
-                  export NCCL_IGNORE_DISABLED_P2P=1
-                  export PYTHONUNBUFFERED=1
-                  mkdir -p "$OUTPUT_DIR"
-                  bash /workspace/scripts/run-bfcl.sh 2>&1 | tee "${OUTPUT_DIR}/${EXP_NAME}-bfcl.log"
-                  RESULT_FILE=$(find "$OUTPUT_DIR" -type f \( -name '*score*.json' -o -name '*summary*.json' -o -name 'BFCL_*.json' \) -printf '%T@ %p\n' | sort -nr | awk 'NR==1{print $2}')
-                  if [ -z "$RESULT_FILE" ]; then echo "ERROR: no BFCL result json in $OUTPUT_DIR"; find "$OUTPUT_DIR" -maxdepth 2 -type f | head -20; exit 1; fi
-                  echo "LLMB_ARTIFACT_ID:bfcl_results LLMB_ARTIFACT_PATH:${RESULT_FILE}"
-    # ─── Result exporter (runs after all evals via wait_for_push) ─────────────
-    export-results:
-      environment_uri: space://environments/{{ space.variables.DEFAULT_ENVIRONMENT }}
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: "$${EVAL_NUM_GPUS}"
+            num_nodes: 1
+            total_memory_per_node: "96Gi"
+            num_cpus_per_node: 8
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${BFCL_IMAGE}"
+            env:
+              HF_TOKEN:
+                valueFrom:
+                  secretKeyRef:
+                    name: "{{ setup_config.space.secret }}"
+                    key: "HF_TOKEN"
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+                export MODEL_PATH="{{ bindings.model.binding.path }}"
+                export MODEL_ID="$${BFCL_MODEL_ID}"
+                export EXP_NAME="$${EXPERIMENT}-ep_1"
+                export OUTPUT_DIR="${OUTPUT_BASE_PATH}/$${EXPERIMENT}-ep_1/$${BFCL_EVAL_NAME}"
+                export TEST_CATEGORIES="$${BFCL_TEST_CATEGORIES}"
+                export NUM_GPUS_GENERATE=$${EVAL_NUM_GPUS}
+                export NUM_GPUS_EVALUATE=$${EVAL_NUM_GPUS}
+                export GPU_MEMORY_UTILIZATION="0.5"
+                export VLLM_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+                export VLLM_WORKER_MULTIPROC_METHOD=spawn
+                export VLLM_SKIP_P2P_CHECK=1
+                export NCCL_IGNORE_DISABLED_P2P=1
+                export PYTHONUNBUFFERED=1
+                mkdir -p "$OUTPUT_DIR"
+                bash /workspace/scripts/run-bfcl.sh 2>&1 | tee "${OUTPUT_DIR}/${EXP_NAME}-bfcl.log"
+                RESULT_FILE=$(find "$OUTPUT_DIR" -type f \( -name '*score*.json' -o -name '*summary*.json' -o -name 'BFCL_*.json' \) -printf '%T@ %p\n' | sort -nr | awk 'NR==1{print $2}')
+                if [ -z "$RESULT_FILE" ]; then echo "ERROR: no BFCL result json in $OUTPUT_DIR"; find "$OUTPUT_DIR" -maxdepth 2 -type f | head -20; exit 1; fi
+                echo "LLMB_ARTIFACT_ID:bfcl_results LLMB_ARTIFACT_PATH:${RESULT_FILE}"
+    export-ep1:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
       inputs:
-        wait_global_mmlu: {binding: global-mmlu.eval_log, wait_for_push: true}
-        wait_mgsm: {binding: mgsm.eval_log, wait_for_push: true}
-        wait_include_ar_de_es_fr: {binding: include-ar-de-es-fr.eval_log, wait_for_push: true}
-        wait_include_hi_bn_ta_te: {binding: include-hi-bn-ta-te.eval_log, wait_for_push: true}
-        wait_include_it_ja_ko_nl_pt_zh: {binding: include-it-ja-ko-nl-pt-zh.eval_log, wait_for_push: true}
-        wait_bfcl: {binding: bfcl.bfcl_results, wait_for_push: true}
+        wait_global_mmlu_ep1:
+          binding: "global-mmlu-ep1.eval_log"
+          wait_for_push: true
+        wait_mgsm_ep1:
+          binding: "mgsm-ep1.eval_log"
+          wait_for_push: true
+        wait_include_ar_de_es_fr_ep1:
+          binding: "include-ar-de-es-fr-ep1.eval_log"
+          wait_for_push: true
+        wait_include_hi_bn_ta_te_ep1:
+          binding: "include-hi-bn-ta-te-ep1.eval_log"
+          wait_for_push: true
+        wait_include_it_ja_ko_nl_pt_zh_ep1:
+          binding: "include-it-ja-ko-nl-pt-zh-ep1.eval_log"
+          wait_for_push: true
+        wait_bfcl_ep1:
+          binding: "bfcl-ep1.bfcl_results"
+          wait_for_push: true
+      outputs:
+        epoch_csv:
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-eval-results-ep1-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
+      steps:
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: 0
+            num_nodes: 1
+            total_memory_per_node: "10Gi"
+            num_cpus_per_node: 1
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_OLMES_IMAGE}"
+            env:
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                cd /workspace/sage/sage/exporters/
+                python exporter.py -in-folder /gb-read-write/sage/$${EXPERIMENT}-ep_1 -stack $${EXPORT_STACK} -o /gb-read-write/sage/$${EXPERIMENT}-ep_1/$${EXPERIMENT}-ep_1.csv
+                find /gb-read-write/sage/$${EXPERIMENT}-ep_1 -name "*.sh" -exec sed -i 's/hf_[A-Za-z0-9]\{10,\}/REDACTED/g' {} +
+                echo "LLMB_ARTIFACT_ID:epoch_csv LLMB_ARTIFACT_PATH:/gb-read-write/sage/$${EXPERIMENT}-ep_1/$${EXPERIMENT}-ep_1.csv"
+    export-combined:
+      environment_uri: "space://environments/{{ space.variables.DEFAULT_ENVIRONMENT\
+        \ }}"
+      inputs:
+        wait_export_ep1:
+          binding: "export-ep1.epoch_csv"
+          wait_for_push: true
       outputs:
         results:
-          type: fileset
-          uri: hf://huggingface.co/datasets/ibm-research/g4-350m-eval-results-{{ run_metadata.targetsteprun_id | short_hash }}
+          type: "fileset"
+          uri: "hf://huggingface.co/datasets/ibm-research/g4-350m-eval-results-combined-{{\
+            \ run_metadata.targetsteprun_id | short_hash }}"
       steps:
-        - step_uri: space://steps/byoi
-          config:
-            compute_config:
-              num_gpus_per_node: 0
-              num_nodes: 1
-              total_memory_per_node: 10Gi
-              num_cpus_per_node: 1
-            byoi_config:
-              command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
-            k8s:
-              image: "$${SAGE_OLMES_IMAGE}"
-              env:
-                OUTPUT_BASE_PATH:
-                  value: "/gb-read-write/sage"
-              additional_files:
-                "/tmp/command.sh": |
-                  set -e
-                  cd /workspace/sage/sage/exporters/
-                  python exporter.py -in-folder ${OUTPUT_BASE_PATH}/$${EXPERIMENT} -stack granite4-instruct -o ${OUTPUT_BASE_PATH}/$${EXPERIMENT}/$${EXPERIMENT}.csv
-                  # Redact HF tokens from SAGE-generated scripts before hfpush;
-                  # HuggingFace rejects commits containing valid hf_* secrets.
-                  find ${OUTPUT_BASE_PATH}/$${EXPERIMENT} -name "*.sh" -exec sed -i 's/hf_[A-Za-z0-9]\{10,\}/REDACTED/g' {} +
-                  echo "LLMB_ARTIFACT_ID:results LLMB_ARTIFACT_PATH:${OUTPUT_BASE_PATH}/$${EXPERIMENT}"
+      - step_uri: "space://steps/byoi"
+        config:
+          compute_config:
+            num_gpus_per_node: 0
+            num_nodes: 1
+            total_memory_per_node: "10Gi"
+            num_cpus_per_node: 1
+          byoi_config:
+            command: '/bin/bash -c "chmod +x /tmp/command.sh && /tmp/command.sh"'
+          k8s:
+            image: "$${SAGE_OLMES_IMAGE}"
+            env:
+              OUTPUT_BASE_PATH:
+                value: "/gb-read-write/sage"
+            additional_files:
+              /tmp/command.sh: |
+                set -e
+                cd /workspace/sage/sage/exporters/
+                mkdir -p /gb-read-write/sage/$${EXPERIMENT}
+                python exporter.py -in-folder /gb-read-write/sage/$${EXPERIMENT}-ep_1 -stack $${EXPORT_STACK} -o /gb-read-write/sage/$${EXPERIMENT}/combined.csv
+                find /gb-read-write/sage/$${EXPERIMENT} -name "*.sh" -exec sed -i 's/hf_[A-Za-z0-9]\{10,\}/REDACTED/g' {} +
+                echo "LLMB_ARTIFACT_ID:combined LLMB_ARTIFACT_PATH:/gb-read-write/sage/$${EXPERIMENT}/combined.csv"

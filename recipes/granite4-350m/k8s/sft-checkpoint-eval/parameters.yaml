@@ -1,0 +1,89 @@
+# BASE / default parameters for the k8s sft-checkpoint-eval generator.
+#
+# This is generate_build.py's DEFAULT --parameters-path. It exists so the
+# generator is runnable out of the box (a fast smoke-shaped default: tiny data
+# fraction, 1 epoch, multilingual + bfcl evals). REAL runs pass a recipe-specific
+# --parameters-path instead:
+#   - ../sft-eval-smoke/parameters.yaml       (fast validation: 1 epoch)
+#   - ../sft-eval-full-dataset/parameters.yaml (full-eval over all epochs)
+#
+# The generator tokenizes once, fine-tunes granite4-350m for NUM_EPOCHS emitting
+# one HF checkpoint per evaluated epoch, then fans the selected eval suite
+# (EVAL_SETS) out over each selected epoch (EVAL_EPOCHS), and rolls the results up
+# per-epoch + into a combined benchmark×epoch CSV. Override any value at
+# generation time with --param KEY=VALUE (or the equivalent common flags).
+#
+# Generate + start (defaults resolve to this file / this dir's eval-catalog.yaml):
+#   python generate_build.py --output build.yaml
+#   gb build start -f build.yaml \
+#     --parameters-path parameters-resolved.yaml --space <your-k8s-space>
+
+# ─── Per-epoch fanout selection (generator knobs) ───────────────────────────
+# Which 1-indexed epochs to evaluate: 'all', a CSV '2,4', or a YAML list [2, 4].
+# [--eval-epochs]
+EVAL_EPOCHS: all
+# Which evaluations to fan out over each epoch: catalog `sets` names and/or
+# individual eval names (see eval-catalog.yaml). full-eval = all 27.
+# WARNING: eval targets = #epochs × #evals. [--eval-sets]
+EVAL_SETS: [multilingual-eval, bfcl]
+
+# ─── Base model + training data (HuggingFace) ───────────────────────────────
+MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
+TUNING_DATA_URI: "hf://huggingface.co/datasets/allenai/tulu-3-sft-mixture"
+# Fraction of the dataset to tokenize/train on (1.0 = full). Tiny by default so a
+# default run completes fast.
+DATA_FRACTION: "0.0001"
+
+# ─── Training image (pinned — matches BlueVela) ─────────────────────────────
+SFT_IMAGE: "us.icr.io/cil15-shared-registry/open-instruct-tuning:0.1.0-conda"
+
+# ─── SFT hyperparameters ────────────────────────────────────────────────────
+NUM_EPOCHS: 1
+PER_DEVICE_BATCH_SIZE: "1"
+GRADIENT_ACCUMULATION_STEPS: "2"
+LEARNING_RATE: "1e-5"
+LR_SCHEDULER_TYPE: "linear"
+WARMUP_RATIO: "0.03"
+WEIGHT_DECAY: "0.0"
+CLIP_GRAD_NORM: "1.0"
+MAX_SEQ_LEN: 8192
+SEED: 123
+REDUCE_LOSS: "sum"
+CHECKPOINTING_STEPS: "epoch"
+# The generator forces this to >= NUM_EPOCHS at generation time so no evaluated
+# epoch dir is pruned before its eval reads it.
+KEEP_LAST_N_CHECKPOINTS: "1"
+# Set larger than the run's total steps so the per-step logging block never fires:
+# the pinned open-instruct image's finetune.py bugs out there. NOTE: "0" does NOT
+# work — falsy values are dropped in the config merge and fall back to the default.
+LOGGING_STEPS: "100000"
+CHAT_TEMPLATE_NAME: "granite3dot1wodefaultsysmsg"
+
+# ─── Compute ────────────────────────────────────────────────────────────────
+SFT_NUM_GPUS: 2
+SFT_NUM_NODES: 1
+EVAL_NUM_GPUS: 1
+
+# ─── Eval settings (consumed by the byoi sage/bfcl targets) ─────────────────
+EXPERIMENT: "g4-350m-sft-ckpt-eval"
+BATCH_SIZE: "10"
+MAX_LENGTH: "4096"
+
+# Per-category SAGE images (SAGE repo baked in). All defined so EVAL_SETS can be
+# any subset without re-editing this file; the olmes image also runs the exporter.
+SAGE_OLMES_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025"
+SAGE_CODE_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-code:0.025"
+SAGE_SAFETY_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-safety:0.025"
+SAGE_MULTILINGUAL_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025"
+
+# BigCodeBench external evaluation API (consumed by olmes-bigcodebench, if selected).
+OE_EVAL_BCB_API_URL: "http://bigcodebench-server:7860/evaluate/"
+
+# Aggregation: the exporter.py `-stack` for the per-epoch + combined CSVs.
+EXPORT_STACK: "granite4-instruct"
+
+# ─── BFCL (byoi with the bfcl image) ────────────────────────────────────────
+BFCL_IMAGE: "us.icr.io/cil15-shared-registry/bfcl-py311:0.02"
+BFCL_MODEL_ID: "ibm-granite/granite-4"
+BFCL_EVAL_NAME: "bfclv3"
+BFCL_TEST_CATEGORIES: "all"

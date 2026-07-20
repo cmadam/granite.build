@@ -1,14 +1,39 @@
 # Parameters for the granite4-350m SMOKE build (native k8s, type: K8s).
 #
-# Purpose: validate the full train → hfpush → eval path quickly. Training runs on a
-# tiny fraction of the dataset for 1 epoch; only the multilingual (5) + bfcl (1)
-# evals run. Same steps and images as ../sft-eval-full-dataset.
+# Purpose: validate the full tokenize → train → per-epoch eval → export path
+# quickly. This is a per-epoch checkpoint-eval build: the generator
+# (../sft-checkpoint-eval/generate_build.py) tokenizes once, fine-tunes for
+# NUM_EPOCHS emitting one HF checkpoint per evaluated epoch, then fans the
+# selected eval suite (EVAL_SETS) out over each selected epoch (EVAL_EPOCHS) and
+# rolls the results up per-epoch + into a combined benchmark×epoch CSV.
 #
-# Run:
+# Smoke keeps this fast: a tiny fraction of the dataset, 1 epoch, and only the
+# multilingual (5) + bfcl (1) evals. Same steps and images as
+# ../sft-eval-full-dataset, which runs full-eval over all epochs.
+#
+# build.yaml is GENERATED from this file — do not hand-edit it. Regenerate with:
+#   cd recipes/granite4-350m/k8s/sft-checkpoint-eval
+#   python generate_build.py \
+#     --parameters-path ../sft-eval-smoke/parameters.yaml \
+#     --catalog-path eval-catalog.yaml \
+#     --output ../sft-eval-smoke/build.yaml \
+#     --params-out ../sft-eval-smoke/parameters-resolved.yaml
+#
+# Run with the RESOLVED params the generator writes (they carry any --param
+# overrides applied at generation time):
 #   gb build start \
 #     -f recipes/granite4-350m/k8s/sft-eval-smoke/build.yaml \
-#     --parameters-path recipes/granite4-350m/k8s/sft-eval-smoke/parameters.yaml \
+#     --parameters-path recipes/granite4-350m/k8s/sft-eval-smoke/parameters-resolved.yaml \
 #     --space <your-k8s-space>
+
+# ─── Per-epoch fanout selection (generator knobs) ───────────────────────────
+# Which 1-indexed epochs to evaluate: 'all', a CSV '2,4', or a YAML list [2, 4].
+# 'all' evaluates every epoch (here just epoch 1). [--eval-epochs]
+EVAL_EPOCHS: all
+# Which evaluations to fan out over each epoch: catalog `sets` names and/or
+# individual eval names (see ../sft-checkpoint-eval/eval-catalog.yaml). Smoke
+# runs the 5 multilingual evals + the single bfcl eval. [--eval-sets]
+EVAL_SETS: [multilingual-eval, bfcl]
 
 # ─── Base model + training data (HuggingFace) ───────────────────────────────
 MODEL_URI: "hf://huggingface.co/models/ibm-granite/granite-4.0-350m-base"
@@ -53,9 +78,17 @@ EXPERIMENT: "g4-350m-sft-eval-smoke"
 BATCH_SIZE: "10"
 MAX_LENGTH: "4096"
 
-# Multilingual eval image (SAGE repo baked in) + exporter (uses the olmes image).
+# Per-category SAGE images (SAGE repo baked in). Smoke's EVAL_SETS only needs the
+# multilingual image (evals) + the olmes image (per-epoch/combined exporter), but
+# the code + safety images are defined too so EVAL_SETS can be widened without
+# re-editing this file. Versions match ../sft-eval-full-dataset for consistency.
 SAGE_MULTILINGUAL_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-multilingual:0.025"
 SAGE_OLMES_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-olmes:0.025"
+SAGE_CODE_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-code:0.025"
+SAGE_SAFETY_IMAGE: "us.icr.io/cil15-shared-registry/sage-py311-safety:0.025"
+
+# Aggregation: the exporter.py `-stack` for the per-epoch + combined CSVs.
+EXPORT_STACK: "granite4-instruct"
 
 # ─── BFCL (byoi with the bfcl image) ────────────────────────────────────────
 BFCL_IMAGE: "us.icr.io/cil15-shared-registry/bfcl-py311:0.02"

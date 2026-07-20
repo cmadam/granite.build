@@ -1,0 +1,5 @@
+# Merged parameters written by generate_build.py (base params + flags + --param).
+# Regenerated per run alongside build.yaml — do not commit.
+parameters-resolved.yaml
+# Applied-parameters file written by `gb build start`.
+parameters-applied.yaml
