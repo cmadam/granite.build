@@ -1,0 +1,59 @@
+# Parameters for the fast AutoTuneX sweep on BlueVela.
+#
+# This recipe trades fidelity for turnaround. Where tune-4gpu reproduces the
+# AutoTuneX-generated build exactly, this one is tuned to finish quickly and to
+# need as little external access as possible. See build.yaml for the full list
+# of differences.
+
+# The AutoTuneX runtime image, pulled cold. No .sqsh pre-seed is required:
+# the LSF provisioner allows an hour for the bsub script to signal container
+# readiness, and that window explicitly covers `enroot import` of a multi-GB
+# image on a cold cache (sky/provision/lsf/utils.py:43,
+# DEFAULT_READY_TIMEOUT = 60 * 60, overridable per cluster via
+# lsf.cluster_configs.<cluster>.ready_timeout). If the first run does time out,
+# the log will say so and pre-seeding becomes the fallback, not a precondition.
+IMAGE: "us.icr.io/cil15-shared-registry/autotunex/build-runtime:25"
+
+# Infrastructure. Two GPUs so the two trials run concurrently rather than
+# serially: with num_gpus_per_trial=1 and max_concurrent_trials=2, wall clock is
+# one trial, not two, and the run still exercises multi-trial event reporting —
+# which is the point of the exercise for the dashboard.
+ACCELERATORS: "H100:2"
+CLUSTER: "bluevela"
+QUEUE: "normal"
+MEMORY: "256"
+NUM_CPUS: 32
+
+# Workload repo. $GITHUB_IBM_PAT is the ONLY external credential this recipe
+# needs — there is no dataset pull and no model download.
+REPO: "github.ibm.com/ibm-research/fm-tune.git"
+REPO_REF: "stage"
+
+# Model. The 350m base already staged on /proj, as recipes/granite4-350m/lsf/*
+# use, rather than ibm-granite/granite-4.1-3b — no HF download, and a 350m model
+# trains in a fraction of the time of a 3b.
+MODEL: "/proj/granite-build/g4os/granite-4.0-350m-base/r251014a"
+RUN_NAME: "granite-4.0-350m_autotunex-lora-fast"
+TUNING_ALGO: "lora"
+
+# Dataset: fm-tune's own bundled copy, resolved relative to the clone root that
+# start_command runs in. 1833 train / 204 validation lines, and
+# hpo_dataset_percentage (0.1) subsamples further for the HPO trials. This is
+# what removes the hf:// input, the hfpull step, and $HF_TOKEN entirely.
+TRAIN_FILE: "datasets/finance_train.jsonl"
+VALIDATION_FILE: "datasets/finance_validation.jsonl"
+
+# CUDA prefix expected by fm-tune's start_command.
+CUDA_HOME: "/usr/local/cuda-12.4"
+
+# AutoTuneX bridge — the complete flag, or empty to run without it. Egress from
+# the BlueVela compute node to the bridge URL is not yet verified; empty still
+# reports trial progress and the artifact through gbserver.
+#   AUTOTUNEX_ARGS: "--autotunex_server_url https://<subdomain>.ngrok-free.dev"
+AUTOTUNEX_ARGS: ""
+
+# Job id AutoTuneX correlates its records by. Regenerate per run.
+JOB_ID: "1c74da30-ca2b-4c03-b4df-0cfc666ded98"
+
+# Monitor cadence. Short, because the whole run should be minutes.
+POLL_INTERVAL: 30
