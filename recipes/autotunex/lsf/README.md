@@ -22,7 +22,46 @@ authoritative list.
 
 ## Prerequisites
 
-### 1. Repo and virtualenv
+### 1. The code — not yet upstream
+
+Everything described here (the `autotunex-tune` step, these recipes, and the secrets
+doc) lives **only in a fork**, on a branch that has not been merged into
+`ibm-granite/granite.build`:
+
+- fork: <https://github.com/cmadam/granite.build/>
+- branch: **`gb-autotunex-lsf`**
+
+Cloning `ibm-granite/granite.build` will not give you any of it. Two ways to get it,
+depending on whether you already have a clone.
+
+**Fresh clone** — the branch directly:
+
+```bash
+git clone -b gb-autotunex-lsf https://github.com/cmadam/granite.build.git
+cd granite.build
+```
+
+**You already have a clone of the upstream repo** — add the fork as a second remote so
+you keep `origin` pointing at upstream:
+
+```bash
+cd /path/to/your/granite.build
+git remote add cmadam https://github.com/cmadam/granite.build.git
+git fetch cmadam gb-autotunex-lsf
+git checkout -b gb-autotunex-lsf cmadam/gb-autotunex-lsf
+```
+
+To pick up later changes on the branch:
+
+```bash
+git fetch cmadam && git merge --ff-only cmadam/gb-autotunex-lsf
+```
+
+Substitute `git@github.com:cmadam/granite.build.git` for the HTTPS URL if you use SSH
+for github.com. Once this is merged upstream, drop the extra remote and use
+`ibm-granite/granite.build` as normal.
+
+### 2. Virtualenv
 
 ```bash
 cd /path/to/granite.build
@@ -35,7 +74,7 @@ Use `.venv/bin/gb` and `.venv/bin/gbserver` directly — not `uv run`.
 > rebuilds from scratch rather than updating in place. Skip it if you already have a
 > working `.venv`, and stop any running gbserver first.
 
-### 2. BlueVela access
+### 3. BlueVela access
 
 An SSH key at **`~/.ssh/ibm-bluevela.key`** — the path is not configurable per user;
 it is what the environment asset declares:
@@ -72,7 +111,7 @@ ssh -o IdentitiesOnly=yes -i ~/.ssh/ibm-bluevela.key \
     'id; touch /proj/data-eng/llmb-read-write/.probe && rm /proj/data-eng/llmb-read-write/.probe && echo "shared_workdir writable"; ls -d /proj/granite-build/g4os/enroot >/dev/null && echo "enroot cache reachable"'
 ```
 
-### 3. A github.ibm.com token, stored as a space secret
+### 4. A github.ibm.com token, stored as a space secret
 
 The step clones `fm-tune` over HTTPS using `$GITHUB_IBM_PAT`. Every secret in the
 space's secret manager is injected into the job as an environment variable under its
