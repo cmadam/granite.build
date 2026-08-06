@@ -76,6 +76,11 @@ granite.build:
               dir_to_save: "$OUTPUT_PATH"
             skypilot:
               image: "$${IMAGE}"
+              # The runtime image keeps torch/flash_attn/ray in this venv and only
+              # symlinks it into /root/.local/bin, which is not on PATH under
+              # enroot. Without this, pip hits PEP 668 and python cannot import
+              # ray. See the step.yaml note on venv_path.
+              venv_path: "$${VENV_PATH}"
               additional_files:
                 # The AutoTuneX search space with three `default:` values changed
                 # for turnaround. autotune/config.py:111-121 reads

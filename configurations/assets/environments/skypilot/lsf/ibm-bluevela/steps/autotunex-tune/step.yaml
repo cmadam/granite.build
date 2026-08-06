@@ -41,6 +41,21 @@ config:
     # image_id below). Empty => bare compute node, which will NOT have the tuning
     # dependencies, so this is only useful for plumbing smoke tests.
     image: ""
+    # Path to a virtualenv inside the image whose bin/ must be on PATH.
+    #
+    # Needed because the AutoTuneX runtime image installs every dependency —
+    # torch, flash_attn, ray — into a venv (`python -m venv /step_venv`) and then
+    # exposes it only as symlinks in /root/.local/bin/{python,pip}. That works on
+    # k8s, where the pod runs as root with HOME=/root so those symlinks are on
+    # PATH. It does NOT work under enroot: the LSF provisioner sets
+    # ENROOT_MOUNT_HOME=false and starts the container without --root, so
+    # /root/.local/bin is absent from PATH, `pip` resolves to the system pip
+    # (which refuses to install: PEP 668 externally-managed-environment) and
+    # `python` to the system python (ModuleNotFoundError: No module named 'ray').
+    #
+    # Setting this prepends <venv_path>/bin to PATH so both resolve to the venv.
+    # Empty = leave PATH alone, for images that install into system python.
+    venv_path: ""
     # Files to materialize inside the container before start_command runs, as a
     # {absolute_path: file_contents} mapping. This is the same inline-dict shape
     # as the k8s step's `additional_files`; AutoTuneX uses it to drop the LoRA/
@@ -121,6 +136,21 @@ environment_configs:
             mkdir -p "$OUTPUT_PATH"
             echo "OUTPUT_PATH=$OUTPUT_PATH"
 
+            # --- Interpreter selection -------------------------------------------
+            # See config.skypilot.venv_path above for why this is necessary under
+            # enroot. Reported explicitly because "which python" is the single most
+            # useful line in this log when a dependency turns up missing.
+            {% if config.skypilot.venv_path -%}
+            if [ ! -x "{{ config.skypilot.venv_path }}/bin/python" ]; then
+              echo "ERROR: venv_path {{ config.skypilot.venv_path }} has no bin/python in this image"
+              exit 1
+            fi
+            export VIRTUAL_ENV="{{ config.skypilot.venv_path }}"
+            export PATH="{{ config.skypilot.venv_path }}/bin:$PATH"
+            {% endif -%}
+            echo "python : $(command -v python || command -v python3 || echo '<none>')"
+            echo "pip    : $(command -v pip || command -v pip3 || echo '<none>')"
+
             # GPU visibility is informational: a 0-GPU smoke build has no
             # nvidia-smi, and that must not fail the step.
             nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || \
@@ -184,15 +214,28 @@ environment_configs:
             {%- endif %}
 
             # --- Dependency install / env prep ----------------------------------
+            # Each phase is wrapped in `{ ...; } || { exit 1; }` rather than relying
+            # on `set -e`. Bash deliberately does NOT honour errexit for a command
+            # that fails partway through an `&&` list — only the command after the
+            # final `&&` counts — and AutoTuneX's setup_command is exactly that
+            # shape (`git checkout && pip install && pip list && nvidia-smi`). A
+            # failing pip therefore left the step running and it went on to
+            # start_command, reporting a confusing missing-module error instead of
+            # the install failure that caused it. A brace group (not a subshell)
+            # keeps any cd/export the command performs visible to later phases.
             {% if config.custom_code_config.setup_command -%}
             echo "=== setup_command ==="
+            {
             {{ config.custom_code_config.setup_command }}
+            } || { echo "ERROR: setup_command failed - not running start_command"; exit 1; }
             {%- endif %}
 
             # --- The tuning run --------------------------------------------------
             {% if config.custom_code_config.start_command -%}
             echo "=== start_command ==="
+            {
             {{ config.custom_code_config.start_command }}
+            } || { echo "ERROR: start_command failed"; exit 1; }
             {%- endif %}
 
             # --- Artifact ---------------------------------------------------------

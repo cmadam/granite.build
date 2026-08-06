@@ -91,6 +91,10 @@ granite.build:
               dir_to_save: "$OUTPUT_PATH"
             skypilot:
               image: "$${IMAGE}"
+              # See the step.yaml note on venv_path: the runtime image installs its
+              # dependencies into this venv and only symlinks it into
+              # /root/.local/bin, which enroot does not put on PATH.
+              venv_path: "$${VENV_PATH}"
               additional_files:
                 # Verbatim from the AutoTuneX-generated build: the tune_config /
                 # tuners_config / training_config search space that main.py reads

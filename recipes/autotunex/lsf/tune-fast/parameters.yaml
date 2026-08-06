@@ -57,3 +57,10 @@ JOB_ID: "1c74da30-ca2b-4c03-b4df-0cfc666ded98"
 
 # Monitor cadence. Short, because the whole run should be minutes.
 POLL_INTERVAL: 30
+
+# Virtualenv inside the runtime image that holds torch/flash_attn/ray. The image
+# builds it with `python -m venv /step_venv` and exposes it only as symlinks in
+# /root/.local/bin, which enroot does not put on PATH (no --root, and
+# ENROOT_MOUNT_HOME=false), so the step prepends this to PATH explicitly.
+# Set to "" for an image that installs into system python.
+VENV_PATH: "/step_venv"
