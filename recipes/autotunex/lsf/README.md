@@ -194,11 +194,47 @@ the newest: `ls -dt /tmp/sky-logs/*/ | head -1`. Nothing is written under
 execution layout; a SkyPilot job's output arrives through the monitor's periodic
 retrieval instead.
 
-To see the cluster while it exists:
+### Following a run live with SkyPilot
+
+`sky` is installed in the same virtualenv as `gb` and `gbserver`, and is often the
+fastest way to see what a run is doing while it is doing it — the files above are
+only written once the monitor retrieves them.
+
+`sky status` lists the clusters gbserver has launched and their state (`INIT` while
+provisioning and importing the image, `UP` once the container is ready):
+
+```
+(.venv) cma:granite.build$ sky status
+Enabled Infra: lsf
+
+Clusters
+NAME             INFRA         RESOURCES                                 STATUS  AUTOSTOP  LAUNCHED
+gb-19fdda11-2b4  LSF (normal)  1x(gpus=H100:2, 32CPU--256GB--H..., ...)  INIT    -         2 mins ago
+
+Managed jobs
+No in-progress managed jobs. (See: sky jobs -h)
+
+Services
+No live services. (See: sky serve -h)
+```
+
+Then stream either half of the run to your laptop:
 
 ```bash
-.venv/bin/sky status                  # INIT -> UP; torn down when the build finishes
+.venv/bin/sky logs gb-19fdda11-2b4 --provision   # provisioning: bsub, enroot import, container start
+.venv/bin/sky logs gb-19fdda11-2b4               # the LSF job itself — the workload's stdout
 ```
+
+Both follow by default; `--no-follow` prints what exists and exits, and `--tail N`
+limits the output. `--provision` is the one to reach for when a cluster sits in `INIT`
+for a long time — that is usually a cold `enroot import`, and its progress appears
+there and nowhere else. Plain `sky logs` is the same content that later lands in
+`/tmp/sky-logs/gb-<launch-id>/job-1/run.log`, but visible immediately rather than at
+the monitor's next retrieval.
+
+The cluster name is `gb-<launch-id>` and matches the `/tmp/sky-logs/` directory, which
+is how you tie a cluster back to a build. Clusters are torn down when the build
+finishes, so these commands only work while it is running.
 
 ## Notes
 
