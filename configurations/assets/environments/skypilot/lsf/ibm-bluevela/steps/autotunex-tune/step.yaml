@@ -1,0 +1,193 @@
+name: autotunex-tune
+version: 1.0.0
+type: training
+# AutoTuneX hyperparameter-tuning step for BlueVela (LSF via SkyPilot).
+#
+# This is the SkyPilot sibling of the k8s-only `space://steps/custom_code` step
+# that AutoTuneX's api/utilites/granite_build.py generates today. The config
+# schema below deliberately mirrors that generator's output so the AutoTuneX-side
+# change is a key rename (`k8s:` -> `skypilot:`) rather than a redesign:
+#
+#   custom_code_config  - unchanged (github_url / setup_command / start_command)
+#   skypilot            - replaces the `k8s:` block; same `image` +
+#                         `additional_files` shape
+#   compute_config      - unchanged, but see the resources note below
+#
+# The tuning "probes" are ray/tune trials INSIDE a single container (num_samples
+# trials, max_concurrent_trials at a time, num_gpus_per_trial each), so this is
+# one node-sized job — not a fan-out of one job per trial.
+config:
+  custom_code_config:
+    # Repo to clone, WITHOUT scheme (e.g. github.ibm.com/ibm-research/fm-tune.git).
+    # Cloned over https with $GITHUB_IBM_PAT when that secret is present.
+    github_url: ""
+    # Optional branch/tag/sha. AutoTuneX currently does its own `git checkout
+    # stage` as the first clause of setup_command, which also works.
+    github_ref: ""
+    # Dependency install / environment prep, run in the clone root.
+    setup_command: ""
+    # The actual tuning invocation, run in the clone root after setup_command.
+    start_command: ""
+    # Subdirectory of the clone whose contents are the step's output artifact.
+    # "." means the clone root.
+    dir_to_save: "."
+  skypilot:
+    # Container image for the job. Non-empty => runs under enroot on LSF (see
+    # image_id below). Empty => bare compute node, which will NOT have the tuning
+    # dependencies, so this is only useful for plumbing smoke tests.
+    image: ""
+    # Files to materialize inside the container before start_command runs, as a
+    # {absolute_path: file_contents} mapping. This is the same inline-dict shape
+    # as the k8s step's `additional_files`; AutoTuneX uses it to drop the LoRA/
+    # tuning YAML that start_command then points at.
+    #
+    # Written by the run: script as quoted heredocs rather than via SkyPilot
+    # `file_mounts` on purpose: file_mounts sources must be real files on disk
+    # next to this step.yaml, whereas the generator produces content in memory.
+    # The only constraint on contents is that they must not contain a bare
+    # GB_EOF_<n> line.
+    additional_files: {}
+  compute_config:
+    # NOTE on resources: the SkyPilot launcher reads `num_cpus_per_node` as a
+    # cpus floor, but it does NOT derive `accelerators` from compute_config
+    # (see skypilot.py:_resources_from_compute_config and the merge comment
+    # above sky.Resources), and it skips `total_memory_per_node` entirely on
+    # LSF/SLURM because bare HPC schedulers don't track memory as consumable.
+    #
+    # So GPUs MUST be requested from the build.yaml as
+    # config.launcher_config.resources.accelerators (e.g. "H100:4"). This step
+    # intentionally leaves `resources` empty so it stays usable both for a
+    # 0-GPU plumbing smoke build and for a real 4-GPU tuning run.
+    num_gpus_per_node: 0
+    num_cpus_per_node: 0
+    num_nodes: 1
+    total_memory_per_node: ""
+outputs:
+  optional:
+    checkpoint:
+      type: model
+
+environment_configs:
+  Skypilot:
+    default_launcher: autotunex-tune
+    launchers:
+      autotunex-tune:
+        type: skypilot
+        monitors:
+          - skypilot_monitor
+        config:
+          # A non-empty image runs via enroot (bluevela's container runtime);
+          # an empty one runs on the bare node. Mirrors the builtin `command`
+          # step and the filemount-check test step.
+          image_id: '{{ ("docker:" ~ config.skypilot.image) if config.skypilot.image else "" }}'
+          # Left empty on purpose — the build.yaml supplies accelerators/cluster/
+          # zone/memory via config.launcher_config.resources (build.yaml wins over
+          # the step). Note `cpus: "1+"` breaks on the LSF cloud, so never use the
+          # "N+" form here.
+          resources: {}
+          # Everything runs in `run:` rather than split across `setup:`. On LSF
+          # each launch provisions a fresh cluster, so `setup:`'s
+          # cached-across-reuse benefit doesn't apply, and keeping one phase means
+          # one CWD ($GB_BUILD_WORKDIR) and no risk of a cached setup going stale
+          # against a per-target-run workdir.
+          run: |
+            set -euo pipefail
+            echo "=== AutoTuneX tuning on $(hostname) ==="
+
+            # GB_BUILD_WORKDIR is the per-target-run dir under the env's
+            # shared_workdir (/proj/...), and is already this script's CWD. It is
+            # on the shared FS that enroot bind-mounts *identity*, so paths are
+            # the same inside and outside the container. Fall back to CWD if the
+            # env didn't set a shared_workdir.
+            WORKDIR="${GB_BUILD_WORKDIR:-$(pwd)}"
+            cd "$WORKDIR"
+
+            # GPU visibility is informational: a 0-GPU smoke build has no
+            # nvidia-smi, and that must not fail the step.
+            nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || \
+              echo "no GPUs visible (expected for a 0-GPU smoke run)"
+
+            # --- Materialize additional_files -----------------------------------
+            # Same purpose as the k8s step's additional_files. A quote-delimited
+            # heredoc (<<'GB_EOF_n') is used rather than the base64 trick the LSF
+            # wrapper uses (llmb_lsf_wrapper.sh): that wrapper is rendered with
+            # strict=True, but step configs go through
+            # targetstep.py:310 fill_template(..., strict=False), whose Jinja env
+            # does NOT register the `b64encode` filter. The quoted delimiter means
+            # no shell expansion or quoting hazard in the contents; the only
+            # constraint is that the contents must not contain a bare GB_EOF_n
+            # line, hence the loop-indexed delimiter.
+            {% for fname, fcontents in (config.skypilot.additional_files | default({})).items() -%}
+            mkdir -p "$(dirname '{{ fname }}')"
+            cat > '{{ fname }}' <<'GB_EOF_{{ loop.index }}'
+            {{ fcontents }}
+            GB_EOF_{{ loop.index }}
+            echo "wrote {{ fname }} ($(wc -c < '{{ fname }}') bytes)"
+            {% endfor -%}
+
+            # --- Clone the workload repo ----------------------------------------
+            {% if config.custom_code_config.github_url -%}
+            REPO_URL="{{ config.custom_code_config.github_url }}"
+            CLONE_DIR="$WORKDIR/$(basename "$REPO_URL" .git)"
+            # $GITHUB_IBM_PAT arrives as a space secret (all space secrets are
+            # injected as job env vars — skypilot.py:910). Built with `set +x` and
+            # never echoed so the token stays out of the job log; git is given the
+            # credential inline rather than via `git config --global`, which would
+            # persist it into the image/home dir.
+            set +x
+            if [ -n "${GITHUB_IBM_PAT:-}" ]; then
+              CLONE_AUTH="https://oauth2:${GITHUB_IBM_PAT}@${REPO_URL}"
+            else
+              echo "WARNING: GITHUB_IBM_PAT unset - attempting unauthenticated clone"
+              CLONE_AUTH="https://${REPO_URL}"
+            fi
+            rm -rf "$CLONE_DIR"
+            git clone --quiet "$CLONE_AUTH" "$CLONE_DIR" 2>&1 | sed 's#//[^@]*@#//***@#g'
+            unset CLONE_AUTH
+            cd "$CLONE_DIR"
+            {% if config.custom_code_config.github_ref -%}
+            git checkout --quiet "{{ config.custom_code_config.github_ref }}"
+            {% endif -%}
+            echo "cloned $(basename "$REPO_URL" .git) at $(git rev-parse --short HEAD)"
+            {%- endif %}
+
+            # --- Dependency install / env prep ----------------------------------
+            {% if config.custom_code_config.setup_command -%}
+            echo "=== setup_command ==="
+            {{ config.custom_code_config.setup_command }}
+            {%- endif %}
+
+            # --- The tuning run --------------------------------------------------
+            {% if config.custom_code_config.start_command -%}
+            echo "=== start_command ==="
+            {{ config.custom_code_config.start_command }}
+            {%- endif %}
+
+            # --- Artifact ---------------------------------------------------------
+            # dir_to_save is relative to the clone root ("." = the clone itself).
+            # The path is emitted for the monitor to register; on the shared FS
+            # env:// push/pull are no-ops, so the string is what matters.
+            ARTIFACT_PATH="$(cd "{{ config.custom_code_config.dir_to_save | default('.') }}" && pwd)"
+            echo "LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:${ARTIFACT_PATH}"
+    monitors:
+      # Shipped monitor library (builtins/monitors/skypilot) — supplies the
+      # LLMB_ARTIFACT convention and binding. `periodic` log retrieval so trial
+      # progress surfaces mid-run instead of only at completion, which is what
+      # the AutoTuneX dashboard needs to look alive.
+      skypilot_monitor:
+        ref: space://monitors/skypilot
+        config:
+          poll_interval_seconds: "{{ config.poll_interval_seconds | default(300) }}"
+          log_retrieval:
+            mode: "{{ config.log_retrieval_mode | default('periodic') }}"
+            interval_seconds: "{{ config.log_retrieval_interval_seconds | default(300) }}"
+          extra_event_configs:
+            # ray/tune emits a trial-status table as trials complete; surface it
+            # as a running-status heartbeat.
+            - event_type: WORKLOAD_STATUS_EVENT
+              line_regex: "Trial\\s+\\S+\\s+(completed|finished|TERMINATED)"
+              event_fields:
+                - field_name: status
+                  field_value_template: "RUNNING"
+                - field_name: message
+                  field_regex: "Trial.+"

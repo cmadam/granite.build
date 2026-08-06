@@ -1,0 +1,90 @@
+granite.build:
+  name: autotunex-lsf-smoke
+  # AutoTuneX plumbing smoke build for BlueVela (LSF via SkyPilot).
+  #
+  # Purpose (per the 2026-08-04 spec): prove that a build of AutoTuneX's SHAPE
+  # completes on standalone gbserver, so the dashboard/AutoTuneX integration can
+  # be tested end to end. It is deliberately NOT a real tuning run:
+  #
+  #   * 0 GPUs  - no `accelerators` in launcher_config.resources, so this lands on
+  #               a CPU node and needs no GPU quota (Praneet: "a step that asks
+  #               for zero GPUs").
+  #   * no repo - github_url is empty, so nothing is cloned and no
+  #               GITHUB_IBM_PAT is required to get a green build.
+  #   * no bridge - start_command does not pass --autotunex_server_url, so this
+  #               exercises Path A only (gbserver -> dashboard events). Path B
+  #               (fm-tune -> AutoTuneX server -> their DB) needs the bridge and
+  #               compute-node egress; see recipes/autotunex/lsf/README.md.
+  #
+  # What it DOES exercise: environment resolution, enroot image pull/import on
+  # BlueVela, the additional_files heredoc materialization that replaces the k8s
+  # step's inline injection, the skypilot_monitor event stream, and env:// output
+  # artifact registration.
+  targets:
+    autotunex-smoke:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      outputs:
+        # Declares the artifact the step emits via its LLMB_ARTIFACT_ID:checkpoint
+        # line. Without this declaration the buildrun resolver drops the
+        # NEWARTIFACT event and the build completes with nothing recorded.
+        # `{{ binding.path }}` resolves to the path the step actually printed.
+        checkpoint:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/autotunex-tune
+          config:
+            # Faster than the step default (300s) so a short smoke job is
+            # detected as finished promptly instead of idling in a poll window.
+            poll_interval_seconds: 15
+            log_retrieval_interval_seconds: 15
+            custom_code_config:
+              # Empty => the step's clone block is skipped entirely. The real
+              # build sets this to github.ibm.com/ibm-research/fm-tune.git.
+              github_url: ""
+              github_ref: ""
+              setup_command: ""
+              # Stands in for the ray/tune invocation: proves the container runs,
+              # that additional_files landed, and that the file is readable from
+              # inside enroot at the path the k8s build would have used.
+              start_command: >-
+                echo "--- verifying additional_files inside the container ---" &&
+                test -f /tmp/autotunex-tune-config.yaml &&
+                cat /tmp/autotunex-tune-config.yaml &&
+                echo "--- simulating $${NUM_SAMPLES} tuning trials ---" &&
+                for i in $(seq 1 $${NUM_SAMPLES}); do
+                  echo "Trial trial_${i} completed (mock)";
+                done &&
+                echo "--- done ---"
+              dir_to_save: "."
+            skypilot:
+              image: "$${IMAGE}"
+              additional_files:
+                # Mirrors what AutoTuneX injects today as
+                # k8s.additional_files["/tmp/autotunex-lora-new.yaml"]. Contents
+                # are illustrative; the point is that an inline blob from the
+                # generator reaches the container intact.
+                /tmp/autotunex-tune-config.yaml: |
+                  # AutoTuneX tuning config (smoke placeholder)
+                  model_name_or_path: ibm-granite/granite-4.0-350m-base
+                  peft_method: lora
+                  lora_r: 8
+                  lora_alpha: 16
+                  num_train_epochs: 1
+            compute_config:
+              # num_gpus_per_node is informational for SkyPilot (accelerators are
+              # NOT derived from it — see the step.yaml note); it is kept at 0 for
+              # documentation parity with the k8s build.
+              num_gpus_per_node: 0
+              # This one IS honored on LSF: it becomes a cpus floor.
+              num_cpus_per_node: $${NUM_CPUS}
+              num_nodes: 1
+              # Skipped on LSF/SLURM by the launcher (bare HPC schedulers don't
+              # track memory as consumable); set via resources.memory below.
+              total_memory_per_node: ""
+            launcher_config:
+              resources:
+                # NO `accelerators` key: that is what makes this a 0-GPU build.
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: "$${MEMORY}"

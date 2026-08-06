@@ -1,0 +1,25 @@
+# Default parameters for the AutoTuneX LSF/BlueVela plumbing smoke build.
+# Override any of these with: gb build start --param KEY=VALUE
+
+# Container image. The real AutoTuneX runtime is
+#   us.icr.io/cil15-shared-registry/autotunex/build-runtime:25
+# (that is what the live Vela build gbzgmalimc is running). It is a multi-GB CUDA
+# image, and BlueVela's first enroot import of an image that size on GPFS has
+# previously been killed by sky.launch before .sky_ready — so pre-seed the .sqsh
+# under the env's enroot share_path (/proj/granite-build/g4os) before using it.
+#
+# The default below is a small image so the FIRST smoke run tests plumbing rather
+# than the import path. Switch to build-runtime:25 once the .sqsh is seeded, to
+# confirm the real runtime starts under enroot.
+IMAGE: "quay.io/fedora/fedora-minimal:42"
+
+# Infrastructure. No ACCELERATORS parameter on purpose — this build requests
+# zero GPUs (see build.yaml).
+CLUSTER: "bluevela"
+QUEUE: "normal"
+MEMORY: "16"
+NUM_CPUS: 4
+
+# Number of mock trials the smoke start_command loops over. The real build uses
+# ray/tune num_samples (AutoTuneX default 8, 4 concurrent).
+NUM_SAMPLES: 4
