@@ -1,0 +1,902 @@
+granite.build:
+  name: autotunex-granite-4.1-3b-lora-4gpu
+  # Real-shape AutoTuneX hyperparameter sweep on BlueVela (LSF via SkyPilot).
+  #
+  # This is the LSF counterpart of the k8s build AutoTuneX generates today
+  # (api/utilites/granite_build.py). Everything that describes the *workload* is
+  # carried over unchanged from that generated build: the fm-tune repo and ref,
+  # setup_command, start_command and its flags, the full tune_config search
+  # space, and compute_config (4 GPUs / 32 CPUs / 1 node / 256Gi).
+  #
+  # What differs from the generated k8s build, and why:
+  #
+  #   * step_uri     space://steps/autotunex-tune instead of
+  #                  space://steps/custom_code — the latter has no Skypilot
+  #                  launcher, only a k8s helm one.
+  #   * `skypilot:`  replaces the `k8s:` config block. Same `image` +
+  #                  `additional_files` shape, so the AutoTuneX generator change
+  #                  is a key rename.
+  #   * output       env:// on the shared FS instead of hf://. Pushing to
+  #                  hf://huggingface.co/ibm-research/... needs an HF *write*
+  #                  token scoped to that org; env:// keeps the sweep results on
+  #                  /proj where BlueVela wrote them. Switch back to hf:// once
+  #                  the write token is in place — the step is unaffected.
+  #   * resources    accelerators live here, not in compute_config, because the
+  #                  Skypilot launcher does not derive them from compute_config
+  #                  (skypilot.py:_resources_from_compute_config).
+  #
+  # Prerequisites (a green run needs all four; see recipes/autotunex/lsf/smoke
+  # for a variant that needs none of them):
+  #   1. the runtime image pre-seeded as an enroot .sqsh under
+  #      /proj/granite-build/g4os  — a cold multi-GB import gets killed before
+  #      .sky_ready
+  #   2. $GITHUB_IBM_PAT   to clone fm-tune
+  #   3. $HF_TOKEN         to pull the dataset, if it is private
+  #   4. egress to the AutoTuneX bridge, only if AUTOTUNEX_ARGS is non-empty
+  targets:
+    autotunex-tune:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        # Pulled by the builtin skypilot/hfpull step. start_command references
+        # the resolved local path as {{ bindings.dataset_files.binding.path }};
+        # that resolves because the step config is rendered with `bindings` in
+        # scope (targetsteprun.py:415) before the launcher config that embeds it
+        # (:492).
+        dataset_files:
+          uri: $${DATASET_URI}
+      outputs:
+        checkpoint:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/autotunex-tune
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL}
+            log_retrieval_interval_seconds: $${POLL_INTERVAL}
+            custom_code_config:
+              github_url: $${REPO}
+              github_ref: "$${REPO_REF}"
+              # Carried over verbatim from the generated k8s build. AutoTuneX
+              # does its own `git checkout` here as well as setting github_ref;
+              # both are harmless.
+              setup_command: >-
+                git checkout $${REPO_REF} &&
+                pip install -e ".[full]" &&
+                pip list &&
+                nvidia-smi
+              # Carried over verbatim, except that the --autotunex_server_url
+              # flag is parameterized (AUTOTUNEX_ARGS) so the sweep can run
+              # without the bridge. $OUTPUT_PATH is exported by the step; the
+              # single-$ forms survive gbcli's parameter pass untouched and are
+              # expanded by the shell on the compute node.
+              start_command: >-
+                export CUDA_HOME=$${CUDA_HOME} &&
+                export LOG_PATH=$OUTPUT_PATH &&
+                python main.py
+                --config_file /tmp/autotunex-lora-new.yaml
+                --train_file {{ bindings.dataset_files.binding.path }}/$${TRAIN_FILE}
+                --validation_file {{ bindings.dataset_files.binding.path }}/$${VALIDATION_FILE}
+                --model_name_or_path $${MODEL}
+                --tuning_algo $${TUNING_ALGO}
+                --run_name $${RUN_NAME}
+                --output_dir $OUTPUT_PATH
+                --output_model_name $${RUN_NAME}
+                --cleanup
+                --save_history
+                --job_id $${JOB_ID}
+                $${AUTOTUNEX_ARGS}
+              # The sweep results, not the source tree. The step exports
+              # OUTPUT_PATH under $GB_BUILD_WORKDIR (i.e. on /proj) and expands
+              # this value with the shell, so the artifact is what fm-tune wrote.
+              dir_to_save: "$OUTPUT_PATH"
+            skypilot:
+              image: "$${IMAGE}"
+              additional_files:
+                # Verbatim from the AutoTuneX-generated build: the tune_config /
+                # tuners_config / training_config search space that main.py reads
+                # via --config_file. Materialized inside the container by the
+                # step's heredoc loop.
+                /tmp/autotunex-lora-new.yaml: |
+                  tune_config:
+                    scheduler:
+                      type: str
+                      values:
+                      - fifo
+                      - hyperband
+                      default: fifo
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: The scheduler used by ray/tune to schedult the trials
+                    search_alg:
+                      type: str
+                      values:
+                      - lds
+                      - hyperopt
+                      - random
+                      - bayesopt
+                      - bohb
+                      default: lds
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: Search algorithm used by ray/tune to explore the hyperparameter search
+                        space
+                    num_samples:
+                      type: int
+                      values: null
+                      default: 8
+                      max_val: 10000
+                      min_val: 1
+                      required: true
+                      description: Number of samples from the hyperparameter search space
+                    time_budget_s:
+                      type: int
+                      values: null
+                      default: null
+                      max_val: 1209600
+                      min_val: 60
+                      required: false
+                      description: Maximum allowed time for completing the hyperparameter search.
+                    max_discrepancy:
+                      type: int
+                      values: null
+                      default: 6
+                      max_val: 100
+                      min_val: 1
+                      required: true
+                      search_alg:
+                      - lds
+                      description: Maximum discrepancy value for LDS
+                    max_concurrent_trials:
+                      type: int
+                      values: null
+                      default: 4
+                      max_val: 8
+                      min_val: 1
+                      required: true
+                      description: Maximum number of trials running concurrently
+                  tuners_config:
+                    lora:
+                      title: LoRA
+                      tuner_name: tuner.lora
+                      description: Low rank adapter fine-tuning
+                      hyperparams:
+                        r:
+                          type: int
+                          values:
+                          - 8
+                          - 16
+                          - 32
+                          - 64
+                          default: 64
+                          max_val: 64
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Rank size
+                        bias:
+                          type: str
+                          values:
+                          - none
+                          default: none
+                          max_val: null
+                          min_val: null
+                          options:
+                          - choice
+                          strategy: choice
+                          for_tuner: true
+                          description: Bias value
+                        alpha_ratio:
+                          type: float
+                          values:
+                          - 0.5
+                          - 1
+                          - 2
+                          default: 2
+                          max_val: 10
+                          min_val: 0.1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: false
+                          description: scaling ratio
+                        lora_dropout:
+                          type: float
+                          values:
+                          - 0
+                          - 0.05
+                          - 0.1
+                          default: 0.05
+                          max_val: 0.1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: dropout rate
+                        warmup_ratio:
+                          type: float
+                          values:
+                          - 0.1
+                          - 0.2
+                          default: 0.1
+                          max_val: 1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: false
+                          description: Warmup ratio
+                        learning_rate:
+                          type: float
+                          values:
+                          - 1.0e-06
+                          - 3.0e-06
+                          - 5.0e-06
+                          default: 1.0e-06
+                          max_val: 5.0e-05
+                          min_val: 1.0e-06
+                          options:
+                          - choice
+                          - uniform
+                          - loguniform
+                          strategy: choice
+                          for_tuner: false
+                          description: Learning rate
+                        lr_scheduler_type:
+                          type: str
+                          values:
+                          - cosine
+                          - linear
+                          default: cosine
+                          max_val: null
+                          min_val: null
+                          options:
+                          - choice
+                          strategy: choice
+                          for_tuner: false
+                          description: Learning rate scheduler type
+                        gradient_accumulation_steps:
+                          type: int
+                          values:
+                          - 1
+                          - 2
+                          - 4
+                          - 8
+                          - 16
+                          default: 1
+                          max_val: 50
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: false
+                          description: Gradient accumulation steps
+                        per_device_train_batch_size:
+                          type: int
+                          values:
+                          - 1
+                          - 2
+                          - 4
+                          - 8
+                          - 16
+                          - 32
+                          default: 16
+                          max_val: 128
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: false
+                          description: Batch size used during training
+                      dataset_type: dataset_type_a
+                  training_config:
+                    max_length:
+                      type: int
+                      values: null
+                      default: 1024
+                      max_val: 128000
+                      min_val: 1
+                      required: true
+                      description: Maximum sequence length used by the tokenizer (input + output)
+                    ds_strategy:
+                      type: str
+                      values:
+                      - zero3_cpu
+                      - zero2_cpu
+                      - zero2_gpu
+                      - zero1_gpu
+                      default: zero3_cpu
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: Deepspeed strategy used for distributed training
+                    rl_algorithm:
+                      type: str
+                      values:
+                      - none
+                      - dpo
+                      - kto
+                      default: none
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: Offline RL algorithm used for training
+                    fsdp_strategy:
+                      type: str
+                      values:
+                      - full_shard
+                      - shard_grad_op
+                      - no_shard
+                      - hybrid_shard
+                      - hybrid_shard_zero2
+                      default: full_shard
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: FSDP strategy used for distributed training
+                    hpo_num_epochs:
+                      type: int
+                      values: null
+                      default: 1
+                      max_val: 10
+                      min_val: 1
+                      required: true
+                      description: Number of training epochs used for HPO
+                    num_train_epochs:
+                      type: int
+                      values: null
+                      default: 2
+                      max_val: 100
+                      min_val: 1
+                      required: true
+                      description: Number of training epochs
+                    tuning_algorithm:
+                      type: str
+                      values:
+                      - none
+                      - sft
+                      - lora
+                      - alora
+                      - loha
+                      - lokr
+                      default: lora
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: Finetuning algorithm used for training
+                    num_gpus_per_trial:
+                      type: int
+                      values: null
+                      default: 1
+                      max_val: 8
+                      min_val: 1
+                      required: true
+                      description: GPUs per trial (worker)
+                    use_flash_attention:
+                      type: str
+                      values:
+                      - eager
+                      - flash_attention_2
+                      default: flash_attention_2
+                      max_val: null
+                      min_val: null
+                      description: Use flash attention (eager or flash_attention_2)
+                    train_implementation:
+                      type: str
+                      values:
+                      - deepspeed
+                      - fsdp
+                      default: deepspeed
+                      max_val: null
+                      min_val: null
+                      required: true
+                      description: Distributed training implementation (DeepSpeed or FSDP)
+                    hpo_dataset_percentage:
+                      type: float
+                      values: null
+                      default: 0.1
+                      max_val: 1
+                      min_val: 0.01
+                      required: true
+                      description: Percentage training data used for HPO
+                  tuners_rl_config:
+                    dpo:
+                      title: DPO
+                      tuner_name: tuner.dpo
+                      description: Direct Preference Optimization (DPO)
+                      hyperparams:
+                        beta:
+                          type: float
+                          values:
+                          - 0.1
+                          - 1
+                          - 10
+                          default: 1
+                          max_val: 10
+                          min_val: 0.1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: DPO beta value
+                        loss_type:
+                          type: str
+                          values:
+                          - sigmoid
+                          - hinge
+                          - ipo
+                          - kto_pair
+                          default: sigmoid
+                          max_val: null
+                          min_val: null
+                          options:
+                          - choice
+                          strategy: choice
+                          for_tuner: true
+                          description: DPO loss type
+                      dataset_type: dataset_type_b
+                    kto:
+                      title: KTO
+                      tuner_name: tuner.kto
+                      description: Kahneman-Tversky Optimization (KTO)
+                      hyperparams:
+                        desirable_weight:
+                          type: float
+                          values:
+                          - 1
+                          - 5
+                          - 10
+                          default: 1
+                          max_val: 10
+                          min_val: 0.1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: KTO desirable weight
+                        undesirable_weight:
+                          type: float
+                          values:
+                          - 1
+                          - 5
+                          - 10
+                          default: 1
+                          max_val: 10
+                          min_val: 0.1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: KTO undesirable weight
+                      dataset_type: dataset_type_c
+                    ppo:
+                      title: PPO
+                      tuner_name: tuner.ppo
+                      description: Proximal Policy Optimization (PPO)
+                      hyperparams:
+                        kl_coef:
+                          type: float
+                          values:
+                          - 0.001
+                          - 0.002
+                          - 0.003
+                          default: 0.001
+                          max_val: 1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: KL penalty coefficient controlling divergence from reference
+                            policy
+                        clip_range:
+                          type: float
+                          values:
+                          - 0.1
+                          - 0.2
+                          - 0.3
+                          default: 0.2
+                          max_val: 1
+                          min_val: 0.01
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: PPO clipping range for the policy loss
+                        entropy_coef:
+                          type: float
+                          values:
+                          - 0.001
+                          - 0.01
+                          - 0.1
+                          default: 0.01
+                          max_val: 1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Entropy penalty coefficient
+                        learning_rate:
+                          type: float
+                          values:
+                          - 1.0e-06
+                          - 5.0e-06
+                          - 1.0e-05
+                          default: 1.0e-06
+                          max_val: 0.001
+                          min_val: 1.0e-07
+                          options:
+                          - choice
+                          - uniform
+                          - loguniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Learning rate for the actor
+                        gradient_accumulation_steps:
+                          type: int
+                          values:
+                          - 1
+                          - 2
+                          - 4
+                          default: 1
+                          max_val: 16
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Gradient accumulation steps
+                        per_device_train_batch_size:
+                          type: int
+                          values:
+                          - 2
+                          - 4
+                          - 8
+                          default: 4
+                          max_val: 32
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Micro-batch size per device during training
+                      dataset_type: dataset_type_d
+                    dapo:
+                      title: DAPO
+                      tuner_name: tuner.dapo
+                      description: Decoupled Alignment via Process Optimization (DAPO)
+                      hyperparams:
+                        kl_coef:
+                          type: float
+                          values:
+                          - 0
+                          - 0.001
+                          - 0.01
+                          default: 0
+                          max_val: 1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: KL penalty coefficient (typically 0 for DAPO)
+                        rollout_n:
+                          type: int
+                          values:
+                          - 8
+                          - 16
+                          - 32
+                          default: 16
+                          max_val: 64
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Number of generations per prompt for group sampling
+                        learning_rate:
+                          type: float
+                          values:
+                          - 1.0e-06
+                          - 5.0e-06
+                          - 1.0e-05
+                          default: 1.0e-06
+                          max_val: 0.001
+                          min_val: 1.0e-07
+                          options:
+                          - choice
+                          - uniform
+                          - loguniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Learning rate for the actor
+                        overlong_buffer_len:
+                          type: int
+                          values:
+                          - 128
+                          - 256
+                          - 512
+                          default: 256
+                          max_val: 1024
+                          min_val: 64
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Buffer length for DAPO overlong penalty
+                        rollout_temperature:
+                          type: float
+                          values:
+                          - 0.7
+                          - 1
+                          - 1.2
+                          default: 1
+                          max_val: 2
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Temperature for vLLM generation during rollout
+                        overlong_penalty_factor:
+                          type: float
+                          values:
+                          - 0.5
+                          - 1
+                          - 2
+                          default: 1
+                          max_val: 5
+                          min_val: 0.1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Penalty factor for overlong responses in DAPO
+                        gradient_accumulation_steps:
+                          type: int
+                          values:
+                          - 1
+                          - 2
+                          - 4
+                          default: 1
+                          max_val: 16
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Gradient accumulation steps
+                        per_device_train_batch_size:
+                          type: int
+                          values:
+                          - 2
+                          - 4
+                          - 8
+                          default: 4
+                          max_val: 32
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Micro-batch size per device during training
+                      dataset_type: dataset_type_d
+                    grpo:
+                      title: GRPO
+                      tuner_name: tuner.grpo
+                      description: Group Relative Policy Optimization (GRPO)
+                      hyperparams:
+                        kl_coef:
+                          type: float
+                          values:
+                          - 0.001
+                          - 0.01
+                          - 0.1
+                          default: 0.001
+                          max_val: 1
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: KL penalty coefficient controlling divergence from reference
+                            policy
+                        rollout_n:
+                          type: int
+                          values:
+                          - 3
+                          - 5
+                          - 8
+                          default: 5
+                          max_val: 64
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Number of generations per prompt for group sampling
+                        learning_rate:
+                          type: float
+                          values:
+                          - 1.0e-06
+                          - 5.0e-06
+                          - 1.0e-05
+                          default: 1.0e-06
+                          max_val: 0.001
+                          min_val: 1.0e-07
+                          options:
+                          - choice
+                          - uniform
+                          - loguniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Learning rate for the actor
+                        rollout_temperature:
+                          type: float
+                          values:
+                          - 0.7
+                          - 1
+                          - 1.2
+                          default: 1
+                          max_val: 2
+                          min_val: 0
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Temperature for vLLM generation during rollout
+                        gradient_accumulation_steps:
+                          type: int
+                          values:
+                          - 1
+                          - 2
+                          - 4
+                          default: 1
+                          max_val: 16
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Gradient accumulation steps
+                        per_device_train_batch_size:
+                          type: int
+                          values:
+                          - 2
+                          - 4
+                          - 8
+                          default: 4
+                          max_val: 32
+                          min_val: 1
+                          options:
+                          - choice
+                          - uniform
+                          strategy: choice
+                          for_tuner: true
+                          description: Micro-batch size per device during training
+                      dataset_type: dataset_type_d
+                  training_rl_config:
+                    rollout_n:
+                      type: int
+                      values: null
+                      default: 5
+                      max_val: 64
+                      min_val: 1
+                      description: Number of generations per prompt for GRPO group sampling
+                    rollout_top_p:
+                      type: float
+                      values: null
+                      default: 1
+                      max_val: 1
+                      min_val: 0
+                      description: Top-p sampling for vLLM generation during rollout
+                    num_rl_workers:
+                      type: int
+                      values: null
+                      default: 4
+                      max_val: 32
+                      min_val: 1
+                      description: Number of RL workers
+                    max_prompt_length:
+                      type: int
+                      values: null
+                      default: 1024
+                      max_val: 128000
+                      min_val: 1
+                      description: Maximum prompt token length for online RL
+                    reward_model_path:
+                      type: str
+                      values: null
+                      default: null
+                      max_val: null
+                      min_val: null
+                      description: Path to a learned reward model (for verl online RL)
+                    max_response_length:
+                      type: int
+                      values: null
+                      default: 512
+                      max_val: 128000
+                      min_val: 1
+                      description: Maximum response token length for online RL
+                    rollout_temperature:
+                      type: float
+                      values: null
+                      default: 1
+                      max_val: 2
+                      min_val: 0
+                      description: Temperature for vLLM generation during rollout
+                    reward_function_name:
+                      type: str
+                      values: null
+                      default: compute_score
+                      max_val: null
+                      min_val: null
+                      description: Function name inside the reward function script
+                    reward_function_path:
+                      type: str
+                      values: null
+                      default: /u/radu/storage/git/fm-tune/autotune/rewards/gsm8k_reward.py
+                      max_val: null
+                      min_val: null
+                      description: Path to custom reward function Python script (for verl online RL)
+                    gpu_memory_utilization:
+                      type: float
+                      values: null
+                      default: 0.6
+                      max_val: 0.95
+                      min_val: 0.1
+                      description: vLLM GPU memory utilization fraction for rollout
+                    tensor_model_parallel_size:
+                      type: int
+                      values: null
+                      default: null
+                      max_val: 8
+                      min_val: 1
+                      description: Tensor parallelism degree for vLLM rollout. null=auto-detect from
+                        model size.
+            compute_config:
+              # Verbatim from the generated k8s build. On LSF only
+              # num_cpus_per_node is consumed (as a cpus floor);
+              # num_gpus_per_node is documentation, and total_memory_per_node is
+              # skipped because bare HPC schedulers don't track memory as
+              # consumable — it is requested via resources.memory below.
+              num_gpus_per_node: 4
+              num_cpus_per_node: $${NUM_CPUS}
+              num_nodes: 1
+              total_memory_per_node: "256Gi"
+            launcher_config:
+              resources:
+                accelerators: "$${ACCELERATORS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: "$${MEMORY}"

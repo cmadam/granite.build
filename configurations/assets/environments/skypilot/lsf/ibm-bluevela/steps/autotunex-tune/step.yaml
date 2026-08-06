@@ -28,8 +28,13 @@ config:
     setup_command: ""
     # The actual tuning invocation, run in the clone root after setup_command.
     start_command: ""
-    # Subdirectory of the clone whose contents are the step's output artifact.
-    # "." means the clone root.
+    # Directory whose contents become the step's output artifact. Interpreted by
+    # the shell as a `cd` argument, so all three forms work:
+    #   "."             the clone root (AutoTuneX's current default)
+    #   "$OUTPUT_PATH"  the results dir the step exports (see run: below) —
+    #                   prefer this when start_command writes to $OUTPUT_PATH,
+    #                   so the artifact is the trained model, not the source tree
+    #   an absolute path
     dir_to_save: "."
   skypilot:
     # Container image for the job. Non-empty => runs under enroot on LSF (see
@@ -102,6 +107,20 @@ environment_configs:
             WORKDIR="${GB_BUILD_WORKDIR:-$(pwd)}"
             cd "$WORKDIR"
 
+            # OUTPUT_PATH is the directory the workload writes its results to.
+            # The k8s path gets this for free — the gbstep scaffold injects
+            # OUTPUT_PATH=/gb-read-write/custom_output_<targetsteprun_id>/ into the
+            # pod env (builtins/steps/gbstep/lsf_scripts/.../values.yaml). SkyPilot
+            # steps have no such injection, so each one exports it itself (same as
+            # the sage-eval steps do). AutoTuneX's start_command uses $OUTPUT_PATH
+            # and sets LOG_PATH=$OUTPUT_PATH, so it must exist before it runs.
+            #
+            # It lives under $WORKDIR, i.e. on /proj, so results survive the
+            # cluster teardown and dir_to_save can point at it as "$OUTPUT_PATH".
+            export OUTPUT_PATH="$WORKDIR/output"
+            mkdir -p "$OUTPUT_PATH"
+            echo "OUTPUT_PATH=$OUTPUT_PATH"
+
             # GPU visibility is informational: a 0-GPU smoke build has no
             # nvidia-smi, and that must not fail the step.
             nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || \
@@ -164,9 +183,11 @@ environment_configs:
             {%- endif %}
 
             # --- Artifact ---------------------------------------------------------
-            # dir_to_save is relative to the clone root ("." = the clone itself).
-            # The path is emitted for the monitor to register; on the shared FS
-            # env:// push/pull are no-ops, so the string is what matters.
+            # dir_to_save is a `cd` argument, so it may be relative to the clone
+            # root ("." = the clone itself), an absolute path, or "$OUTPUT_PATH"
+            # (expanded here by the shell, not by Jinja). The resolved path is
+            # emitted for the monitor to register; on the shared FS env://
+            # push/pull are no-ops, so the string is what matters.
             ARTIFACT_PATH="$(cd "{{ config.custom_code_config.dir_to_save | default('.') }}" && pwd)"
             echo "LLMB_ARTIFACT_ID:checkpoint LLMB_ARTIFACT_PATH:${ARTIFACT_PATH}"
     monitors:

@@ -1,0 +1,60 @@
+# Default parameters for the real-shape AutoTuneX tuning build on BlueVela.
+# Override with: gb build start --param KEY=VALUE
+#
+# The values mirror the compute_config of the AutoTuneX-generated k8s build
+# (num_gpus_per_node: 4, num_cpus_per_node: 32, total_memory_per_node: 256Gi).
+
+# The AutoTuneX runtime image. This is a multi-GB CUDA image; BlueVela's first
+# enroot import of an image that size on GPFS has previously been killed by
+# sky.launch before .sky_ready, so pre-seed the .sqsh under the env's enroot
+# share_path (/proj/granite-build/g4os) before the first run of this build.
+IMAGE: "us.icr.io/cil15-shared-registry/autotunex/build-runtime:25"
+
+# Infrastructure. BlueVela GPUs are H100. `normal` rather than `preemptable`:
+# a tuning sweep restarted mid-flight loses all completed trials.
+ACCELERATORS: "H100:4"
+CLUSTER: "bluevela"
+QUEUE: "normal"
+MEMORY: "256"
+NUM_CPUS: 32
+
+# Workload repo. Cloned over https with $GITHUB_IBM_PAT (see RUNBOOK notes on
+# supplying it via the local secret manager).
+REPO: "github.ibm.com/ibm-research/fm-tune.git"
+REPO_REF: "stage"
+
+# Model under test and the run/output naming AutoTuneX derives from it.
+MODEL: "ibm-granite/granite-4.1-3b"
+RUN_NAME: "granite-4.1-3b_autotunex-lora-4gpu"
+TUNING_ALGO: "lora"
+
+# Dataset. The AutoTuneX build pulls this from HF; the pull is performed by the
+# builtin skypilot/hfpull step, so it needs $HF_TOKEN when the dataset is
+# private. To run without HF access, point this at a directory already staged on
+# /proj and change the target's `inputs` block to an env:// uri.
+DATASET_URI: "hf://huggingface.co/datasets/ibm-research/finance-classification_9bb5cc58"
+TRAIN_FILE: "finance-classification_train.jsonl"
+VALIDATION_FILE: "finance-classification_validation.jsonl"
+
+# CUDA prefix expected by fm-tune's start_command.
+CUDA_HOME: "/usr/local/cuda-12.4"
+
+# AutoTuneX bridge. fm-tune posts trial results here directly (Path B), which
+# requires egress from the BlueVela compute node to that URL — not yet verified.
+# Empty runs the sweep without the bridge: gbserver still reports trial progress
+# and the artifact (Path A), so the build remains a valid test of the build
+# definition itself even when the bridge is unreachable.
+#
+# This is the whole flag, not just the URL, so enabling it needs no conditional
+# in the build.yaml. gbcli's parameter pass is Jinja with `<% %>` block tags, and
+# a block tag inside a folded scalar leaves a blank line that YAML folds back to
+# a newline — which would split the shell command at that point.
+#   AUTOTUNEX_ARGS: "--autotunex_server_url https://<subdomain>.ngrok-free.dev"
+AUTOTUNEX_ARGS: ""
+
+# Job id AutoTuneX correlates its own records by. Regenerate per run.
+JOB_ID: "1c74da30-ca2b-4c03-b4df-0cfc666ded98"
+
+# Monitor cadence. 300s (the step default) is right for a multi-hour sweep;
+# raised here only so mid-run trial events are not delayed by a full 5 minutes.
+POLL_INTERVAL: 60
