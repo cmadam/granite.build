@@ -48,6 +48,12 @@ name**. Examples from `environment.yaml`:
 
 Per-user secrets (when supported) are merged over space secrets by the space at fetch time.
 
+Beyond those named references, a **SkyPilot** job also receives *every* space secret as an environment
+variable under its own name, so a step's `run:` script can read `$MY_TOKEN` directly with nothing
+declared in the `build.yaml`. See [Giving a workload a credential](workload-credentials.md) for the
+end-to-end procedure — minting a token, storing it with `gb secret create --from-file`, consuming it
+without leaking it into the job log — and for why a credential must never be baked into an image.
+
 ## Security
 
 Keep secret **names** — not values — in any git-tracked asset (`environment.yaml`, `build.yaml`). The
@@ -56,6 +62,7 @@ the step fast; see [troubleshooting](../help/troubleshooting.md).
 
 ## See also
 
+- [Giving a workload a credential](workload-credentials.md) — creating a secret and consuming it in a step
 - [Spaces and `space.yaml`](../spaces/README.md) — where `secret_manager` is configured
 - [Environments](../environments/README.md) — how environments reference secrets by name
 - [Asset stores](../asset-stores/README.md) — the store credentials resolved by name from a secret manager
