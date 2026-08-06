@@ -56,10 +56,35 @@ your shell history:
 
 ```bash
 umask 077
-printf '%s' 'PASTE_TOKEN_HERE' > /tmp/pat.txt     # or use an editor
+printf '%s' 'PASTE_TOKEN_HERE' > /tmp/pat.txt     # printf '%s' — NOT echo, see below
 export GB_ENVIRONMENT=STANDALONE
 gb secret create GITHUB_IBM_PAT --space public --from-file /tmp/pat.txt
 shred -u /tmp/pat.txt
+```
+
+> **Use `printf '%s'`, not `echo`, and don't save from an editor that adds a final newline.**
+> `--from-file` stores the file's bytes verbatim, including a trailing `\n`. A newline inside a
+> credential is not a cosmetic problem:
+>
+> - It breaks anything that interpolates the secret into a URL. `git` rejects the result outright:
+>   `fatal: credential url cannot be parsed: https://oauth2:<token>`.
+> - **It can defeat log redaction.** A redaction rule matching `//user:pass@host` needs the `@` on the
+>   same line; the embedded newline splits the URL across two lines, the rule stops matching, and the
+>   token reaches the job log — which gbserver retrieves and stores as build events.
+>
+> Consumers should sanitize defensively (see step 3), but the stored value should be clean.
+
+Verify what actually got stored, without revealing it:
+
+```bash
+python3 - <<'PY'
+import sys; sys.path.insert(0, 'src')
+from gbserver.spacesecretmanager.localspacesecretmanager import LocalSpaceSecretManager
+v = LocalSpaceSecretManager(uri='local').get_secrets().get('GITHUB_IBM_PAT', '')
+print('length          :', len(v))
+print('stripped length :', len(v.strip()))   # must be equal
+print('has whitespace  :', any(c.isspace() for c in v))   # must be False
+PY
 ```
 
 `--space public` is the `name:` from your `space.yaml`, not the directory — for
@@ -79,24 +104,32 @@ Read it as an ordinary environment variable. The pattern used by
 
 ```bash
 set +x                                  # belt and braces: keep it out of any trace output
-if [ -n "${GITHUB_IBM_PAT:-}" ]; then
-  CLONE_AUTH="https://oauth2:${GITHUB_IBM_PAT}@${REPO_URL}"
+GB_PAT="$(printf '%s' "${GITHUB_IBM_PAT:-}" | tr -d '[:space:]')"
+if [ -n "$GB_PAT" ]; then
+  CLONE_AUTH="https://oauth2:${GB_PAT}@${REPO_URL}"
 else
   echo "WARNING: GITHUB_IBM_PAT unset - attempting unauthenticated clone"
   CLONE_AUTH="https://${REPO_URL}"
 fi
-git clone --quiet "$CLONE_AUTH" "$CLONE_DIR" 2>&1 | sed 's#//[^@]*@#//***@#g'
-unset CLONE_AUTH
+git clone --quiet "$CLONE_AUTH" "$CLONE_DIR" 2>&1 \
+  | sed -e 's#//[^@/]*@#//***@#g' -e 's#oauth2:[^@[:space:]]*#oauth2:***#g'
+unset CLONE_AUTH GB_PAT
 ```
 
-Three things that matter here and are easy to get wrong:
+Four things that matter here, every one of which has already gone wrong in practice:
 
-- **Pipe git's output through a redacting `sed`.** Git echoes the remote URL on some failures, which
-  would put the token in the job log — and job logs are retrieved and stored as build events.
+- **Sanitize the secret before interpolating it.** `tr -d '[:space:]'` costs nothing and makes a
+  stored-with-newline value harmless instead of fatal.
+- **Redact with more than one rule.** `//user:pass@host` only matches when the `@` survives on the same
+  line. Add a bare `oauth2:<token>` rule so a *malformed* URL — the exact case where the first rule
+  fails — is still covered. A credential should never depend on a single guard.
 - **Do not use `git config --global url.…insteadOf`.** It persists the credential into the container's
   home directory, where it outlives the step.
 - **Use `${VAR:-}` under `set -u`**, so an unset secret produces your own diagnostic rather than an
   unbound-variable abort.
+
+If a token does reach a log, treat it as disclosed and rotate it. Deleting the log is not a fix:
+gbserver retrieves job logs and persists them as build events, so copies exist beyond the file.
 
 ## When a restart is needed
 

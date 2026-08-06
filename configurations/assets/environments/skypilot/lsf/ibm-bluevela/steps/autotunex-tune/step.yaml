@@ -154,15 +154,28 @@ environment_configs:
             # credential inline rather than via `git config --global`, which would
             # persist it into the image/home dir.
             set +x
-            if [ -n "${GITHUB_IBM_PAT:-}" ]; then
-              CLONE_AUTH="https://oauth2:${GITHUB_IBM_PAT}@${REPO_URL}"
+            # Strip surrounding whitespace from the secret. A value stored with a
+            # trailing newline (easy to do: `echo` into the file that
+            # `gb secret create --from-file` reads, rather than `printf '%s'`)
+            # otherwise lands INSIDE the URL below, and git rejects the whole
+            # thing with "credential url cannot be parsed". Worse, the embedded
+            # newline splits the URL across two lines, so the redaction on the
+            # clone output no longer matches and the token reaches the job log.
+            GB_PAT="$(printf '%s' "${GITHUB_IBM_PAT:-}" | tr -d '[:space:]')"
+            if [ -n "$GB_PAT" ]; then
+              CLONE_AUTH="https://oauth2:${GB_PAT}@${REPO_URL}"
             else
               echo "WARNING: GITHUB_IBM_PAT unset - attempting unauthenticated clone"
               CLONE_AUTH="https://${REPO_URL}"
             fi
             rm -rf "$CLONE_DIR"
-            git clone --quiet "$CLONE_AUTH" "$CLONE_DIR" 2>&1 | sed 's#//[^@]*@#//***@#g'
-            unset CLONE_AUTH
+            # Two redaction rules, not one: the `//user:pass@host` form AND a bare
+            # `oauth2:<token>` with no following `@`, which is what a malformed URL
+            # produces. Belt and braces — the sanitizing above should prevent the
+            # malformed case, but a credential must not depend on a single guard.
+            git clone --quiet "$CLONE_AUTH" "$CLONE_DIR" 2>&1 \
+              | sed -e 's#//[^@/]*@#//***@#g' -e 's#oauth2:[^@[:space:]]*#oauth2:***#g'
+            unset CLONE_AUTH GB_PAT
             cd "$CLONE_DIR"
             {% if config.custom_code_config.github_ref -%}
             git checkout --quiet "{{ config.custom_code_config.github_ref }}"
