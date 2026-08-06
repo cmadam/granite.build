@@ -43,8 +43,25 @@ TUNING_ALGO: "lora"
 TRAIN_FILE: "datasets/finance_train.jsonl"
 VALIDATION_FILE: "datasets/finance_validation.jsonl"
 
-# CUDA prefix expected by fm-tune's start_command.
-CUDA_HOME: "/usr/local/cuda-12.4"
+# CUDA prefix. DeepSpeed resolves $CUDA_HOME/bin/nvcc at import time
+# (op_builder/builder.py: installed_cuda_version), so this must point at a real
+# toolkit or every trial dies with FileNotFoundError before training starts.
+#
+# The AutoTuneX k8s build hardcodes /usr/local/cuda-12.4, which does not exist in
+# build-runtime:25. Probed contents of the image and the BlueVela mounts
+# (recipes/autotunex/lsf/probe):
+#
+#   in the image : /usr/local/cuda -> cuda-13.0   (nvcc 13.0.48)
+#   on /opt/share: cuda-12.9, cuda-12.4, cuda-12.1, cuda-11.8
+#   torch        : 2.8.0+cu128, i.e. built against CUDA 12.8
+#
+# 12.9 is chosen as the closest match to torch's 12.8: DeepSpeed treats a minor
+# version difference as a warning but a MAJOR difference as an error, which rules
+# out the image's own 13.0. /opt/share is a BlueVela shared filesystem that the
+# LSF provisioner bind-mounts identity into the container, so this path is valid
+# inside and outside. /opt/share/cuda-12.4 is the nearest thing to AutoTuneX's
+# original value if 12.9 proves troublesome.
+CUDA_HOME: "/opt/share/cuda-12.9"
 
 # AutoTuneX bridge — the complete flag, or empty to run without it. Egress from
 # the BlueVela compute node to the bridge URL is not yet verified; empty still

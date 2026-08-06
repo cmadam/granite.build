@@ -87,8 +87,16 @@ granite.build:
                 # cfg[key].get("default") for every key, so `default` is the knob:
                 #
                 #   tune_config.num_samples            8 -> 2   (trials)
-                #   tune_config.max_concurrent_trials  4 -> 2   (fits 2 GPUs)
+                #   tune_config.max_concurrent_trials  4 -> 1   (see below)
                 #   training_config.num_train_epochs   2 -> 1
+                #
+                # max_concurrent_trials is 1, not 2, because concurrent trials on
+                # ONE node collide on the torch.distributed rendezvous port: with
+                # num_gpus_per_trial=1 each trial initialises single-GPU
+                # "distributed" on a fixed port, and the second one dies with
+                #   DistNetworkError: ... port: 29898 ... EADDRINUSE
+                # Serialising costs wall clock but is the only reliable fix from
+                # here; assigning a per-trial port would be a change in fm-tune.
                 #
                 # Already short enough to leave alone: hpo_num_epochs 1,
                 # hpo_dataset_percentage 0.1, num_gpus_per_trial 1,
@@ -148,7 +156,7 @@ granite.build:
                     max_concurrent_trials:
                       type: int
                       values: null
-                      default: 2
+                      default: 1
                       max_val: 8
                       min_val: 1
                       required: true

@@ -1,0 +1,78 @@
+granite.build:
+  name: autotunex-probe
+  # Zero-GPU diagnostic run against the AutoTuneX runtime image on BlueVela.
+  #
+  # Purpose: answer questions about what the image actually contains, from inside
+  # enroot, without spending GPU quota or waiting for a sweep. Every command is
+  # made failure-tolerant so one missing tool does not truncate the report.
+  #
+  # It currently answers:
+  #   1. Where is CUDA, and is there an nvcc at all? DeepSpeed resolves
+  #      $CUDA_HOME/bin/nvcc at import time (op_builder/builder.py:53), and the
+  #      tune-fast run died on '/usr/local/cuda-12.4/bin/nvcc' not existing —
+  #      a path carried over from the AutoTuneX k8s build. If the image has no
+  #      nvcc, no CUDA_HOME value can fix it and the sweep config has to change
+  #      (train_implementation: fsdp, or a different ds_strategy).
+  #   2. Which python/pip win on PATH, and what CUDA torch was built against.
+  #   3. Who are we, what is $HOME, and is /root/.local/bin on PATH? This is the
+  #      mechanism behind the venv problem (enroot: no --root,
+  #      ENROOT_MOUNT_HOME=false) and it is worth seeing directly.
+  #   4. Does the image carry a baked git credential for github.ibm.com, and is
+  #      it visible to us? Printed with the token redacted.
+  targets:
+    autotunex-probe:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      outputs:
+        checkpoint:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/autotunex-tune
+          config:
+            poll_interval_seconds: 15
+            log_retrieval_interval_seconds: 15
+            custom_code_config:
+              # Nothing cloned: the probe needs no repo and therefore no PAT.
+              github_url: ""
+              github_ref: ""
+              setup_command: ""
+              start_command: |
+                echo "--- identity / PATH ---"
+                id || true
+                echo "HOME=${HOME:-<unset>}"
+                echo "PATH=$PATH"
+                case ":$PATH:" in *":/root/.local/bin:"*) echo "root-local-bin-on-path: yes";; *) echo "root-local-bin-on-path: no";; esac
+                echo "--- interpreters ---"
+                command -v python python3 pip pip3 || true
+                python -V 2>&1 || true
+                echo "--- CUDA layout ---"
+                echo "CUDA_HOME from image env: ${CUDA_HOME:-<unset>}"
+                ls -d /usr/local/cuda* 2>/dev/null || echo "no /usr/local/cuda* at all"
+                echo "nvcc on PATH: $(command -v nvcc || echo '<none>')"
+                nvcc -V 2>&1 | tail -2 || true
+                echo "--- any nvcc anywhere (bounded search) ---"
+                find /usr /opt /step_venv -maxdepth 5 -name nvcc -type f 2>/dev/null | head -5 || true
+                echo "<end nvcc search>"
+                echo "--- torch / deepspeed ---"
+                python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda, 'avail', torch.cuda.is_available())" 2>&1 | tail -3 || true
+                python -c "import deepspeed; print('deepspeed', deepspeed.__version__)" 2>&1 | tail -3 || true
+                echo "--- baked git credential for github.ibm.com? (token redacted) ---"
+                git config --global --get-regexp '^url\.' 2>&1 | sed -E 's#//[^@/[:space:]]*@#//***@#g' || echo "none readable"
+                ls -la /root/.gitconfig "${HOME:-/nonexistent}/.gitconfig" 2>&1 | head -4 || true
+                echo "--- PROBE COMPLETE ---"
+              dir_to_save: "$OUTPUT_PATH"
+            skypilot:
+              image: "$${IMAGE}"
+              venv_path: "$${VENV_PATH}"
+              additional_files: {}
+            compute_config:
+              num_gpus_per_node: 0
+              num_cpus_per_node: 4
+              num_nodes: 1
+              total_memory_per_node: ""
+            launcher_config:
+              resources:
+                # No accelerators key: zero GPUs, no GPU quota consumed.
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: "$${MEMORY}"

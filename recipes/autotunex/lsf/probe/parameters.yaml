@@ -1,0 +1,15 @@
+# Parameters for the zero-GPU AutoTuneX image probe.
+
+# The real runtime image — the point of the probe is to inspect THIS image from
+# inside enroot. Already cached as a flattened .sqsh under the env's enroot
+# share_path, so the launch costs a queue wait rather than a 31-minute import.
+IMAGE: "us.icr.io/cil15-shared-registry/autotunex/build-runtime:25"
+
+# Where the image keeps its venv, so `python` and `pip` resolve to it. The probe
+# reports what actually won on PATH either way.
+VENV_PATH: "/step_venv"
+
+# Infrastructure. No ACCELERATORS parameter on purpose: zero GPUs.
+CLUSTER: "bluevela"
+QUEUE: "normal"
+MEMORY: "16"

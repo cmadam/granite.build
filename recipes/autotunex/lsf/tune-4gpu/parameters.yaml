@@ -36,8 +36,13 @@ DATASET_URI: "hf://huggingface.co/datasets/ibm-research/finance-classification_9
 TRAIN_FILE: "finance-classification_train.jsonl"
 VALIDATION_FILE: "finance-classification_validation.jsonl"
 
-# CUDA prefix expected by fm-tune's start_command.
-CUDA_HOME: "/usr/local/cuda-12.4"
+# CUDA prefix. NOT the /usr/local/cuda-12.4 of the AutoTuneX k8s build: that path
+# does not exist in build-runtime:25, and DeepSpeed resolves $CUDA_HOME/bin/nvcc
+# at import, so every trial fails with FileNotFoundError before training starts.
+# /opt/share/cuda-12.9 is a BlueVela-provided toolkit (bind-mounted identity into
+# the container) whose major version matches torch 2.8.0+cu128. See the longer
+# note in ../tune-fast/parameters.yaml and the probe recipe.
+CUDA_HOME: "/opt/share/cuda-12.9"
 
 # AutoTuneX bridge. fm-tune posts trial results here directly (Path B), which
 # requires egress from the BlueVela compute node to that URL — not yet verified.
