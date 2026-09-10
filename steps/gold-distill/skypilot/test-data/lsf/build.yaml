@@ -1,0 +1,51 @@
+granite.build:
+  name: gold-distill-smoke
+  # Smoke build for the gold-distill step on BlueVela (SkyPilot / LSF).
+  #
+  # Deliberately NOT the reference run. This exercises the plumbing — 2-node
+  # allocation, per-node rank, config rendering inside the container, checkpoint
+  # publication — with a small teacher/student pair and a short context, so it
+  # finishes in minutes and can be run repeatedly while iterating. The reference
+  # hyperparameters live in the operator recipes instead.
+  targets:
+    gold-smoke:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      outputs:
+        checkpoint:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/gold-distill
+          config:
+            # The reference run polls every 15 min; a smoke run that finishes in
+            # minutes needs completion noticed promptly.
+            poll_interval_seconds: 30
+            log_retrieval_interval_seconds: 30
+            compute_config:
+              # The point of the smoke test: prove multi-node end to end.
+              num_nodes: 2
+              num_gpus_per_node: 8
+            launcher_config:
+              resources:
+                # PER NODE — 16 GPUs across the two nodes.
+                accelerators: "H100:8"
+            gold_config:
+              run_name: gold-smoke
+              # Small pair so a full pass takes minutes. Swap for the reference
+              # granite-4.1-3b-base <- granite-4.2-30b pair only in a recipe.
+              model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.0-nano-1b"
+              teacher_model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.0-nano-1b"
+              dataset_name: "/proj/granite-build/g4os/kd-sandbox/data/en_sft_4.1/subsampled_0.4_shuffled_nothink.jsonl"
+              # Short context and a tiny step budget: this is a plumbing test.
+              max_length: 2048
+              max_completion_length: 512
+              save_steps: 10
+              save_total_limit: 2
+              logging_steps: 1
+              dataset_num_proc: 8
+              # Effective batch is meaningless at this scale; keep it small so a
+              # step completes quickly.
+              gradient_accumulation_steps: 1
+              # Off-policy: every node trains, no vLLM server to coordinate.
+              lmbda: 0.0
+              vllm_num_servers: 0
