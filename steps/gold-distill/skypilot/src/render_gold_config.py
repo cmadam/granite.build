@@ -6,11 +6,15 @@ Jinja does work there, so this is not about capability — it is about which
 mistakes stay silent. Three of the trainer's requirements corrupt a run without
 producing an error, and each is handled badly by a shell heredoc:
 
-* ``learning_rate`` / ``min_lr`` must be YAML floats. PyYAML parses a bare
-  ``1e-05`` as a *string*, which crashes the trainer's min_lr handling with a
-  str/float TypeError partway into a run. Emitting through ``yaml.safe_dump`` of
-  an actual float makes that structural instead of a formatting convention one
-  edit away from breaking.
+* ``learning_rate`` and the scheduler's ``min_lr`` must be YAML floats. PyYAML
+  parses a bare ``1e-05`` as a *string*, which crashes the trainer's min_lr
+  handling with a str/float TypeError partway into a run. Emitting through
+  ``yaml.safe_dump`` of an actual float makes that structural instead of a
+  formatting convention one edit away from breaking.
+* ``min_lr`` must be nested under ``lr_scheduler_kwargs``, never top level. The
+  trainer parses with TRL's ``parse_args_and_config``, which rejects unknown
+  top-level keys, so a flat ``min_lr`` fails the run outright — after the model
+  and teacher have already loaded.
 * Booleans must be lower-case YAML. ``safe_dump`` does that by construction;
   templating emits ``True`` unless every site remembers to lower-case it.
 * The six on-policy keys must be emitted **only** when ``vllm_num_servers > 0``.
@@ -72,14 +76,23 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         "dataset_name": args.dataset_name,
         "num_train_epochs": float(args.num_train_epochs),
         "learning_rate": _lr(args.learning_rate),
-        "min_lr": _lr(args.min_lr),
         "warmup_ratio": float(args.warmup_ratio),
         "lr_scheduler_type": args.lr_scheduler_type,
+        # min_lr belongs to the SCHEDULER, not the top level. The trainer parses
+        # its config with TRL's parse_args_and_config, which rejects unknown
+        # top-level keys outright:
+        #   ValueError: Unknown arguments from config file: ['--min_lr', ...]
+        # Every validated config in kd-sandbox/configs/gold/ nests it this way.
+        "lr_scheduler_kwargs": {
+            "min_lr": _lr(args.min_lr),
+        },
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "max_completion_length": args.max_completion_length,
         "max_length": args.max_length,
         "gradient_checkpointing": args.gradient_checkpointing,
+        # Set explicitly by every validated reference config.
+        "save_strategy": args.save_strategy,
         "save_steps": args.save_steps,
         "save_total_limit": args.save_total_limit,
         "logging_steps": args.logging_steps,
@@ -144,6 +157,11 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-completion-length", type=int, default=4096)
     p.add_argument("--max-length", type=int, default=16384)
     p.add_argument("--gradient-checkpointing", type=_bool, default=True)
+    p.add_argument(
+        "--save-strategy",
+        default="steps",
+        help="Set explicitly by every validated reference config.",
+    )
     p.add_argument("--save-steps", type=int, default=500)
     p.add_argument("--save-total-limit", type=int, default=20)
     p.add_argument("--logging-steps", type=int, default=5)
