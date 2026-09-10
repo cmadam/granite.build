@@ -1,5 +1,27 @@
 granite.build:
-  name: gold-distill-smoke
+  name: gold-distill-smoke-1task
+  # 2-node variant pinned to ONE LSF TASK PER HOST, matching the reference
+  # launcher's topology. This is an experiment, not a second smoke test.
+  #
+  # The plain 2-node build hangs on the first large cross-node collective. NCCL
+  # gets all the way to "Connected all rings, use ring PXN 0 GDR 1" over 8 IB
+  # HCAs (mlx5_1/mlx5_6 correctly excluded), the master resolves to an IP, and
+  # then the ZeRO-3 init broadcast never completes. A single-node control with the
+  # identical config trains fine, so the fault is specific to cross-node RDMA.
+  #
+  # One difference from the validated path remains. The reference launcher submits
+  #   -gpu "num=8/task:j_exclusive=yes:mode=shared" -n <nodes>
+  # i.e. ONE task per node. Ours defaults to cpus=4, which the provisioner turns
+  # into `-n 8 -R span[ptile=4]` — four task slots per host, with the dispatcher
+  # (and therefore the container) running inside one of them and inheriting its
+  # cgroup/NUMA scoping. HCA affinity restricted that way is a plausible reason a
+  # cross-node GDR transfer stalls while ring setup succeeds.
+  #
+  # Setting num_cpus_per_node: 1 gives `-n 2 -R span[ptile=1]` — one task per
+  # host, as the reference does. If this trains, the tasks-per-host scoping was
+  # the cause. If it still hangs, the next levers are mode=shared, then
+  # NCCL_NET_GDR_LEVEL=0, then NCCL_IB_DISABLE=1 with TCP over the ibp* NICs.
+  #
   # Smoke build for the gold-distill step on BlueVela (SkyPilot / LSF).
   #
   # Exercises the plumbing — 2-node allocation, per-node rank, config rendering
@@ -32,24 +54,19 @@ granite.build:
             poll_interval_seconds: 30
             log_retrieval_interval_seconds: 30
             compute_config:
-              # The point of the test: prove the multi-node path end to end.
               num_nodes: 2
               num_gpus_per_node: 8
+              # The variable under test. 1 CPU/node => `-n 2 -R span[ptile=1]`,
+              # one LSF task per host, matching the reference launcher. The
+              # trainer itself needs few CPUs here (dataset_num_proc: 8 does the
+              # data work), so this costs nothing but the scoping change.
+              num_cpus_per_node: 1
             launcher_config:
               resources:
                 # PER NODE -> 16 GPUs across the two nodes.
                 accelerators: "H100:8"
-                # HOST memory per node, and it has to be stated. The LSF
-                # provisioner defaults to 16G, which killed this build with
-                # TERM_MEMLIMIT after it reached 46.5G — presenting as a
-                # cross-node NCCL hang, since a host-memory kill produces no CUDA
-                # OOM and no watchdog message. The environment's bsub_options
-                # `M: 64G` only takes effect now that bsub_options genuinely
-                # override the derived directives; 256 leaves real headroom, since
-                # 46.5G was the peak of a run that never finished a step.
-                memory: 256
             gold_config:
-              run_name: gold-smoke
+              run_name: gold-smoke-1task
               model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
               teacher_model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
               # A 2000-row head slice of the reference dataset

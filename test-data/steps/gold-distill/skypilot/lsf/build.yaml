@@ -39,6 +39,15 @@ granite.build:
               resources:
                 # PER NODE -> 16 GPUs across the two nodes.
                 accelerators: "H100:8"
+                # HOST memory per node, and it has to be stated. The LSF
+                # provisioner defaults to 16G, which killed this build with
+                # TERM_MEMLIMIT after it reached 46.5G — presenting as a
+                # cross-node NCCL hang, since a host-memory kill produces no CUDA
+                # OOM and no watchdog message. The environment's bsub_options
+                # `M: 64G` only takes effect now that bsub_options genuinely
+                # override the derived directives; 256 leaves real headroom, since
+                # 46.5G was the peak of a run that never finished a step.
+                memory: 256
             gold_config:
               run_name: gold-smoke
               model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
