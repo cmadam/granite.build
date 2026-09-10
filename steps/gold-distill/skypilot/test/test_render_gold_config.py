@@ -60,8 +60,9 @@ class TestLearningRateIsAFloat:
         assert isinstance(config["learning_rate"], float)
 
     def test_min_lr_round_trips_as_a_float(self, tmp_path):
+        """Nested under the scheduler, where the trainer expects it."""
         config = _render(tmp_path, extra=["--min-lr", "1e-06"])
-        assert isinstance(config["min_lr"], float)
+        assert isinstance(config["lr_scheduler_kwargs"]["min_lr"], float)
 
     def test_rendered_text_carries_a_decimal_exponent(self, tmp_path):
         """Matches the validated reference configs (1.00e-05), not 1e-05."""
@@ -227,3 +228,93 @@ class TestTrainerContract:
         """safe_load is what the trainer uses, so rendering implies readability."""
         config = _render(tmp_path)
         assert isinstance(config, dict) and config
+
+
+class TestSchemaMatchesTheValidatedConfigs:
+    """The emitted key set must match kd-sandbox/configs/gold/, exactly.
+
+    The trainer parses its config with TRL's ``parse_args_and_config``, which
+    rejects unknown top-level keys rather than ignoring them. So an extra or
+    misplaced key is not a harmless difference — it aborts the run, and only after
+    the student and the 30B teacher have loaded and the allocation has been held
+    for the better part of an hour.
+
+    That is exactly what happened on the first real run: a flat ``min_lr`` gave
+
+        ValueError: Unknown arguments from config file: ['--min_lr', '1e-06']
+
+    after 52 minutes. These lists are transcribed from the validated configs on
+    /proj, so a drift in either direction fails here in milliseconds instead.
+    """
+
+    # Off-policy keys, from
+    # kd-sandbox/configs/gold/granite-4.1-3b_from-4.2-30b_*_node2.yaml
+    # minus its on-policy block.
+    EXPECTED_OFF_POLICY = {
+        "model_name_or_path",
+        "teacher_model_name_or_path",
+        "dataset_name",
+        "num_train_epochs",
+        "dataset_num_proc",
+        "learning_rate",
+        "warmup_ratio",
+        "lr_scheduler_type",
+        "lr_scheduler_kwargs",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "max_completion_length",
+        "max_length",
+        "gradient_checkpointing",
+        "save_strategy",
+        "save_steps",
+        "save_total_limit",
+        "logging_steps",
+        "temperature",
+        "lmbda",
+        "beta",
+        "use_liger_fused_jsd",
+        "response_template",
+    }
+    ONLINE_ONLY = {
+        "vllm_num_servers",
+        "top_p",
+        "use_sampled_opd_loss",
+        "last_message_only",
+        "clip_alpha",
+        "opd_importance_sampling",
+    }
+
+    def test_off_policy_key_set_is_exact(self, tmp_path):
+        assert set(_render(tmp_path)) == self.EXPECTED_OFF_POLICY
+
+    def test_on_policy_key_set_is_exact(self, tmp_path):
+        config = _render(
+            tmp_path, total_nodes=2, extra=["--vllm-num-servers", "1", "--lmbda", "1.0"]
+        )
+        assert set(config) == self.EXPECTED_OFF_POLICY | self.ONLINE_ONLY
+
+    def test_min_lr_is_nested_under_the_scheduler(self, tmp_path):
+        """The specific failure. min_lr configures the scheduler, so a top-level
+        key is not merely redundant — it is rejected."""
+        config = _render(tmp_path)
+        assert (
+            "min_lr" not in config
+        ), "a flat min_lr is rejected by TRL's parse_args_and_config"
+        assert config["lr_scheduler_kwargs"]["min_lr"] == pytest.approx(1e-06)
+
+    def test_nested_min_lr_is_a_float(self, tmp_path):
+        """Nesting must not lose the float typing the trainer needs."""
+        config = _render(tmp_path, extra=["--min-lr", "1e-06"])
+        assert isinstance(config["lr_scheduler_kwargs"]["min_lr"], float)
+
+    def test_save_strategy_is_emitted(self, tmp_path):
+        """Every validated config sets it explicitly rather than relying on the
+        HF default."""
+        assert _render(tmp_path)["save_strategy"] == "steps"
+
+    def test_scheduler_type_pairs_with_the_kwargs(self, tmp_path):
+        """cosine_with_min_lr is the scheduler that consumes min_lr; the two must
+        travel together or the schedule silently is not what was asked for."""
+        config = _render(tmp_path)
+        assert config["lr_scheduler_type"] == "cosine_with_min_lr"
+        assert "min_lr" in config["lr_scheduler_kwargs"]
