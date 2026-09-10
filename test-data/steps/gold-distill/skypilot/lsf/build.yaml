@@ -69,3 +69,12 @@ granite.build:
               # Off-policy: every node trains, no vLLM server to coordinate.
               lmbda: 0.0
               vllm_num_servers: 0
+              # Diagnostics on, because the first 2-node attempt stalled on step 0
+              # and produced nothing: the reference launcher's
+              # TORCH_NCCL_ENABLE_MONITORING=0 disables the thread that aborts a
+              # stalled collective, so the run hung for an hour holding two H100
+              # nodes and yielded no error to read.
+              nccl_enable_monitoring: true
+              nccl_timeout_ms: 600000
+              nccl_debug: "INFO"
+              nccl_debug_subsys: "INIT,NET"

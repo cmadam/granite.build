@@ -165,12 +165,16 @@ class TestStepDeclaration:
     def test_renderer_is_shipped_as_a_file_mount(self, launcher):
         assert launcher["file_mounts"] == {"src": "src"}
 
-    def test_nccl_timeouts_are_raised(self, launcher):
+    def test_nccl_timeout_env_is_present(self, launcher):
         """The 30B teacher forward plus ZeRO-3 collectives outlast the default
-        watchdog on a healthy run."""
-        envs = launcher["envs"]
-        assert envs["TORCH_NCCL_ENABLE_MONITORING"] == "0"
-        assert int(envs["TORCH_NCCL_TIMEOUT_MS"]) >= 3600000
+        watchdog on a healthy run, so the timeout must be set explicitly. Its
+        value is templated — see TestDistributedDiagnostics."""
+        for key in (
+            "TORCH_NCCL_TIMEOUT_MS",
+            "NCCL_TIMEOUT",
+            "TORCH_NCCL_ENABLE_MONITORING",
+        ):
+            assert key in launcher["envs"]
 
     def test_monitor_uses_periodic_retrieval(self, step):
         """The default on_completion surfaces nothing until a multi-hour run ends."""
@@ -199,8 +203,18 @@ class TestRendererInvocation:
 
     def test_all_renderer_flags_are_passed(self, run_script, step):
         gold = step["config"]["gold_config"]
-        # Fields consumed by the run block itself rather than forwarded.
-        step_only = {"kd_code_dir", "ds_config", "run_name"}
+        # Fields consumed by the run block or the launcher env rather than
+        # forwarded to the renderer: the nccl_* knobs configure NCCL through the
+        # environment, and have no place in the trainer's config file.
+        step_only = {
+            "kd_code_dir",
+            "ds_config",
+            "run_name",
+            "nccl_debug",
+            "nccl_debug_subsys",
+            "nccl_timeout_ms",
+            "nccl_enable_monitoring",
+        }
         for key in gold:
             if key in step_only:
                 continue
@@ -213,3 +227,62 @@ class TestRendererInvocation:
 
     def test_total_nodes_is_passed_from_the_allocation(self, run_script):
         assert '--total-nodes "$NODES"' in run_script
+
+
+class TestDistributedDiagnostics:
+    """A hang must produce an error, not silence.
+
+    The first 2-node run reached the training loop and then stalled on step 0 for
+    an hour with no output, because the step copied the reference launcher's
+    TORCH_NCCL_ENABLE_MONITORING=0 — which disables the thread that aborts a
+    stalled collective. The allocation was held the whole time and nothing was
+    learned from it.
+    """
+
+    def test_monitoring_defaults_on(self, step):
+        """Deliberately diverging from the reference launcher: an abort with a
+        named collective beats an indefinite hang."""
+        assert step["config"]["gold_config"]["nccl_enable_monitoring"] is True
+
+    def test_monitoring_is_templated_not_hardcoded(self, launcher):
+        env = launcher["envs"]["TORCH_NCCL_ENABLE_MONITORING"]
+        assert "{{" in env and "nccl_enable_monitoring" in env
+        assert '"1"' in env and '"0"' in env, "must render 1/0, not True/False"
+
+    def test_timeout_is_templated(self, launcher):
+        for key in ("TORCH_NCCL_TIMEOUT_MS", "NCCL_TIMEOUT"):
+            assert "nccl_timeout_ms" in launcher["envs"][key]
+
+    def test_nccl_debug_is_available_and_off_by_default(self, step, launcher):
+        """Off by default (very verbose), but reachable without editing the step —
+        it is the only way to distinguish an IB path from a silent TCP fallback."""
+        assert step["config"]["gold_config"]["nccl_debug"] == ""
+        assert "nccl_debug" in launcher["envs"]["NCCL_DEBUG"]
+
+    def test_reference_timeout_default_is_preserved(self, step):
+        """A healthy 30B teacher forward is slow; the production default must stay
+        generous even though debug builds lower it."""
+        assert step["config"]["gold_config"]["nccl_timeout_ms"] == 3600000
+
+
+class TestMasterAddressIsAnIp:
+    """accelerate is given an IP, matching the reference launcher.
+
+    The provisioner exports MASTER_ADDR as a short hostname. Rendezvous works with
+    either form, but NCCL's bootstrap selects its interface from this value, so
+    the validated path's choice is not something to assume equivalent.
+    """
+
+    def test_master_is_resolved_before_use(self, run_script):
+        assert "/etc/hosts" in run_script
+        assert run_script.index("MIP=") < run_script.index("--main_process_ip")
+
+    def test_accelerate_receives_the_resolved_address(self, run_script):
+        assert '--main_process_ip "$MIP"' in run_script
+        assert '--main_process_ip "$MADDR"' not in run_script
+
+    def test_resolution_falls_back_rather_than_failing(self, run_script):
+        """A missing /etc/hosts entry must not abort the run: fall through to
+        getent, then to the hostname, which is what worked before."""
+        assert "getent ahostsv4" in run_script
+        assert '[ -z "$MIP" ] && MIP="$MADDR"' in run_script
