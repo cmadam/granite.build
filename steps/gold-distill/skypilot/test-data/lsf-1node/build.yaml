@@ -1,11 +1,24 @@
 granite.build:
-  name: gold-distill-smoke
-  # Smoke build for the gold-distill step on BlueVela (SkyPilot / LSF).
+  name: gold-distill-smoke-1node
+  # SINGLE-NODE control for the gold-distill step. Not a plumbing test — a
+  # discriminator.
   #
-  # Exercises the plumbing — 2-node allocation, per-node rank, config rendering
-  # inside the container against the /proj checkout, checkpoint publication — not
-  # the science. Everything expensive is scaled down; the model pair is not.
+  # The 2-node smoke run reaches the training loop (DeepSpeed reports
+  # world_size=16, ZeRO-3 initialises) and then stalls indefinitely on step 0
+  # with no OOM, no CUDA error and no traceback. That is consistent with either a
+  # cross-node collective deadlock or something about this workload at these
+  # ranks, and the two need different fixes.
   #
+  # This run removes the cross-node dimension entirely: 8 GPUs, one host, so
+  # every collective is intra-node over NVLink. If it trains, the fault is
+  # cross-node and the next place to look is NCCL's transport selection. If it
+  # stalls identically, the fault is in the workload or the config and node count
+  # is irrelevant.
+  #
+  # It is also cheaper to schedule than 2 exclusive nodes, so it is the first
+  # thing to run, not the last.
+  #
+  # Model-pair reasoning is unchanged from the 2-node fixture.
   # Why the REFERENCE pair rather than something small. GOLD compares student and
   # teacher distributions position-by-position, so the two must share a tokenizer.
   # Grouping the /proj overlays by tokenizer.json hash, the reference pair
@@ -32,15 +45,15 @@ granite.build:
             poll_interval_seconds: 30
             log_retrieval_interval_seconds: 30
             compute_config:
-              # The point of the test: prove the multi-node path end to end.
-              num_nodes: 2
+              # The whole point: no cross-node collectives.
+              num_nodes: 1
               num_gpus_per_node: 8
             launcher_config:
               resources:
-                # PER NODE -> 16 GPUs across the two nodes.
+                # 8 GPUs on one host.
                 accelerators: "H100:8"
             gold_config:
-              run_name: gold-smoke
+              run_name: gold-smoke-1node
               model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
               teacher_model_name_or_path: "/proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
               # A 2000-row head slice of the reference dataset
@@ -69,11 +82,11 @@ granite.build:
               # Off-policy: every node trains, no vLLM server to coordinate.
               lmbda: 0.0
               vllm_num_servers: 0
-              # Diagnostics on, because the first 2-node attempt stalled on step 0
-              # and produced nothing: the reference launcher's
-              # TORCH_NCCL_ENABLE_MONITORING=0 disables the thread that aborts a
-              # stalled collective, so the run hung for an hour holding two H100
-              # nodes and yielded no error to read.
+              # Diagnostics. A stalled collective must fail with a named
+              # collective in ~10 minutes rather than hang forever holding the
+              # allocation — which is exactly what the 2-node run did, because
+              # the reference launcher's TORCH_NCCL_ENABLE_MONITORING=0 disables
+              # the thread that would abort it.
               nccl_enable_monitoring: true
               nccl_timeout_ms: 600000
               nccl_debug: "INFO"
