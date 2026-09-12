@@ -100,8 +100,7 @@ def test_inputs_agree_with_what_the_trainer_is_given(rendered):
 
     assert inputs["student_model"]["uri"] == "env://" + gold["model_name_or_path"]
     assert (
-        inputs["teacher_model"]["uri"]
-        == "env://" + gold["teacher_model_name_or_path"]
+        inputs["teacher_model"]["uri"] == "env://" + gold["teacher_model_name_or_path"]
     )
     assert inputs["training_dataset"]["uri"] == "env://" + gold["dataset_name"]
 
