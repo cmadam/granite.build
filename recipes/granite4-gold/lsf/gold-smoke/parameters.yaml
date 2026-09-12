@@ -56,7 +56,7 @@ PER_DEVICE_TRAIN_BATCH_SIZE: 1
 # Effective batch = PER_DEVICE x GRAD_ACCUM x NUM_NODES x NUM_GPUS_PER_NODE. The
 # reference run is 192 (1 x 6 x 4 x 8) and the LR schedule was tuned against it. That
 # is deliberately NOT preserved here: effective batch is not meaningful at this scale,
-# so the step count stays low instead (2 x 8 x 1 x 1 = 16).
+# so the step count stays low instead (1 x 1 x 2 x 8 = 16).
 GRADIENT_ACCUMULATION_STEPS: 1
 # 4x smaller than the reference 16384/4096. Sized against the actual data: completions
 # are ~451 tokens at the median and ~936 at p90, so this truncates little while cutting
