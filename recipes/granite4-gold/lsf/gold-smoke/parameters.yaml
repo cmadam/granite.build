@@ -11,8 +11,11 @@ RUN_NAME: "gold-smoke"
 
 # ─── Trainer code and image ───────────────────────────────────────────
 # Live kd-sandbox checkout on the shared FS; supplies gold/*.py and the DeepSpeed
-# configs. It is unpinned state, so the step records kd_sandbox_commit as metadata on
-# every run. Set to /stage (the in-image snapshot) for a fully pinned run.
+# configs. It is unpinned state, so rank 0 records kd_sandbox_commit as step metadata
+# — but only when this path is a git checkout: the step reads it with `git rev-parse
+# HEAD || true` and stays silent otherwise, so pointing this at a plain directory
+# leaves the run with no record of which trainer code ran. Set to /stage (the
+# in-image snapshot) for a fully pinned run.
 KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
 # accelerate + DeepSpeed ZeRO-3 config, resolved relative to KD_CODE_DIR.
 DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
@@ -30,8 +33,9 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # granite-4.0-1b-instruct-clean + granite-4.1-3b_r260401a, which do share a tokenizer
 # with each other) uses granite-4's own chat markup, so the template would match
 # nothing and the loss would be computed over the wrong span — silently. Shrinking
-# context and data is safe; shrinking the pair is not. See USAGE.md for how to group
-# the overlays, which is not discoverable from the names.
+# context and data is safe; shrinking the pair is not. For how to group the overlays
+# by tokenizer — not discoverable from the names — see
+# ../../../../steps/gold-distill/skypilot/USAGE.md#choosing-a-studentteacher-pair.
 TEACHER_MODEL: "/proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
 STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
 # A 2000-row head slice of the reference dataset
