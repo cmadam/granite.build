@@ -20,6 +20,20 @@ granite.build:
   targets:
     gold-smoke:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      # The pair and the dataset as lineage inputs — the same three the
+      # recipes/granite4-gold/lsf/gold-smoke recipe declares, with literal paths
+      # because the build-test harness passes no parameters file. env:// pulls are
+      # shared-FS no-ops, so these register three input artifacts and add no step.
+      inputs:
+        teacher_model:
+          uri: "env:///proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
+          type: model
+        student_model:
+          uri: "env:///proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
+          type: model
+        training_dataset:
+          uri: "env:///proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+          type: dataset
       outputs:
         checkpoint:
           uri: "env://{{ binding.path }}"

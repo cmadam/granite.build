@@ -9,10 +9,11 @@ targets:
   - gold-smoke
 target_expectations:
   - target_name: gold-smoke
-    # One workload. The env:// output is a shared-FS no-op, so registration works
-    # off the GB_ARTIFACT_PATH string with no extra push step.
+    # One workload. The env:// input pulls and the env:// output push are shared-FS
+    # no-ops, so the three inputs and one output register off their URI strings with
+    # no extra pull/push step.
     step_count: 1
-    input_artifact_count: 0
+    input_artifact_count: 3
     output_artifact_count: 1
     jobstats_count: 1
     expected_steps:
