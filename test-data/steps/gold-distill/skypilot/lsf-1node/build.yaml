@@ -33,6 +33,21 @@ granite.build:
   targets:
     gold-smoke:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      # Same three lineage inputs as the lsf/ fixture and the gold-smoke recipe.
+      # This variant has no buildtest.yaml — it is launched by hand as the 1-node
+      # control — which is exactly why it needs them: a control run whose lineage
+      # omits the pair and dataset cannot be compared against the 2-node run it
+      # exists to control for.
+      inputs:
+        teacher_model:
+          uri: "env:///proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
+          type: model
+        student_model:
+          uri: "env:///proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
+          type: model
+        training_dataset:
+          uri: "env:///proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+          type: dataset
       outputs:
         checkpoint:
           uri: "env://{{ binding.path }}"
