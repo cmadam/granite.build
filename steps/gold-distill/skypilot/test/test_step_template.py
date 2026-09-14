@@ -201,25 +201,55 @@ class TestStepDeclaration:
 class TestRendererInvocation:
     """Every gold_config field must actually reach the renderer."""
 
+    # Every gold_config key goes to exactly one of three places, and a key that
+    # reaches NONE of them is configuration that does nothing — which reads as a
+    # working knob to the next person who tunes it. The partition is asserted
+    # rather than described so that adding a key forces a decision about which
+    # kind it is.
+    #
+    # 1. STEP_ONLY — consumed by the run block or the launcher env. The nccl_*
+    #    knobs configure NCCL through the environment and have no place in the
+    #    trainer's config file; the rest name paths the step itself resolves.
+    STEP_ONLY = {
+        "kd_code_dir",
+        "ds_config",
+        "run_name",
+        "nccl_debug",
+        "nccl_debug_subsys",
+        "nccl_timeout_ms",
+        "nccl_enable_monitoring",
+    }
+    # 2. TRAINER_CLI_ONLY — handed to gold.py on its command line, NOT written
+    #    into the rendered config. That mirrors the one launcher that has actually
+    #    run on-policy: TRL's parse_args_and_config rejects unknown top-level keys,
+    #    so putting these in the config file would bet on them being accepted
+    #    config-file keys rather than merely accepted CLI flags.
+    TRAINER_CLI_ONLY = {
+        "vllm_mode": "--vllm_mode",
+        "vllm_sync_frequency": "--vllm_sync_frequency",
+    }
+
+    # 3. Everything else reaches render_gold_config.py as --kebab-case.
+
     def test_all_renderer_flags_are_passed(self, run_script, step):
-        gold = step["config"]["gold_config"]
-        # Fields consumed by the run block or the launcher env rather than
-        # forwarded to the renderer: the nccl_* knobs configure NCCL through the
-        # environment, and have no place in the trainer's config file.
-        step_only = {
-            "kd_code_dir",
-            "ds_config",
-            "run_name",
-            "nccl_debug",
-            "nccl_debug_subsys",
-            "nccl_timeout_ms",
-            "nccl_enable_monitoring",
-        }
-        for key in gold:
-            if key in step_only:
+        for key in step["config"]["gold_config"]:
+            if key in self.STEP_ONLY or key in self.TRAINER_CLI_ONLY:
                 continue
             flag = "--" + key.replace("_", "-")
             assert flag in run_script, f"{key} never reaches the renderer"
+
+    def test_trainer_cli_only_keys_reach_gold_py(self, run_script, step):
+        """They bypass the renderer, so nothing else would catch them going
+        nowhere — and a silently dropped vllm_mode is an on-policy run that
+        cannot find its server."""
+        for key, flag in self.TRAINER_CLI_ONLY.items():
+            assert key in step["config"]["gold_config"], f"{key} is not a config key"
+            assert flag in run_script, f"{key} never reaches gold.py"
+            # And they must NOT be sent to the renderer, which would emit them
+            # into the config file and risk the rejection described above.
+            assert (
+                "--" + key.replace("_", "-") not in run_script
+            ), f"{key} is also passed to the renderer"
 
     def test_renderer_is_run_with_the_container_interpreter(self, run_script):
         """So the config is dumped by the same PyYAML the trainer parses with."""
@@ -286,3 +316,76 @@ class TestMasterAddressIsAnIp:
         getent, then to the hostname, which is what worked before."""
         assert "getent ahostsv4" in run_script
         assert '[ -z "$MIP" ] && MIP="$MADDR"' in run_script
+
+
+class TestExternalVllmServer:
+    """The on-policy path where the server is a separate target, reached by URL.
+
+    NOT YET RUN ON A CLUSTER. Everything here is a contract test; the open
+    question is whether the trainer's NCCL weight-sync group can span two LSF
+    allocations, which no test can answer.
+    """
+
+    def test_the_url_is_a_config_key(self, step):
+        gold = step["config"]["gold_config"]
+        assert gold["vllm_server_url"] == ""
+        assert gold["vllm_mode"] == "server"
+        assert gold["vllm_sync_frequency"] == 1
+
+    def test_all_nodes_train_when_the_server_is_external(self, run_script):
+        """No node is taken away from the trainer, because the server is not in
+        this allocation. Getting this wrong wastes a node silently."""
+        assert 'TRAINER_NODES="$NODES"' in run_script
+
+    def test_the_in_allocation_split_is_still_present(self, run_script):
+        """The external path is additive; the reference launcher's role split must
+        remain reachable when no URL is given."""
+        assert "TRAINER_NODES=$(( NODES - VLLM_SERVERS ))" in run_script
+        assert "run_vllm_serve.py" in run_script
+
+    def test_the_address_reaches_gold_py(self, run_script):
+        for flag in ("--vllm_server_host", "--vllm_server_port", "--vllm_mode"):
+            assert flag in run_script
+        assert "$VLLM_ARGS" in run_script
+
+    def test_the_url_is_parsed_at_run_time_not_templated(self, run_script):
+        """The address is only known at run time — it arrives through a mem://
+        binding — so it must be split in shell, not by Jinja."""
+        assert 'VLLM_URL="{{ config.gold_config.vllm_server_url }}"' in run_script
+        assert "_hostport" in run_script
+
+    @pytest.mark.parametrize(
+        "url,host,port",
+        [
+            ("http://host-42:8001", "host-42", "8001"),
+            ("http://10.0.0.7:8001", "10.0.0.7", "8001"),
+            # A trailing path is what an OpenAI-compatible base URL looks like.
+            ("http://host-42:8001/v1", "host-42", "8001"),
+            # No port: fall back to the reference launcher's 8001 rather than
+            # handing the trainer an empty port that fails at connect time.
+            ("http://host-42", "host-42", "8001"),
+            ("https://host-42:9000", "host-42", "9000"),
+        ],
+    )
+    def test_url_parsing_actually_works(self, run_script, url, host, port):
+        """Runs the real parsing lines rather than pattern-matching them, because
+        a wrong host here is a connection error minutes into an allocated run.
+        """
+        lines = _as_shell(run_script).splitlines()
+        start = next(i for i, l in enumerate(lines) if "_hostport=" in l)
+        end = next(i for i, l in enumerate(lines) if "esac" in l)
+        snippet = "\n".join(lines[start : end + 1]).replace(
+            "${VLLM_URL#*://}", "${URL#*://}"
+        )
+
+        result = subprocess.run(
+            ["bash", "-c", f'URL="{url}"\n{snippet}\necho "$VLLM_HOST $VLLM_PORT"'],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == f"{host} {port}"
+
+    def test_an_unparseable_url_fails_loudly(self, run_script):
+        """Rather than launching a trainer that cannot reach anything."""
+        assert "could not parse a host out of vllm_server_url" in run_script
