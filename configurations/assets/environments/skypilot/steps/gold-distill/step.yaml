@@ -36,6 +36,12 @@ config:
 
     # ── Training hyperparameters ────────────────────────────────────────────
     num_train_epochs: 1.0
+    # Cap the run by optimizer steps rather than by epochs. 0 leaves the key out
+    # of the rendered config entirely, so an epoch-bounded run is unaffected;
+    # any positive value overrides num_train_epochs in the trainer. This is what
+    # a run over a corpus too large to epoch through needs — one epoch of the
+    # 802,027-row reference corpus is 4,177 steps at effective batch 192.
+    max_steps: 0
     learning_rate: 1.0e-05
     min_lr: 1.0e-06
     warmup_ratio: 0.05
@@ -50,6 +56,10 @@ config:
     gradient_checkpointing: true
     # Keep the whole trajectory: an early, less-forgotten checkpoint is often the
     # best one to evaluate, and a small limit deletes it irrecoverably.
+    # The renderer has always emitted this; it is a config key so a run can turn
+    # checkpointing off ("no") without editing the step. "steps" pairs with
+    # save_steps below and is what every validated reference config sets.
+    save_strategy: "steps"
     save_steps: 500
     save_total_limit: 20
     logging_steps: 5
@@ -194,6 +204,7 @@ environment_configs:
               --teacher-model-name-or-path "{{ config.gold_config.teacher_model_name_or_path }}" \
               --dataset-name "{{ config.gold_config.dataset_name }}" \
               --num-train-epochs {{ config.gold_config.num_train_epochs }} \
+              --max-steps {{ config.gold_config.max_steps }} \
               --learning-rate {{ config.gold_config.learning_rate }} \
               --min-lr {{ config.gold_config.min_lr }} \
               --warmup-ratio {{ config.gold_config.warmup_ratio }} \
@@ -203,6 +214,7 @@ environment_configs:
               --max-completion-length {{ config.gold_config.max_completion_length }} \
               --max-length {{ config.gold_config.max_length }} \
               --gradient-checkpointing {{ config.gold_config.gradient_checkpointing }} \
+              --save-strategy "{{ config.gold_config.save_strategy }}" \
               --save-steps {{ config.gold_config.save_steps }} \
               --save-total-limit {{ config.gold_config.save_total_limit }} \
               --logging-steps {{ config.gold_config.logging_steps }} \
