@@ -312,6 +312,38 @@ class TestSchemaMatchesTheValidatedConfigs:
         HF default."""
         assert _render(tmp_path)["save_strategy"] == "steps"
 
+    def test_max_steps_is_absent_by_default(self, tmp_path):
+        """An epoch-bounded run must render exactly the key set the validated
+        references carry. This is also what keeps gold-smoke's rendered config
+        byte-identical now that a step-bounded sibling recipe exists — a key that
+        appeared unconditionally would silently change every existing run."""
+        assert "max_steps" not in _render(tmp_path)
+
+    def test_max_steps_is_emitted_as_an_int_when_set(self, tmp_path):
+        """The trainer compares it against a step counter, so a string would
+        raise partway into a run rather than at parse time."""
+        config = _render(tmp_path, extra=["--max-steps", "100"])
+        assert config["max_steps"] == 100
+        assert isinstance(config["max_steps"], int)
+
+    def test_max_steps_zero_is_omitted_rather_than_emitted(self, tmp_path):
+        """0 is the step default and means "bound by epochs". Emitting a literal
+        0 would depend on the trainer reading it as unbounded rather than as no
+        steps at all; omitting it does not."""
+        assert "max_steps" not in _render(tmp_path, extra=["--max-steps", "0"])
+
+    def test_max_steps_does_not_displace_the_epoch_count(self, tmp_path):
+        """Both keys travel together: the trainer needs num_train_epochs present
+        to build the LR schedule even when max_steps truncates the run."""
+        config = _render(tmp_path, extra=["--max-steps", "100"])
+        assert config["num_train_epochs"] == pytest.approx(1.0)
+
+    def test_save_strategy_is_settable(self, tmp_path):
+        """A run that wants no checkpoints should not have to edit the step."""
+        assert (
+            _render(tmp_path, extra=["--save-strategy", "no"])["save_strategy"] == "no"
+        )
+
     def test_scheduler_type_pairs_with_the_kwargs(self, tmp_path):
         """cosine_with_min_lr is the scheduler that consumes min_lr; the two must
         travel together or the schedule silently is not what was asked for."""

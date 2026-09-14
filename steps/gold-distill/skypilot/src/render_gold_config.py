@@ -75,6 +75,15 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         "teacher_model_name_or_path": args.teacher_model_name_or_path,
         "dataset_name": args.dataset_name,
         "num_train_epochs": float(args.num_train_epochs),
+        # max_steps bounds a run by optimizer steps instead of by epochs, which is
+        # what the sweep arms need: their corpus is 802,027 rows, so one epoch is
+        # 4,177 steps at effective batch 192 and no amount of shrinking the data
+        # substitutes for capping the steps. Emitted ONLY when > 0, for two
+        # reasons: every validated epoch-bounded reference config omits the key
+        # entirely, and gold-smoke's rendered config has to stay byte-identical
+        # (test_off_policy_key_set_is_exact asserts the key set, not just the
+        # values). When set it overrides num_train_epochs in the trainer.
+        **({"max_steps": args.max_steps} if args.max_steps > 0 else {}),
         "learning_rate": _lr(args.learning_rate),
         "warmup_ratio": float(args.warmup_ratio),
         "lr_scheduler_type": args.lr_scheduler_type,
@@ -148,6 +157,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--dataset-name", required=True)
 
     p.add_argument("--num-train-epochs", type=float, default=1.0)
+    # 0 => absent from the rendered config, i.e. bound the run by epochs.
+    p.add_argument("--max-steps", type=int, default=0)
     p.add_argument("--learning-rate", type=float, default=1.0e-05)
     p.add_argument("--min-lr", type=float, default=1.0e-06)
     p.add_argument("--warmup-ratio", type=float, default=0.05)
