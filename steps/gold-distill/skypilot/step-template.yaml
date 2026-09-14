@@ -99,6 +99,25 @@ config:
     # on the rest. On-policy continues from a good off-policy checkpoint, so set
     # model_name_or_path to that checkpoint rather than the base overlay.
     vllm_num_servers: 0
+    # An EXTERNAL vLLM server, reached by URL, instead of carving nodes out of
+    # this allocation. Set from another target's mem:// binding, e.g.
+    #   vllm_server_url: "{{ '{{' }} bindings.vllm.binding.state {{ '}}' }}"
+    # When set, EVERY node here trains and the role split below does not happen;
+    # the trainer is given the address on gold.py's command line. Empty keeps the
+    # in-allocation split that vllm_num_servers alone selects.
+    #
+    # NOT YET RUN ON A CLUSTER. The trainer pushes updated student weights to the
+    # server over NCCL (the reference launcher's VLLM_NCCL_COORDINATOR_PORT), so
+    # an external server means a NCCL process group spanning two LSF allocations.
+    # Whether that works here is the open question this path exists to answer.
+    vllm_server_url: ""
+    # server = talk to a vLLM HTTP server; the reference launcher's value. Only
+    # consulted on the on-policy path.
+    vllm_mode: "server"
+    # How often, in optimizer steps, the trainer pushes its updated weights to the
+    # server. The reference launcher uses 1: on-policy means generating from the
+    # CURRENT student, so a larger value samples from a staler policy.
+    vllm_sync_frequency: 1
     top_p: 0.95
     use_sampled_opd_loss: false
     last_message_only: false
@@ -229,7 +248,8 @@ environment_configs:
               --use-sampled-opd-loss {{ config.gold_config.use_sampled_opd_loss }} \
               --last-message-only {{ config.gold_config.last_message_only }} \
               --clip-alpha {{ config.gold_config.clip_alpha }} \
-              --opd-importance-sampling {{ config.gold_config.opd_importance_sampling }}
+              --opd-importance-sampling {{ config.gold_config.opd_importance_sampling }} \
+              --vllm-server-url "{{ config.gold_config.vllm_server_url }}"
 
             if [ "$NODE_RANK" = "0" ]; then
               echo "--- rendered gold config ($CFG) ---"
@@ -238,20 +258,49 @@ environment_configs:
             fi
             mkdir -p "$CKPT_DIR"
 
-            # Node roles. Off-policy (the default) makes every node a trainer.
-            # On-policy dedicates the LAST N nodes to vLLM, matching the
-            # launcher's convention, and the trainer count shrinks accordingly.
-            TRAINER_NODES=$(( NODES - VLLM_SERVERS ))
-            if [ "$VLLM_SERVERS" -gt 0 ] && [ "$NODE_RANK" -ge "$TRAINER_NODES" ]; then
-              echo "gold-distill: rank $NODE_RANK serving the student under vLLM"
-              exec /stage/.venv/bin/python "$KD_CODE_DIR/gold/run_vllm_serve.py" \
-                --port "${KD_VLLM_API_PORT:-8001}" \
-                --model "{{ config.gold_config.model_name_or_path }}" \
-                --gpu-memory-utilization 0.9 \
-                --tensor-parallel-size 1 \
-                --data-parallel-size "$GPUS" \
-                --log_level warning \
-                --max-model-len {{ config.gold_config.max_length }}
+            # Node roles, three cases.
+            #
+            # 1. EXTERNAL server (vllm_server_url set): the server lives in another
+            #    target's allocation and this one is all trainers. The address is
+            #    split out of the URL here rather than templated, because it is only
+            #    known at run time — it arrives through a mem:// binding.
+            # 2. In-allocation split (vllm_server_url empty, vllm_num_servers > 0):
+            #    the LAST N nodes serve, matching the reference launcher.
+            # 3. Off-policy (the default): every node trains.
+            VLLM_URL="{{ config.gold_config.vllm_server_url }}"
+            VLLM_ARGS=""
+            if [ -n "$VLLM_URL" ]; then
+              # http://host:port -> host, port. Strip the scheme, then split on the
+              # LAST colon so an IPv6 literal or a missing port is not silently
+              # mangled into something that fails at connect time instead of here.
+              _hostport="${VLLM_URL#*://}"
+              _hostport="${_hostport%%/*}"
+              case "$_hostport" in
+                *:*) VLLM_HOST="${_hostport%:*}"; VLLM_PORT="${_hostport##*:}" ;;
+                *)   VLLM_HOST="$_hostport";      VLLM_PORT="8001" ;;
+              esac
+              if [ -z "$VLLM_HOST" ]; then
+                echo "gold-distill: FATAL: could not parse a host out of vllm_server_url '$VLLM_URL'" >&2
+                exit 1
+              fi
+              TRAINER_NODES="$NODES"
+              VLLM_ARGS="--vllm_mode {{ config.gold_config.vllm_mode }}"
+              VLLM_ARGS="$VLLM_ARGS --vllm_sync_frequency {{ config.gold_config.vllm_sync_frequency }}"
+              VLLM_ARGS="$VLLM_ARGS --vllm_server_host $VLLM_HOST --vllm_server_port $VLLM_PORT"
+              echo "gold-distill: external vLLM server at $VLLM_HOST:$VLLM_PORT; all $NODES node(s) train"
+            else
+              TRAINER_NODES=$(( NODES - VLLM_SERVERS ))
+              if [ "$VLLM_SERVERS" -gt 0 ] && [ "$NODE_RANK" -ge "$TRAINER_NODES" ]; then
+                echo "gold-distill: rank $NODE_RANK serving the student under vLLM"
+                exec /stage/.venv/bin/python "$KD_CODE_DIR/gold/run_vllm_serve.py" \
+                  --port "${KD_VLLM_API_PORT:-8001}" \
+                  --model "{{ config.gold_config.model_name_or_path }}" \
+                  --gpu-memory-utilization 0.9 \
+                  --tensor-parallel-size 1 \
+                  --data-parallel-size "$GPUS" \
+                  --log_level warning \
+                  --max-model-len {{ config.gold_config.max_length }}
+              fi
             fi
 
             echo "gold-distill: rank $NODE_RANK/$NODES training ($TRAINER_NODES trainer node(s)), master $MADDR:$MPORT"
@@ -265,7 +314,8 @@ environment_configs:
               "$KD_CODE_DIR/gold/gold.py" \
               --config "$CFG" \
               --output_dir "$CKPT_DIR" \
-              {% if config.gold_config.vllm_num_servers | int == 0 %}--use_vllm=False{% endif %}
+              {% if config.gold_config.vllm_num_servers | int == 0 %}--use_vllm=False{% endif %} \
+              $VLLM_ARGS
 
             # Rank 0 only: the executor streams every node's output into one
             # driver log, so an unguarded marker would register N artifacts.

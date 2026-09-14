@@ -58,13 +58,30 @@ def _lr(value: float) -> float:
 def build_config(args: argparse.Namespace) -> Dict[str, Any]:
     """Assemble the gold config mapping from parsed arguments."""
     online = args.vllm_num_servers > 0
+    # An EXTERNAL server (its URL arrives from another target's mem:// binding)
+    # is not part of this allocation, so none of this allocation's nodes is taken
+    # away from the trainer and the node arithmetic below does not apply.
+    external = bool(args.vllm_server_url)
 
-    if online and args.total_nodes < 2:
+    if external and not online:
+        raise ValueError(
+            "a vllm_server_url was given but vllm_num_servers is 0, so the "
+            "on-policy config keys would not be emitted and the run would train "
+            "off-policy while a server sat idle; set vllm_num_servers to the "
+            "number of external servers"
+        )
+    if external and args.lmbda <= 0:
+        raise ValueError(
+            f"a vllm_server_url was given but lmbda is {args.lmbda}; at lmbda 0 "
+            "the student never generates, so the server would be allocated and "
+            "never used"
+        )
+    if online and not external and args.total_nodes < 2:
         raise ValueError(
             "on-policy needs at least 2 nodes (one vLLM server plus one "
             f"trainer); got total_nodes={args.total_nodes}"
         )
-    if online and args.vllm_num_servers >= args.total_nodes:
+    if online and not external and args.vllm_num_servers >= args.total_nodes:
         raise ValueError(
             f"vllm_num_servers ({args.vllm_num_servers}) must be < total nodes "
             f"({args.total_nodes}); every node would serve and none would train"
@@ -200,6 +217,12 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--last-message-only", type=_bool, default=False)
     p.add_argument("--clip-alpha", type=float, default=0.1)
     p.add_argument("--opd-importance-sampling", type=_bool, default=False)
+    # Read for VALIDATION only and never emitted. The trainer learns the server's
+    # address from CLI flags on gold.py (--vllm_server_host / --vllm_server_port),
+    # mirroring the one launcher that has actually run on-policy; putting them in
+    # the config file instead would bet on them being accepted config-file keys,
+    # and TRL's parse_args_and_config rejects unknown top-level keys outright.
+    p.add_argument("--vllm-server-url", default="")
     return p.parse_args(argv)
 
 

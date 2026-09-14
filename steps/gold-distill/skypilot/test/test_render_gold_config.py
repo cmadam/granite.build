@@ -194,6 +194,68 @@ class TestNodeSplitValidation:
         assert config["vllm_num_servers"] == 1
 
 
+class TestExternalVllmServer:
+    """An external server (its URL from another target's mem:// binding) is not
+    part of this allocation, so the node arithmetic that protects the in-allocation
+    split must not fire — and the two mistakes it cannot protect against must.
+    """
+
+    _URL = ["--vllm-server-url", "http://host-42:8001"]
+    _ON = ["--vllm-num-servers", "1", "--lmbda", "1.0"]
+
+    def test_single_node_is_allowed_with_an_external_server(self, tmp_path):
+        """The whole point: one node can train on-policy when nothing local
+        serves. The in-allocation path rejects exactly this."""
+        config = _render(tmp_path, total_nodes=1, extra=self._URL + self._ON)
+        assert config["lmbda"] == pytest.approx(1.0)
+
+    def test_server_count_may_equal_the_node_count(self, tmp_path):
+        """vllm_num_servers counts EXTERNAL servers here, so it no longer competes
+        with the trainer for nodes and 1-of-1 is not the pathological case the
+        in-allocation check refuses."""
+        _render(tmp_path, total_nodes=1, extra=self._URL + self._ON)
+
+    def test_on_policy_keys_are_still_emitted(self, tmp_path):
+        """The server being external changes WHERE it runs, not whether the run is
+        on-policy, so the trainer still needs the online block."""
+        config = _render(tmp_path, total_nodes=1, extra=self._URL + self._ON)
+        for key in ("vllm_num_servers", "top_p", "clip_alpha"):
+            assert key in config
+
+    def test_the_url_is_not_emitted_into_the_config(self, tmp_path):
+        """It is read for validation only; the trainer is given the address on
+        gold.py's command line, because TRL's parse_args_and_config rejects
+        unknown top-level config keys."""
+        config = _render(tmp_path, total_nodes=1, extra=self._URL + self._ON)
+        assert "vllm_server_url" not in config
+
+    def test_rejects_a_url_with_no_server_count(self, tmp_path):
+        """vllm_num_servers 0 leaves `online` false, so the on-policy keys would be
+        omitted and the run would train off-policy while a server sat idle in
+        another allocation — a full-price run producing the wrong arm."""
+        _render(
+            tmp_path,
+            total_nodes=1,
+            extra=self._URL + ["--vllm-num-servers", "0", "--lmbda", "1.0"],
+            expect_rc=2,
+        )
+
+    def test_rejects_a_url_at_lmbda_zero(self, tmp_path):
+        """At lmbda 0 the student never generates, so the server would be
+        allocated, held, and never asked for anything."""
+        _render(
+            tmp_path,
+            total_nodes=1,
+            extra=self._URL + ["--vllm-num-servers", "1", "--lmbda", "0.0"],
+            expect_rc=2,
+        )
+
+    def test_the_in_allocation_split_is_still_validated(self, tmp_path):
+        """Relaxing the checks for an external server must not relax them for the
+        path that still carves nodes out of its own allocation."""
+        _render(tmp_path, total_nodes=1, extra=["--vllm-num-servers", "1"], expect_rc=2)
+
+
 class TestTrainerContract:
     """Values whose default matters, and which must survive rendering verbatim."""
 
