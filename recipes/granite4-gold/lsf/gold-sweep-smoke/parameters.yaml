@@ -74,9 +74,10 @@ BETA: 0.5
 # compare: true is only usable if the loss is finite AND beta demonstrably moves it.
 # See README, "The liger question". This is the cheapest place to answer it.
 USE_LIGER_FUSED_JSD: false
-# SINGLE-quoted, as in gold-sweep-100. Double quotes would silently render a trailing
-# SPACE instead of a newline; see that file's comment for the mechanism.
-RESPONSE_TEMPLATE: '<|im_start|>assistant\n'
+# SINGLE-quoted with a DOUBLED backslash, as in gold-sweep-100: the trailing newline
+# crosses the wire as a literal escape because gbserver's config fill strips a real
+# one. See that file's comment for the mechanism and the build it cost.
+RESPONSE_TEMPLATE: '<|im_start|>assistant\\n'
 
 # ─── NCCL / distributed diagnostics ───────────────────────────────────
 # INFO here, unlike gold-sweep-100: on a short run the log is readable, and this is

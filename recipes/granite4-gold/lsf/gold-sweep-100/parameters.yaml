@@ -102,15 +102,22 @@ BETA: 0.5
 # tensor the fused kernel avoids, and at 16384 x 4 that may not fit. gold-sweep-smoke
 # is what settles it — resolve there before spending this recipe's two hours.
 USE_LIGER_FUSED_JSD: false
-# SINGLE-quoted on purpose, and this is not a style choice. The published sweep's
-# template ends in a newline, and the sweep's own repo carries a check script for it
-# because the boundary it sets is where loss masking begins. Double-quoted, YAML would
-# turn \n into a real newline here, Jinja would substitute that newline into
-# build.yaml's double-quoted scalar, and YAML folds a newline inside a double-quoted
-# scalar to a SPACE — yielding "<|im_start|>assistant " silently. Single-quoted, the
-# literal backslash-n survives to build.yaml and the escape is interpreted exactly once.
-# test_gold_sweep_recipe.py asserts the rendered value ends in a newline.
-RESPONSE_TEMPLATE: '<|im_start|>assistant\n'
+# The trailing newline is load-bearing — it is where loss masking begins, and the
+# published sweep's own repo carries a check script for it — and it travels as a
+# literal two-character escape rather than as a real newline. It has to: gbserver
+# fills every config string through Jinja (fill_objtemplate, whose environment is
+# built without keep_trailing_newline), which strips exactly one trailing newline
+# from each VALUE. Build d8470f14 carried a real newline, the step received
+# "<|im_start|>assistant", and two steps trained against a span one token off while
+# reporting success.
+#
+# Hence SINGLE quotes with a DOUBLED backslash: YAML leaves '\\n' alone, so a
+# literal \n reaches build.yaml's double-quoted scalar, which decodes it to the
+# two characters backslash-n — no trailing whitespace for anything to strip.
+# gold-distill's render_gold_config.py decodes it once, inside the container.
+# test_gold_sweep_recipe.py asserts the escape survives the render;
+# test_gold_distill.py asserts the decode and that the fill cannot eat it.
+RESPONSE_TEMPLATE: '<|im_start|>assistant\\n'
 
 # ─── NCCL / distributed diagnostics ───────────────────────────────────
 # Single-node, so there are no cross-node collectives to diagnose and INFO would only
