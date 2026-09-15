@@ -4,8 +4,10 @@ On-policy GOLD distillation with vLLM as a **separate target** instead of nodes 
 out of the trainer's own allocation. Two optimizer steps, one trainer node, one server
 node, 4096-token context.
 
-> **This has not run.** It exists to answer one question cheaply, and until it does,
-> nothing here is evidence about on-policy distillation — only about plumbing.
+> **This has run, and the shape works.** Build `9973e766` (2026-09-15) synced all 362
+> parameter tensors from the trainer to the server over NCCL, across two separate LSF
+> allocations, on both of its steps. Two steps still measure plumbing rather than
+> science — nothing here is evidence about distillation quality.
 
 ## The question it exists to answer
 
@@ -14,15 +16,35 @@ On-policy GOLD pushes the student's updated weights to the vLLM server every
 `VLLM_NCCL_COORDINATOR_PORT`. Two targets means two LSF allocations, so this recipe
 needs a NCCL process group that spans them.
 
-Nobody knows whether that works here. If it does, this shape is a better answer than
-the alternative for the reasons below. If it does not, the fallback is `gold-distill`'s
-existing in-allocation role split, and this recipe is the wrong shape rather than a
-broken one — so read the failure that way.
+**It works.** Build `9973e766` logged, on each of its two steps:
 
-Expect to read the NCCL log rather than the loss. `NCCL_DEBUG: INFO` with
-`INIT,NET` is on deliberately, and `NCCL_TIMEOUT_MS` is 10 minutes rather than the
-reference hour, because **a group that cannot form hangs rather than erroring** and
-the timeout is what converts two held allocations into a diagnostic.
+    t_gen 5.3  t_train 3.4  t_sync 1.5  t_sync_ag 0.1  t_sync_bc 1.4  n_sync_params 362
+
+`n_sync_params 362` is the whole answer: every parameter tensor crossed from the
+trainer's allocation to the server's. `t_gen` non-zero says the student really
+generated against that server rather than reading fixed completions — the two numbers
+that are both 0 in an off-policy run. And `t_sync 1.5s` against ~5s of generation says
+the sync is cheap enough to do every step, which is what `vllm_sync_frequency: 1` asks
+for. So the fallback — `gold-distill`'s in-allocation role split — is not needed.
+
+Read the NCCL log anyway when something changes. `NCCL_DEBUG: INFO` with `INIT,NET` is
+on deliberately, and `NCCL_TIMEOUT_MS` is 10 minutes rather than the reference hour,
+because **a group that cannot form hangs rather than erroring** and the timeout is what
+converts two held allocations into a diagnostic.
+
+Two prerequisites were found the hard way, both now fixed in the step; a run predating
+them proves nothing:
+
+* **`--use_vllm` must be passed positively.** `gold.py` defaults it to False and
+  `custom_gold_trainer.py` branches on it, so an earlier build (`d77546a9`) allocated a
+  server node, health-checked it, wired its address in — and then generated locally,
+  leaving the server idle and dying in transformers 5.8.0 on a shape mismatch. The step
+  now states the flag in both directions from `vllm_num_servers`.
+* **The server must bound its own allocation.** `teardown` is gated on
+  `train.checkpoint`, which a crashed trainer never emits, and gbserver has no
+  on-failure semantics — so a trainer failure stranded 8 H100s until they were downed by
+  hand. `max_lifetime_seconds` (this recipe sets 3600) is the backstop; teardown remains
+  the normal path and is what ended `9973e766`.
 
 ## Why a separate target at all
 

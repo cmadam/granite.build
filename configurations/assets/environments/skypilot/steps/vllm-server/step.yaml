@@ -52,6 +52,18 @@ config:
     # shared filesystem the first read is the slow one.
     health_timeout_seconds: 1800
     health_poll_seconds: 10
+    # Ceiling on how long this SERVICE will hold its allocation once healthy.
+    # 0 (default) = no ceiling: hold until the teardown target downs the cluster,
+    # which is the behaviour every existing recipe relies on for multi-hour runs.
+    #
+    # Set it when a leak would be expensive. Teardown targets are gated on the
+    # CONSUMER's output artifact (`binding: <train>.checkpoint`), which a failed
+    # consumer never emits, and gbserver's schema has no on-failure semantics — so
+    # a crashed trainer strands this server. LSF SERVICE clusters never autostop
+    # either (skypilot.py:1817 passes autostop=None for the SSH/HPC clouds), so
+    # nothing underneath reclaims it. Build d77546a9 held 8 H100s that way until
+    # they were downed by hand. This is the backstop, not the normal path.
+    max_lifetime_seconds: 0
 outputs:
   optional:
     # The URL, as a mem:// binding. mem:// and NOT env://: env:// would run the
@@ -178,8 +190,34 @@ environment_configs:
             echo "GB_ARTIFACT_ID:vllm_url GB_ARTIFACT_STATE:http://${ADDR}:${PORT}"
 
             # Hold the allocation for the server's lifetime. It never returns on
-            # its own; the teardown target is what ends it.
-            wait "$SERVER_PID"
+            # its own; the teardown target is what normally ends it.
+            #
+            # MAX_LIFETIME > 0 arms a watchdog so a stranded server (consumer
+            # crashed => teardown never eligible) releases its node instead of
+            # holding it indefinitely. The watchdog is killed on the normal path,
+            # so it costs a sleeping subshell and nothing else.
+            MAX_LIFETIME={{ config.vllm_config.max_lifetime_seconds }}
+            REAPED_FLAG="$(mktemp -u)"
+            if [ "$MAX_LIFETIME" -gt 0 ]; then
+              echo "vllm-server: lifetime cap ${MAX_LIFETIME}s armed"
+              (
+                sleep "$MAX_LIFETIME"
+                if kill -0 "$SERVER_PID" 2>/dev/null; then
+                  : > "$REAPED_FLAG"
+                  kill "$SERVER_PID" 2>/dev/null || true
+                fi
+              ) &
+              WATCHDOG_PID=$!
+              wait "$SERVER_PID"
+              kill "$WATCHDOG_PID" 2>/dev/null || true
+              if [ -f "$REAPED_FLAG" ]; then
+                rm -f "$REAPED_FLAG"
+                echo "vllm-server: FATAL: lifetime cap of ${MAX_LIFETIME}s reached; releasing the allocation. Nothing tore this server down in time — check whether the consumer target failed." >&2
+                exit 1
+              fi
+            else
+              wait "$SERVER_PID"
+            fi
     monitors:
       skypilot_monitor:
         ref: space://monitors/skypilot

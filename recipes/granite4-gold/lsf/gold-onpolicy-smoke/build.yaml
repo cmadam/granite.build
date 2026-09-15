@@ -71,6 +71,11 @@ granite.build:
               # accepts is one the server refuses mid-run.
               max_model_len: $${MAX_LENGTH}
               health_timeout_seconds: $${VLLM_HEALTH_TIMEOUT_SECONDS}
+              # The server's own ceiling on holding its node. teardown is gated on
+              # train.checkpoint, which a crashed trainer never emits, so without
+              # this a trainer failure strands the allocation — as it did in
+              # d77546a9. Must exceed the health timeout above.
+              max_lifetime_seconds: $${VLLM_MAX_LIFETIME_SECONDS}
 
     # ── The trainer ───────────────────────────────────────────────────────────
     train:
