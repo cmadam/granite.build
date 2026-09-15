@@ -79,9 +79,10 @@ BETA: 0.5
 # several on-policy options, so true here risks a validation error deep in a
 # dataclass rather than an obviously wrong recipe.
 USE_LIGER_FUSED_JSD: false
-# SINGLE-quoted: double quotes render a trailing SPACE, not a newline. See
-# ../gold-sweep-100/parameters.yaml for the mechanism.
-RESPONSE_TEMPLATE: '<|im_start|>assistant\n'
+# SINGLE-quoted with a DOUBLED backslash: the trailing newline travels as a literal
+# escape because gbserver's config fill strips a real one before the step sees it.
+# See ../gold-sweep-100/parameters.yaml for the mechanism and the build it cost.
+RESPONSE_TEMPLATE: '<|im_start|>assistant\\n'
 
 # ─── On-policy ────────────────────────────────────────────────────────
 # ONE external server. This counts external servers, not nodes taken from the
@@ -132,6 +133,11 @@ VLLM_ACCELERATORS: "H100:8"
 # multi-GB load off a shared filesystem plus CUDA graph capture, and a timeout here
 # is indistinguishable from a hang in the log.
 VLLM_HEALTH_TIMEOUT_SECONDS: 1800
+# Backstop, not a schedule. This smoke run is minutes long once healthy, so an
+# hour is loose enough never to interrupt a working run and tight enough that a
+# stranded server costs one node-hour rather than a night. Raise it for a full
+# run; it only ever fires when nothing tore the server down.
+VLLM_MAX_LIFETIME_SECONDS: 3600
 # Host memory per node, for both targets. The LSF provisioner defaults to 16G, which
 # has killed a build with TERM_MEMLIMIT presenting as a cross-node NCCL hang.
 MEMORY: 256

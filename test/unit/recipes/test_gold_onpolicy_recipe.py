@@ -277,11 +277,43 @@ def test_inputs_agree_with_what_the_trainer_is_given(targets):
     assert inputs["training_dataset"]["uri"] == "env://" + gold["dataset_name"]
 
 
-def test_response_template_keeps_its_trailing_newline(targets):
-    """Double-quoted in parameters.yaml this renders as a trailing SPACE, because
-    YAML folds a newline inside a double-quoted scalar. See
-    ../gold-sweep-100/parameters.yaml."""
-    assert _gold(targets)["response_template"] == "<|im_start|>assistant\n"
+def test_response_template_transports_its_newline_as_an_escape(targets):
+    """The trailing newline crosses the wire as a literal two-character escape.
+
+    A real newline here does not survive: gbserver's config fill runs every string
+    through Jinja and strips one trailing newline, so the step would receive a
+    template with no line boundary and mask loss from the wrong token, silently.
+    gold-distill's renderer decodes the escape in the container. See
+    ../gold-sweep-100/parameters.yaml for the mechanism and test_gold_distill.py
+    for the decode."""
+    template = _gold(targets)["response_template"]
+
+    assert template == "<|im_start|>assistant\\n"
+    assert not template.endswith(
+        "\n"
+    ), "a real newline here is stripped by the config fill before the step sees it"
+
+
+def test_the_server_cannot_outlive_a_failed_trainer(targets):
+    """The server must bound its own allocation, because teardown cannot.
+
+    `teardown` is gated on `train.checkpoint`, which a crashed trainer never
+    emits, and gbserver's schema has no on-failure semantics — so on any trainer
+    failure the vLLM node is stranded. LSF SERVICE clusters never autostop
+    either. Build d77546a9 held 8 H100s that way until they were downed by hand.
+
+    A cap on the SERVICE is the only backstop available, so this recipe sets one.
+    It must comfortably exceed the health timeout, or a slow model load would trip
+    the cap before the server ever became useful.
+    """
+    vllm = targets["vllm-server"]["steps"][0]["config"]["vllm_config"]
+
+    cap = vllm["max_lifetime_seconds"]
+    assert isinstance(cap, int) and cap > 0, f"no lifetime cap on the server: {cap!r}"
+    assert cap > vllm["health_timeout_seconds"], (
+        "the cap must outlast the health timeout, or a slow load reaps the server "
+        "before it is ever healthy"
+    )
 
 
 def test_numeric_parameters_keep_their_types(targets):
