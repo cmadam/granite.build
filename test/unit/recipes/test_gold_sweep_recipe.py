@@ -197,22 +197,34 @@ def test_corpus_think_filtering_has_been_established(recipe, tmp_path):
 
 
 @pytest.mark.parametrize("recipe", _RECIPES)
-def test_response_template_keeps_its_trailing_newline(recipe, tmp_path):
-    """The specific silent failure this pair was most likely to ship.
+def test_response_template_transports_its_newline_as_an_escape(recipe, tmp_path):
+    """The specific silent failure this pair was most likely to ship — and did.
 
-    The template must end in a newline: that is where loss masking begins, and the
-    published sweep's own repo carries a dedicated check for it. Getting it through
-    two templating layers is the trap. Double-quoted in parameters.yaml, YAML turns
-    \\n into a real newline, Jinja substitutes that newline into build.yaml's
-    double-quoted scalar, and YAML folds a newline inside a double-quoted scalar to
-    a SPACE — so the value becomes "<|im_start|>assistant " and the mask boundary
-    moves by a token with nothing to read. Single-quoted, the literal backslash-n
-    survives to build.yaml and the escape is interpreted exactly once.
+    The template must reach the trainer ending in a newline: that is where loss
+    masking begins, and the published sweep's own repo carries a dedicated check
+    for it. What it must NOT do is carry that newline as a real newline through
+    build.yaml, because gbserver's config fill (fill_objtemplate -> Jinja without
+    keep_trailing_newline) strips exactly one trailing newline from every config
+    VALUE. Build d8470f14 rendered a real newline here, dispatched
+    `--response-template '<|im_start|>assistant'`, and trained against a span one
+    token off while reporting success.
+
+    So the newline crosses the wire as a literal backslash-n, which has no trailing
+    whitespace to strip, and gold-distill's renderer decodes it exactly once at the
+    far end (test_gold_distill.py covers that decode).
+
+    Getting the escape itself through two templating layers is the trap.
+    Double-quoted in parameters.yaml, YAML would decode \\n to a real newline here.
+    Single-quoted with a doubled backslash, the literal two-character escape
+    survives parameters.yaml and build.yaml both.
     """
     template = _gold(_render(recipe, tmp_path), recipe)["response_template"]
 
-    assert template == "<|im_start|>assistant\n"
-    assert not template.endswith(" "), "rendered as a trailing space, not a newline"
+    assert template == "<|im_start|>assistant\\n"
+    assert not template.endswith(
+        "\n"
+    ), "a real newline here is stripped by the config fill before the step sees it"
+    assert not template.endswith(" "), "rendered as a trailing space, not an escape"
 
 
 @pytest.mark.parametrize("recipe", _RECIPES)
