@@ -31,11 +31,22 @@ Override any value with `--param KEY=VALUE`. The three headline parameters:
 
 ## Changing the pair
 
-This is the one substitution to make carefully. Student and teacher **must share a
-tokenizer** — identical token IDs, not merely an identical vocabulary size — and
-only tokenizer families whose vocabulary carries `<|im_start|>` work with the
-default `RESPONSE_TEMPLATE`. A mismatch computes the loss over the wrong span
-**silently**, with no error to read; the run looks healthy and means nothing.
+This is the one substitution to make carefully, and there are two separate constraints
+with **opposite** failure behaviour.
+
+Student and teacher must share a tokenizer — identical token IDs, not merely an
+identical vocabulary size. This is a limitation of the `gold-distill` step, not of
+GOLD: upstream GOLD distils across differing tokenizers via its ULD loss, and the
+trainer carries that path, but the step exposes none of its keys. Break this one and
+the trainer **raises** — `verify_tokenizer_consistency()` fails with both sources
+named.
+
+The `RESPONSE_TEMPLATE` constraint is the silent one. Only tokenizer families whose
+vocabulary carries `<|im_start|>` work with the default value; on any other family the
+template matches nothing, the completion span is never located, and the loss is
+computed over the wrong span with **no error to read** — the run looks healthy and
+means nothing. Nothing validates this, and a pair can satisfy the tokenizer check and
+still fail here.
 
 The tokenizer family does not track the version number, so the pairs have to be
 grouped by hand. See

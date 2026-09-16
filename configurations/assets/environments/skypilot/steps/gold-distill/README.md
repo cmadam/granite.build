@@ -37,9 +37,26 @@ steps:
 
 ## Choosing a student/teacher pair
 
-GOLD compares student and teacher distributions position-by-position, so the two
-**must share a tokenizer** — a same-sized vocabulary is not sufficient, the token
-IDs must agree.
+**In this step's configuration the two must share a tokenizer** — a same-sized
+vocabulary is not sufficient, the token IDs must agree.
+
+That is a limitation of *this step*, not of GOLD. Upstream GOLD
+(`trl.experimental.gold`, which `kd-sandbox`'s `CustomGOLDTrainer` subclasses) exists
+precisely to distil across *differing* tokenizers, aligning them by byte offsets via
+its ULD loss; `kd_code_dir`'s trainer carries that path in full (`use_uld_loss`,
+`teacher_tokenizer_name_or_path`, and ~15 `uld_*` options in
+`gold/custom_gold_config.py`). This step exposes **none** of those keys, so no build
+can reach the cross-tokenizer path today, and the shared-vocabulary JSD path is the
+only one it can run. Adding them is a config-surface change, not a redesign — see
+[Adding a hyperparameter](README.md#adding-a-hyperparameter).
+
+A mismatched pair on the path this step *does* run is a **loud** failure, not a silent
+one: `gold.py` calls `verify_tokenizer_consistency()`, which raises `RuntimeError`
+naming both sources when the two tokenizers disagree on class, pre-tokenizer,
+post-processor, normalizer, decoder, added-token table or a battery of encoding probes.
+(The trainer skips that check only when `use_uld_loss` is set, which this step cannot
+set.) Verified at `kd-sandbox` `fc7d66e`; it is unpinned state, so re-check if this
+matters to you.
 
 On BlueVela the `/proj` overlays fall into several tokenizer families, and the
 family does **not** track the version number: `granite-4.0-1b-instruct-clean` and
@@ -53,12 +70,14 @@ for d in /proj/granite-build/g4os/kd-sandbox/{student,teacher}_overlays/*; do
 done | sort
 ```
 
-Two families additionally matter for the default `response_template`
-(`<|im_start|>assistant`): only families whose vocabulary contains `<|im_start|>`
-can use it. Others (the granite-4 markup families, using `<think_off>`,
+A second, **independent** constraint is the one that really is silent, and it is about
+chat markup rather than tokenizers. The default `response_template`
+(`<|im_start|>assistant`) only works for families whose vocabulary contains
+`<|im_start|>`. Others (the granite-4 markup families, using `<think_off>`,
 `<documents>`, …) need a `response_template` matching their own chat format —
-otherwise the template matches nothing, the completion span is never located, and
-the loss is computed over the wrong tokens **without any error**.
+otherwise the template matches nothing, the completion span is never located, and the
+loss is computed over the wrong tokens **without any error**. Nothing checks this: a
+pair can pass `verify_tokenizer_consistency` and still train against the wrong span.
 
 As of this writing the reference pair (`granite-4.1-3b-base-hub` +
 `granite-4.2-30b`) is the only pair in its family, so there is no smaller
