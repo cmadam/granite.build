@@ -74,6 +74,12 @@ config:
     use_liger_fused_jsd: false
     # Required for completion masking; the nothink chat template has no
     # {% generation %} tag, so this is what locates the span.
+    #
+    # A trailing line boundary must be written as the two-character escape \n, not
+    # as a real newline: gbserver fills every config string through Jinja, which
+    # strips exactly one trailing newline from each value, so a real one never
+    # reaches this step. render_gold_config.py decodes the escape once, in the
+    # container. The default below wants no line boundary and so carries none.
     response_template: "<|im_start|>assistant"
 
     # ── NCCL / distributed diagnostics ──────────────────────────────────────
@@ -303,6 +309,15 @@ environment_configs:
               fi
             fi
 
+            # --use_vllm is stated in BOTH directions below, from the same
+            # vllm_num_servers that gates every other on-policy key. gold.py
+            # defaults it to False and custom_gold_trainer.py:2003 branches on it:
+            # False sends generation down the local ZeRO-3 path
+            # (generate_on_policy_outputs) rather than to the server. Emitted only
+            # negatively — as it was until now — an on-policy run allocates a vLLM
+            # node, health-checks it, plumbs its address in, then generates locally
+            # and leaves the server idle. Build d77546a9 did exactly that, logged
+            # not one request against the server, and died in the local path.
             echo "gold-distill: rank $NODE_RANK/$NODES training ($TRAINER_NODES trainer node(s)), master $MADDR:$MPORT"
             accelerate launch \
               --num_processes $(( TRAINER_NODES * GPUS )) \
@@ -314,7 +329,7 @@ environment_configs:
               "$KD_CODE_DIR/gold/gold.py" \
               --config "$CFG" \
               --output_dir "$CKPT_DIR" \
-              {% if config.gold_config.vllm_num_servers | int == 0 %}--use_vllm=False{% endif %} \
+              --use_vllm={{ 'True' if config.gold_config.vllm_num_servers | int > 0 else 'False' }} \
               $VLLM_ARGS
 
             # Rank 0 only: the executor streams every node's output into one
