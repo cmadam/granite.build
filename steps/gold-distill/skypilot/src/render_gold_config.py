@@ -132,7 +132,7 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # Required: locates the completion span for loss masking. The nothink
         # chat template carries no {% generation %} tag, so without this the
         # trainer cannot tell prompt from completion.
-        "response_template": args.response_template,
+        "response_template": _decode_escapes(args.response_template),
     }
 
     if online:
@@ -147,6 +147,25 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
             }
         )
     return config
+
+
+def _decode_escapes(value: str) -> str:
+    r"""Decode a literal ``\n`` in a shell-supplied string into a real newline.
+
+    Why the template travels escaped. ``response_template`` must end at a line
+    boundary, and gbserver fills every config string through Jinja
+    (fill_objtemplate -> SandboxedEnvironment without keep_trailing_newline), which
+    strips exactly one trailing newline from each VALUE. A real newline therefore
+    cannot survive the trip: build d8470f14 sent one and the step received
+    ``<|im_start|>assistant``, masking loss from the wrong token with nothing to
+    read. A two-character escape has no trailing whitespace to strip, so it arrives
+    intact and is decoded here, once, at the far end.
+
+    Deliberately not ``unicode_escape``: that codec round-trips through latin-1 and
+    mangles any non-ASCII in a chat template. Only the escape the transport needs is
+    interpreted, so every other backslash reaches the trainer as written.
+    """
+    return value.replace("\\n", "\n")
 
 
 def _bool(value: str) -> bool:

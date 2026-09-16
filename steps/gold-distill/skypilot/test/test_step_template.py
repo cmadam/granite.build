@@ -139,8 +139,20 @@ class TestOnPolicyForwardCompatibility:
         assert "--num_processes $(( TRAINER_NODES * GPUS ))" in run_script
         assert '--num_machines "$TRAINER_NODES"' in run_script
 
-    def test_off_policy_disables_vllm_explicitly(self, run_script):
-        assert "--use_vllm=False" in run_script
+    def test_use_vllm_is_stated_in_both_directions(self, run_script):
+        """Driven by the same vllm_num_servers as every other on-policy key.
+
+        gold.py defaults --use_vllm to False and custom_gold_trainer.py branches on
+        it, so a template emitting the flag only negatively leaves an on-policy run
+        generating locally while its allocated server sits idle — build d77546a9 did
+        exactly that. Asserted here as the unrendered expression, because this suite
+        reads the template rather than a render;
+        test/unit/builtins/steps/test_gold_distill.py renders both branches.
+        """
+        assert (
+            "--use_vllm={{ 'True' if config.gold_config.vllm_num_servers "
+            "| int > 0 else 'False' }}" in run_script
+        )
 
 
 class TestStepDeclaration:
