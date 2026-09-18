@@ -167,7 +167,19 @@ environment_configs:
           file_mounts:
             src: src
           envs:
-            HF_HUB_OFFLINE: "1"
+            # NO HF_HUB_OFFLINE here, unlike the three tokenizer-only ported steps —
+            # and that is measured, not stylistic. This step loads MODELS, and granite
+            # 4.x is hybrid Mamba: at load time the `kernels` package resolves
+            # kernels-community/causal-conv1d through the Hub API, so offline mode
+            # fails with OfflineModeIsEnabled *after* the load has started (build
+            # 15267e81). gold-distill — the step that demonstrably loads a granite 4.x
+            # student and a 30B teacher on this same image — sets HF_HOME and leaves
+            # the Hub reachable, so that is the proven configuration and this matches
+            # it. distill-logit-precompute will need the same, for the same reason.
+            #
+            # align, corpus-prep and hf-export keep HF_HUB_OFFLINE=1 because they touch
+            # only tokenizers and configs, where "a missing local file fails here
+            # rather than silently fetching" is a property worth having.
             HF_HOME: /opt/hf-cache
           run: |
             echo "=== distill-eval on $(hostname) ==="

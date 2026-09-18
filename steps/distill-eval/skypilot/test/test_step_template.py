@@ -94,6 +94,18 @@ class TestLauncher:
     def test_the_launcher_script_is_shipped(self, launcher):
         assert launcher["file_mounts"] == {"src": "src"}
 
+    def test_the_hub_is_reachable_because_this_step_loads_models(self, launcher):
+        """NOT symmetric with the tokenizer-only ported steps, on purpose.
+
+        granite 4.x is hybrid Mamba, so loading a MODEL makes the `kernels` package
+        resolve kernels-community/causal-conv1d through the Hub API. With
+        HF_HUB_OFFLINE=1 that raises OfflineModeIsEnabled *after* the load has begun —
+        measured on build 15267e81. gold-distill, which loads a granite 4.x student and
+        a 30B teacher on this same image, sets HF_HOME and leaves the Hub reachable.
+        """
+        assert "HF_HUB_OFFLINE" not in launcher["envs"]
+        assert launcher["envs"]["HF_HOME"] == "/opt/hf-cache"
+
 
 @pytest.fixture(scope="module")
 def monitor(step):
