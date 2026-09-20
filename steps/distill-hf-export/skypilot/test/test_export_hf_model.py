@@ -184,6 +184,48 @@ def test_normalise_strips_load_kwargs_and_fixes_padding():
     assert len(changes) == 3
 
 
+def test_normalise_rewrites_a_transformers_5_only_tokenizer_class():
+    """A v5-authored tokenizer_config pins a class no v4 consumer can resolve.
+
+    transformers 5 records `tokenizer_class: TokenizersBackend`, and a consumer on
+    transformers 4 raises `ValueError: Tokenizer class TokenizersBackend does not
+    exist or is not currently imported` before reading a single token. The
+    distillation steps run transformers 5.8.0, so EVERY model this step publishes
+    carries that pin — measured in build 30a99c4b, where bfcl-eval (a transformers
+    4 image) died at base_oss_handler.py:109 on the exported model.
+
+    PreTrainedTokenizerFast exists in both generations and loads tokenizer.json
+    directly, so it is the portable spelling of the same tokenizer.
+    """
+    out, changes = normalise_tokenizer_config(
+        {"tokenizer_class": "TokenizersBackend"}, padding_side="keep"
+    )
+    assert out["tokenizer_class"] == "PreTrainedTokenizerFast"
+    assert any("tokenizer_class" in c for c in changes), (
+        "the rewrite must be recorded in the manifest, like every other normalisation"
+    )
+
+
+def test_normalise_leaves_any_other_tokenizer_class_alone():
+    """Only the v5 backend name is rewritten. Guessing at an unfamiliar class would
+    change which tokenizer a consumer instantiates, which is exactly the kind of
+    silent substitution this step refuses elsewhere."""
+    for name in ("PreTrainedTokenizerFast", "GPT2Tokenizer", "LlamaTokenizerFast"):
+        out, changes = normalise_tokenizer_config(
+            {"tokenizer_class": name}, padding_side="keep"
+        )
+        assert out["tokenizer_class"] == name
+        assert changes == []
+
+
+def test_normalise_does_not_invent_a_tokenizer_class():
+    """Absent is not the same as wrong: with no tokenizer_class, transformers infers
+    one from config.json, and adding a pin here would override that inference."""
+    out, changes = normalise_tokenizer_config({"eos_token": "x"}, padding_side="keep")
+    assert "tokenizer_class" not in out
+    assert changes == []
+
+
 def test_normalise_does_not_mutate_its_input():
     raw = {"padding_side": "left", "is_local": True}
     normalise_tokenizer_config(raw)
