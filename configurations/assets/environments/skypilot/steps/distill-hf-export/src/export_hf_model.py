@@ -105,6 +105,25 @@ PRUNE_DIR_PREFIXES = ("global_step",)
 # source. Publishing a model whose tokenizer config pins local_files_only=true is wrong.
 STRIP_TOKENIZER_KEYS = ("local_files_only", "is_local")
 
+# A transformers-5-only `tokenizer_class`, and the portable spelling of the same
+# tokenizer.
+#
+# transformers 5 reorganised the tokenization stack and records its fast-tokenizer
+# backend as `tokenizer_class: "TokenizersBackend"`. A consumer on transformers 4
+# cannot resolve that name and raises
+#   ValueError: Tokenizer class TokenizersBackend does not exist or is not currently
+#   imported
+# before reading a single token. The distillation steps run transformers 5.8.0, so
+# every model this step publishes carries the pin: bfcl-eval, which ships a
+# transformers 4 image, died on it at base_oss_handler.py:109 in build 30a99c4b.
+#
+# PreTrainedTokenizerFast exists in BOTH generations and loads `tokenizer.json`
+# directly, so this rewrite changes the spelling and not the tokenizer. Only this one
+# name is rewritten: guessing at an unfamiliar class would change which tokenizer a
+# consumer instantiates, which is the kind of silent substitution this step refuses
+# everywhere else.
+TOKENIZER_CLASS_REWRITES = {"TokenizersBackend": "PreTrainedTokenizerFast"}
+
 PADDING_SIDES = ("right", "left", "keep")
 
 # The published chat template's THINKING POLICY.
@@ -258,6 +277,15 @@ def normalise_tokenizer_config(
         if key in out:
             del out[key]
             changes.append(f"stripped {key} (a load-time kwarg, not tokenizer config)")
+
+    current_class = out.get("tokenizer_class")
+    portable = TOKENIZER_CLASS_REWRITES.get(current_class) if current_class else None
+    if portable is not None:
+        out["tokenizer_class"] = portable
+        changes.append(
+            f"tokenizer_class {current_class!r} -> {portable!r} "
+            "(the transformers 5 backend name no consumer on transformers 4 can resolve)"
+        )
 
     if padding_side != "keep":
         before = out.get("padding_side")
