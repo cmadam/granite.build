@@ -60,6 +60,30 @@ config:
           bsub_options:
             G: grp_granite_dot_build
             M: 64G
+            # EXCLUDE A BROKEN HOST. p2-r03-n1 accepts a GPU allocation and then
+            # fails inside torch at cuda_init with "CUDA unknown error": 3 runs,
+            # 3 failures (builds 7853d33b and b5f030cd), against 0 failures on
+            # every other host across several hundred runs. In b5f030cd the same
+            # distill-eval step succeeded on p3-r27-n2 and failed here two
+            # minutes later. REMOVE THIS once the node is repaired.
+            #
+            # -R is the one accumulating bsub flag (provision/lsf/instance.py:150),
+            # so this is ANDed with the derived span[] requirement rather than
+            # replacing it.
+            #
+            # Both spellings, because which one LSF matches on could not be
+            # checked from here (no LSF client on the API server host) and a name
+            # that matches no host makes the exclusion a silent no-op. If a job
+            # still lands on p2-r03-n1, the name form is what to look at.
+            # NO surrounding double quotes and NO spaces, both load-bearing.
+            # sky/templates/lsf-ray.yml.j2:75 emits each bsub_options entry as
+            # `{{key}}: "{{val}}"`, so a value carrying its own double quotes
+            # produces `R: ""select[...]""` and the generated cluster YAML fails to
+            # parse (ParserError; builds 8d5000fd and 1884d108 died there before any
+            # job was submitted). And instance.py emits the directive UNQUOTED as
+            # `#BSUB -R <val>`, so a space would end the argument early — hence `&&`
+            # with no spaces around it, which LSF's select grammar accepts.
+            R: "select[hname!='p2-r03-n1'&&hname!='p2-r03-n1.bluevela.rmf.ibm.com']"
           queue_configs:
             preemptable:
               bsub_options:
