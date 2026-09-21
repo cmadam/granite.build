@@ -24,6 +24,7 @@ reasoning block displaces the call" on the distilled arms that score 0.00%.
 See think_prefill.py, which carries the whole argument for why that is the
 right probe and why a prefilled run is a diagnostic rather than a score.
 """
+
 from __future__ import annotations
 
 import os
@@ -35,7 +36,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bfcl_eval.constants.model_config import MODEL_CONFIG_MAPPING, ModelConfig
 from bfcl_eval.model_handler.local_inference.granite_4 import Granite4FCHandler
 from bfcl_eval.model_handler.local_inference.qwen_fc import QwenFCHandler
-
 from think_prefill import patch_granite_prefill
 from tool_call_tag_repair import patch_granite_handler
 
@@ -130,11 +130,16 @@ def _family_of(model_id: str) -> str:
 
 # The chat template still comes from the checkpoint directory via --local-model-path, not
 # from this entry; what the entry decides is the handler and the metadata.
-for _extra in filter(None, (x.strip() for x in os.environ.get("BFCL_EXTRA_MODEL_IDS", "").split(","))):
-    EXTRA_MODELS.setdefault(_extra, {
-        "display_name": f"{_extra} (FC)",
-        "url": f"local checkpoint, registered via BFCL_EXTRA_MODEL_IDS: {_extra}",
-    })
+for _extra in filter(
+    None, (x.strip() for x in os.environ.get("BFCL_EXTRA_MODEL_IDS", "").split(","))
+):
+    EXTRA_MODELS.setdefault(
+        _extra,
+        {
+            "display_name": f"{_extra} (FC)",
+            "url": f"local checkpoint, registered via BFCL_EXTRA_MODEL_IDS: {_extra}",
+        },
+    )
 
 for _model_id, _meta in EXTRA_MODELS.items():
     if _model_id in MODEL_CONFIG_MAPPING:
