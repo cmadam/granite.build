@@ -41,8 +41,32 @@ if _OWN_SRC.is_dir() and str(_OWN_SRC) not in sys.path:
 
 _NEEDS_UPSTREAM = ["test_divergence.py"]
 
+
+def _delivered_package_is_readable() -> bool:
+    """Whether the delivered package is present AND this account may stat it.
+
+    ``is_dir()`` is not a two-valued answer for this path. The default checkout lives under
+    /proj/granite-build, which is mode ``drwxrws---``: an account outside that group gets
+    ``PermissionError`` from any ``stat()`` below it rather than ``False``. Unguarded, that
+    turns this module into a collection ERROR — taking the step's whole suite down, not just
+    the gated files — on exactly the hosts the default was written for. Measured on BlueVela
+    from an account not in ``proj_granite-build``::
+
+        PermissionError: [Errno 13] Permission denied:
+          '/proj/granite-build/g4os/gb-steps-collection-post-training/src/gb_steps_post_training'
+
+    Unreadable is treated as absent, which is what this module already documents: without a
+    checkout the ported suites skip and the hermetic tests still run.
+    """
+    try:
+        return (_PKG_PARENT / "gb_steps_post_training").is_dir()
+    except OSError:
+        # PermissionError above; also ELOOP/ENAMETOOLONG from a mangled override.
+        return False
+
+
 collect_ignore = []
-if (_PKG_PARENT / "gb_steps_post_training").is_dir():
+if _delivered_package_is_readable():
     # Prepended, not appended: an installed copy of the same name would otherwise win
     # and the suite would test something other than the delivered code.
     sys.path.insert(0, str(_PKG_PARENT))
