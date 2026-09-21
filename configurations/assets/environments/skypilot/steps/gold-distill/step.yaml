@@ -92,6 +92,17 @@ config:
     # ── Model and data ──────────────────────────────────────────────────────
     model_name_or_path: ""          # student init
     teacher_model_name_or_path: ""  # frozen, forward-only in the training loop
+    # Refuse to start when either of the two paths above names weights GPFS has
+    # migrated to tape. Reading those back is a per-shard recall of minutes to
+    # hours, inside a GPU allocation, and the failure it produces downstream does
+    # not look like a storage problem. The check is metadata-only (mmlsattr), it
+    # never touches file contents, and it only refuses on an authoritative
+    # OFFLINE -- if it cannot measure, it warns and proceeds. A hub id rather
+    # than a path is not a finding either.
+    check_weight_residency: true
+    # Proceed anyway. Announces itself in the log; for the case where you know
+    # the recall is already running.
+    allow_offline_weights: false
     # Must be think-filtered ("nothink"): an assistant completion containing an
     # inline <think>...</think> breaks gold's completion extraction.
     dataset_name: ""
@@ -385,6 +396,18 @@ environment_configs:
             MADDR="${MASTER_ADDR:?MASTER_ADDR not set by the provisioner}"
             MPORT="${MASTER_PORT:-29500}"
             unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+
+            # Weight residency, BEFORE the role split below: the vLLM branch `exec`s, so a
+            # check placed after it would never run on the node that serves the student --
+            # which loads model_name_or_path too. Every node checks (metadata-only, a few
+            # mmlsattr calls), because a rank-0-only check that refused would leave the
+            # other ranks waiting on a rendezvous that is never coming.
+            {% if config.gold_config.check_weight_residency %}
+            /stage/.venv/bin/python ./src/check_weight_residency.py \
+              {% if config.gold_config.allow_offline_weights %}--allow-offline{% endif %} \
+              "student={{ config.gold_config.model_name_or_path }}" \
+              "teacher={{ config.gold_config.teacher_model_name_or_path }}"
+            {% endif %}
 
             # accelerate gets an IP, not a hostname. The provisioner exports
             # MASTER_ADDR as a short hostname; the reference launcher resolves it

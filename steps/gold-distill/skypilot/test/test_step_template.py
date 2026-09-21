@@ -238,6 +238,14 @@ class TestRendererInvocation:
         # renderer. Sending it there would put a key the trainer's dataclass does not
         # accept into the rendered config, which TrlParser rejects outright.
         "deliver_distill_source",
+        # Same shape of key, same reason: the residency preflight runs in the run block,
+        # before the renderer is even called, so `--check-weight-residency` would be a flag
+        # render_gold_config.py has no reason to know about and CustomGOLDConfig would
+        # reject. That these two are wired, switchable and overridable is asserted by
+        # test_weight_residency_contract.py, which owns them across all three steps that
+        # carry the preflight -- so exempting them here hides nothing.
+        "check_weight_residency",
+        "allow_offline_weights",
         "ds_config",
         "run_name",
         "nccl_debug",

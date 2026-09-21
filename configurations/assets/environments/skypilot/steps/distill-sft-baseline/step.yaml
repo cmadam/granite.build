@@ -109,6 +109,14 @@ config:
     # student would also differ in its embedding rows for the control tokens, and the
     # comparison would be measuring two things at once.
     student_model_path: ""
+    # Refuse to start when the student's weights have been migrated to tape by GPFS. See
+    # src/check_weight_residency.py: metadata only (mmlsattr), never reads contents, refuses
+    # only on an authoritative OFFLINE, and treats a hub id as not-a-path rather than as a
+    # finding. precomputed_logits_dir is deliberately NOT checked -- it holds no weight
+    # shards, and the trainer streams it.
+    check_weight_residency: true
+    # Proceed anyway, loudly. For when you know the recall is already under way.
+    allow_offline_weights: false
     # distill-corpus-prep's `corpus`. Text, not tokens — sft.py tokenizes at train time —
     # but tokenizer-specific anyway, because prep measured its length filter and its
     # assistant-mask check in tokens.
@@ -434,6 +442,15 @@ environment_configs:
             # killed two upstream jobs at import time.
             export SFT_SRC="$CODE_DIR/src/gb_steps_post_training/distillation"
             export LIB_DIR="$CODE_DIR/scripts/bluevela/lib"
+
+            # Weights on tape read back at recall speed, inside the allocation. Metadata
+            # only; refuses only on an authoritative OFFLINE. Every node runs it, because a
+            # rank-0-only refusal would leave the other ranks on a dead rendezvous.
+            {% if config.sft_config.check_weight_residency %}
+            "$PYBIN" ./src/check_weight_residency.py \
+              {% if config.sft_config.allow_offline_weights %}--allow-offline{% endif %} \
+              "student={{ config.sft_config.student_model_path }}"
+            {% endif %}
 
             PYBIN="$PYBIN" bash ./src/run-sft.sh \
               --student-model-path "{{ config.sft_config.student_model_path }}" \

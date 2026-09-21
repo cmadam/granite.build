@@ -123,6 +123,13 @@ config:
     # Kept SEPARATE from teacher_model_path on purpose, as in the trainer: the tokenizer
     # that defines the token ids in the index need not be the model directory's own.
     teacher_tokenizer_path: ""
+    # Refuse to start when the teacher's weights have been migrated to tape by GPFS. See
+    # src/check_weight_residency.py: metadata only (mmlsattr), never reads contents, refuses
+    # only on an authoritative OFFLINE, and treats a hub id as not-a-path rather than as a
+    # finding.
+    check_weight_residency: true
+    # Proceed anyway, loudly. For when you know the recall is already under way.
+    allow_offline_weights: false
 
     # Relative values resolve against $GB_BUILD_WORKDIR.
     output_dir: "teacher-logits"
@@ -331,6 +338,16 @@ environment_configs:
             # Learned the expensive way on distill-sft-baseline (builds 739898ab, 07b9e09a).
             export PRECOMPUTE_SRC="$CODE_DIR/src/gb_steps_post_training/distillation"
             export LIB_DIR="$CODE_DIR/scripts/bluevela/lib"
+
+            # This step reads the teacher and nothing else, so a teacher on tape is the whole
+            # step waiting on a recall. Metadata only; refuses only on an authoritative
+            # OFFLINE. teacher_tokenizer_path is not checked: a tokenizer overlay has no
+            # shards.
+            {% if config.precompute_config.check_weight_residency %}
+            "$PYBIN" ./src/check_weight_residency.py \
+              {% if config.precompute_config.allow_offline_weights %}--allow-offline{% endif %} \
+              "teacher={{ config.precompute_config.teacher_model_path }}"
+            {% endif %}
 
             # Absolutise before the script runs: IT prints the artifact marker, from its own
             # OUTPUT_DIR, and the monitor hands that path to the env:// store.

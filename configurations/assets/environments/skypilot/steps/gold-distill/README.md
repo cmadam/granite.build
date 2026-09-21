@@ -96,6 +96,15 @@ drop-in substitute. Scale down context and data instead.
   the fused bf16 JSD kernel and gives NaN loss.
 - **Keep `save_total_limit` high.** An early, less-forgotten checkpoint is often
   the best one to evaluate; a small limit deletes it irrecoverably.
+- **A refusal that says `[residency] REFUSING to start`** is not a config error:
+  GPFS has migrated those weight files to tape, and the first read would block
+  on a recall of tens of GB with the GPUs already held. Stage them in (`dd` to
+  `/dev/null` on a login node, or `mmrestripefile`) and resubmit, or pass
+  `allow_offline_weights: true` to hold the allocation through the recall
+  deliberately. `check_weight_residency: false` turns the check off entirely —
+  appropriate on a cluster where `mmlsattr` is absent, though there it already
+  warns and proceeds. Note it is **not** a completeness check: a resident shard
+  can still be truncated.
 - **The image is an SM90 (H100) build** and will not run on A100.
 - **Multi-node needs a SkyPilot with LSF multi-node support.** gbserver refuses
   the launch otherwise rather than silently running on one node.
