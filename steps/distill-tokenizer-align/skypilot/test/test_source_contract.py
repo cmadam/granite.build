@@ -30,9 +30,18 @@ _SR_END = "            # --- distill source delivery: END"
 
 
 def _templates():
-    """Every ported distillation step's template, reference first."""
+    """Every ported distillation step's template, reference first.
+
+    The glob is ``*distill*`` rather than ``distill-*`` so that gold-distill is included.
+    It was previously invisible to every assertion in this file -- the one step whose name
+    does not begin with the prefix was also the one step whose source delivery nobody was
+    comparing, which is exactly the blind spot the docstring above claims not to have. The
+    wider pattern keeps the automatic-discovery property (a future ``*-distill`` is picked
+    up with no edit here) and still matches nothing else in steps/: byoc, eval, bfcl-eval
+    and vllm-server are not distillation steps and do not carry the contract.
+    """
     found = {}
-    for path in sorted(_STEPS_ROOT.glob("distill-*/skypilot/step-template.yaml")):
+    for path in sorted(_STEPS_ROOT.glob("*distill*/skypilot/step-template.yaml")):
         found[path.parts[-3]] = path
     return found
 

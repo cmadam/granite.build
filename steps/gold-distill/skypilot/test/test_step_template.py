@@ -102,8 +102,16 @@ class TestRankZeroGuards:
         assert guard < run_script.index(marker)
 
     def test_commit_metadata_is_guarded(self, run_script):
-        assert "GB_STEP_METADATA_KEY:kd_sandbox_commit" in run_script
-        before = run_script[: run_script.index("GB_STEP_METADATA_KEY")]
+        # Anchored on the FULL key rather than the bare GB_STEP_METADATA_KEY prefix.
+        # The shared source-delivery region echoes three metadata keys of its own
+        # (distill_code_dirty, _commit, _source) and runs above the rank split, so the
+        # prefix stopped identifying THIS step's echo the moment that region was
+        # spliced in: it matched the region's line and reported a missing guard for a
+        # guard that is still there. A test that names the thing it is about survives
+        # the file growing around it.
+        marker = "GB_STEP_METADATA_KEY:kd_sandbox_commit"
+        assert marker in run_script
+        before = run_script[: run_script.index(marker)]
         assert '[ "$NODE_RANK" = "0" ]' in before
 
     def test_config_echo_is_guarded(self, run_script):
@@ -224,6 +232,12 @@ class TestRendererInvocation:
     #    trainer's config file; the rest name paths the step itself resolves.
     STEP_ONLY = {
         "kd_code_dir",
+        # Whether the shared gb_steps_post_training checkout is delivered into the
+        # container is a property of the ENVIRONMENT, not of the trainer's config, so it
+        # is consumed by the run block's Jinja guard and deliberately never reaches the
+        # renderer. Sending it there would put a key the trainer's dataclass does not
+        # accept into the rendered config, which TrlParser rejects outright.
+        "deliver_distill_source",
         "ds_config",
         "run_name",
         "nccl_debug",
@@ -385,7 +399,14 @@ class TestExternalVllmServer:
         """
         lines = _as_shell(run_script).splitlines()
         start = next(i for i, l in enumerate(lines) if "_hostport=" in l)
-        end = next(i for i, l in enumerate(lines) if "esac" in l)
+        # The first `esac` AFTER the function, not the first in the file. The shared
+        # source-delivery region carries a case/esac inside its GIT_ASKPASS heredoc and
+        # sits above this function, so scanning from zero selected that one -- making
+        # lines[start:end + 1] EMPTY and every parametrization below compare an empty
+        # stdout against the expected host. It failed loudly here, but the same slice
+        # bug in a test that asserted something weaker would have gone on passing while
+        # testing nothing at all.
+        end = next(i for i, l in enumerate(lines) if i > start and "esac" in l)
         snippet = "\n".join(lines[start : end + 1]).replace(
             "${VLLM_URL#*://}", "${URL#*://}"
         )
@@ -401,3 +422,77 @@ class TestExternalVllmServer:
     def test_an_unparseable_url_fails_loudly(self, run_script):
         """Rather than launching a trainer that cannot reach anything."""
         assert "could not parse a host out of vllm_server_url" in run_script
+
+
+class TestDistillSourceDelivery:
+    """The opt-in shared-checkout block, and the fact that OFF is the old behaviour.
+
+    gold-distill is the one ported step that does not need gb_steps_post_training to run:
+    its trainer comes from kd_code_dir. The block is here so the renderer's extra
+    validators can be reached, and it is guarded so that adding it changed nothing for the
+    five recipes that already exist. Both halves of that claim are asserted.
+    """
+
+    def test_the_contract_block_is_present(self, step):
+        """test_source_contract.py asserts it is byte-identical to the reference; this only
+        asserts gold-distill has one at all, so a failure here reads as "missing" rather
+        than as an obscure ValueError from that file's .index()."""
+        assert "code_config" in step["config"]
+        cc = step["config"]["code_config"]
+        assert (
+            cc["code_dir"]
+            == "/proj/granite-build/g4os/gb-steps-collection-post-training"
+        )
+        assert cc["python"] == "/stage/.venv/bin/python"
+        # Empty on purpose: the default path needs no credential in the container.
+        assert cc["repo"] == "" and cc["token_secret"] == ""
+
+    def test_delivery_is_off_by_default(self, step):
+        """The whole no-behaviour-change claim rests on this one value."""
+        assert step["config"]["gold_config"]["deliver_distill_source"] is False
+
+    def test_the_region_is_guarded_by_that_key(self, run_script):
+        """Off must mean NOT RENDERED, not rendered-and-harmless: the block exits 1 when
+        the checkout is absent, so an unguarded copy would turn every host without
+        /proj/granite-build into a failing gold-distill run."""
+        guard = "{% if config.gold_config.deliver_distill_source %}"
+        assert guard in run_script
+        begin = run_script.index("# --- distill source delivery: BEGIN")
+        end = run_script.index("# --- distill source delivery: END")
+        assert (
+            run_script.index(guard) < begin
+        ), "the guard opens after the region begins"
+        assert end < run_script.index(
+            "{% endif %}", end
+        ), "the region is not closed inside the guard"
+
+    def test_the_guard_wraps_the_region_without_entering_it(self, run_script):
+        """The byte-identity assertion in test_source_contract.py extracts BEGIN..END
+        inclusive, so a guard placed INSIDE those markers would silently break the
+        contract for every other ported step at once."""
+        begin = run_script.index("# --- distill source delivery: BEGIN")
+        end = run_script.index("# --- distill source delivery: END ---")
+        region = run_script[begin : end + len("# --- distill source delivery: END ---")]
+        assert "deliver_distill_source" not in region
+
+    def test_the_region_runs_above_the_rank_split(self, run_script):
+        """Asserted because it is the reason two tests in this file had to name their
+        full anchor, and because it is a property worth being explicit about: the region
+        runs on EVERY node, so its three metadata echoes are emitted N times on an
+        N-node run. That is the shared region's behaviour, byte-identical in all seven
+        ported steps and untested in the reference step (which asserts only that the
+        keys exist, not that they are guarded) -- so it is recorded here rather than
+        diverged from, since guarding it in one step would break the byte-identity
+        contract for the other six.
+        """
+        assert run_script.index(
+            "# --- distill source delivery: BEGIN"
+        ) < run_script.index('if [ "$NODE_RANK" = "0" ]; then')
+        assert "GB_STEP_METADATA_KEY:distill_code_dirty" in run_script
+
+    def test_pythonpath_reaches_the_renderer(self, run_script):
+        """The point of delivering the source at all: the renderer is what imports it, so
+        the export must precede the invocation rather than merely existing."""
+        assert run_script.index('export PYTHONPATH="$CODE_DIR/src') < run_script.index(
+            "/stage/.venv/bin/python ./src/render_gold_config.py"
+        )

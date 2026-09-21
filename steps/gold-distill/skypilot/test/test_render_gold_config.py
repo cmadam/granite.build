@@ -8,6 +8,7 @@ below cost real debugging time on the ansible path before it was understood, whi
 is why the renderer exists as a testable script rather than a shell heredoc.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,20 @@ def _render(tmp_path, total_nodes=2, extra=None, expect_rc=0):
     if expect_rc != 0:
         return result
     return yaml.safe_load(out.read_text())
+
+
+def _dir(tmp_path, name):
+    """A made output directory, for the tests that render twice and compare.
+
+    `_render` hardcodes the output basename, so two renders need two directories, and
+    the renderer does not create the parent of its `--output` (nor should it -- in the
+    step's run block that parent is GB_BUILD_WORKDIR, which always exists). Passing an
+    unmade `tmp_path / "a"` therefore failed on FileNotFoundError, which reads like a
+    renderer bug and is not one.
+    """
+    path = tmp_path / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 class TestLearningRateIsAFloat:
@@ -412,3 +427,278 @@ class TestSchemaMatchesTheValidatedConfigs:
         config = _render(tmp_path)
         assert config["lr_scheduler_type"] == "cosine_with_min_lr"
         assert "min_lr" in config["lr_scheduler_kwargs"]
+
+
+class TestLossArms:
+    """The arm table, and the fact that NO arm is the default and changes nothing.
+
+    Nine of CustomGOLDConfig's loss switches are not orthogonal, and the dangerous
+    combinations are the ones that SUCCEED while training something other than what the
+    config names. These tests cover both halves of the contract: naming an arm enforces it,
+    and naming nothing leaves every existing recipe exactly as it was.
+    """
+
+    def test_no_arm_is_the_default(self, tmp_path):
+        """The whole no-behaviour-change claim for five existing recipes rests on this."""
+        base = _render(_dir(tmp_path, "a"))
+        with_empty = _render(_dir(tmp_path, "b"), extra=["--loss-arm", ""])
+        assert base == with_empty
+
+    def test_no_arm_adds_no_keys(self, tmp_path):
+        """Stated separately from the equality above because it is the property
+        test_off_policy_key_set_is_exact depends on, and a future arm default would break
+        that test in a way whose cause was not obvious from its name."""
+        config = _render(tmp_path)
+        for key in (
+            "use_kl_interpolation",
+            "use_adaptive_kld",
+            "use_distillm2",
+            "use_uld_loss",
+            "use_ce_loss",
+        ):
+            assert key not in config
+
+    def test_jsd_is_an_explicit_arm_that_adds_nothing(self, tmp_path):
+        """`jsd` names the default objective rather than changing it, so its rendered
+        config must equal the unnamed one. It exists as an arm so that a build can STATE
+        the objective and get the contradiction checks -- which is the only difference
+        between it and passing no arm at all."""
+        assert _render(_dir(tmp_path, "a"), extra=["--loss-arm", "jsd"]) == _render(
+            _dir(tmp_path, "b")
+        )
+
+    def test_an_unknown_arm_is_refused(self, tmp_path):
+        result = _render(tmp_path, extra=["--loss-arm", "kd"], expect_rc=2)
+        assert "is not one of" in result.stderr
+
+    @pytest.mark.parametrize(
+        "arm,key",
+        [
+            ("uld", "use_uld_loss"),
+            ("adaptive_kld", "use_adaptive_kld"),
+        ],
+    )
+    def test_an_arm_emits_the_switch_the_renderer_had_no_flag_for(
+        self, tmp_path, arm, key
+    ):
+        """The point of the table: these seven switches are CustomGOLDConfig fields that
+        no CLI flag on this renderer could previously set at all."""
+        config = _render(tmp_path, extra=["--loss-arm", arm])
+        assert config[key] is True
+
+    def test_ce_requires_off_policy_and_says_why(self, tmp_path):
+        """A control that trains on its own output is not a control."""
+        result = _render(
+            tmp_path, extra=["--loss-arm", "ce", "--lmbda", "0.5"], expect_rc=2
+        )
+        assert "requires lmbda=0.0" in result.stderr
+        assert "not a control" in result.stderr
+
+    def test_ce_renders_at_lmbda_zero(self, tmp_path):
+        assert _render(tmp_path, extra=["--loss-arm", "ce"])["use_ce_loss"] is True
+
+    def test_a_degenerate_distillm2_is_refused_rather_than_silently_equivalent(
+        self, tmp_path
+    ):
+        """At lmbda 0.0 the comparative loss IS forward KL. It does not crash, which is
+        why this is checked here: nothing downstream could tell the difference between
+        this run and a `jsd` run at beta 0.0, and the config would claim DistiLLM-2."""
+        result = _render(tmp_path, extra=["--loss-arm", "distillm2"], expect_rc=2)
+        assert "0.0 < lmbda < 1.0" in result.stderr
+        assert "degenerates to forward KL" in result.stderr
+
+    def test_kl_interpolation_is_refused_at_a_pure_divergence(self, tmp_path):
+        """beta 0.0 short-circuits before the interpolation branch, so the flag is dead
+        and the run is exactly `jsd` while reporting an interpolated objective."""
+        result = _render(
+            tmp_path, extra=["--loss-arm", "kl_interpolation"], expect_rc=2
+        )
+        assert "0.0 < beta < 1.0" in result.stderr
+
+    def test_kl_interpolation_renders_between_the_divergences(self, tmp_path):
+        config = _render(
+            tmp_path, extra=["--loss-arm", "kl_interpolation", "--beta", "0.5"]
+        )
+        assert config["use_kl_interpolation"] is True
+        assert config["beta"] == pytest.approx(0.5)
+
+    def test_an_arm_contradicting_its_standalone_flag_is_refused(self, tmp_path):
+        """The arm says liger, the flag says no liger. Refused rather than resolved
+        quietly in favour of either one."""
+        result = _render(tmp_path, extra=["--loss-arm", "liger_fused_jsd"], expect_rc=2)
+        assert "--use-liger-fused-jsd" in result.stderr
+
+    def test_the_contradiction_is_refused_in_the_other_direction_too(self, tmp_path):
+        """THE DANGEROUS DIRECTION. use_liger_fused_jsd selects a fused branch that drops
+        every other loss switch without a word, so this pair would train JSD while the
+        rendered config said ULD."""
+        result = _render(
+            tmp_path,
+            extra=["--loss-arm", "uld", "--use-liger-fused-jsd", "true"],
+            expect_rc=2,
+        )
+        assert "implies use_liger_fused_jsd=False" in result.stderr
+
+    def test_the_liger_arm_renders_when_the_flag_agrees(self, tmp_path):
+        config = _render(
+            tmp_path,
+            extra=["--loss-arm", "liger_fused_jsd", "--use-liger-fused-jsd", "true"],
+        )
+        assert config["use_liger_fused_jsd"] is True
+
+    def test_the_documented_escape_hatch_still_works_without_an_arm(self, tmp_path):
+        """Three recipe READMEs instruct `--param USE_LIGER_FUSED_JSD=true` to answer an
+        open question. With no arm named there is nothing to contradict, so that keeps
+        working -- which is why no arm, rather than `jsd`, is the default."""
+        config = _render(tmp_path, extra=["--use-liger-fused-jsd", "true"])
+        assert config["use_liger_fused_jsd"] is True
+
+    def test_sampled_opd_offline_is_refused_rather_than_dropped(self, tmp_path):
+        """use_sampled_opd_loss is emitted only on the on-policy path, so an off-policy
+        render would drop the arm's only switch and train plain JSD under a config that
+        named sampled_opd."""
+        result = _render(
+            tmp_path,
+            extra=[
+                "--loss-arm",
+                "sampled_opd",
+                "--lmbda",
+                "1.0",
+                "--last-message-only",
+                "true",
+                "--use-sampled-opd-loss",
+                "true",
+            ],
+            expect_rc=2,
+        )
+        assert "on-policy path" in result.stderr
+
+    def test_sampled_opd_renders_on_policy(self, tmp_path):
+        config = _render(
+            tmp_path,
+            total_nodes=2,
+            extra=[
+                "--loss-arm",
+                "sampled_opd",
+                "--lmbda",
+                "1.0",
+                "--last-message-only",
+                "true",
+                "--use-sampled-opd-loss",
+                "true",
+                "--vllm-num-servers",
+                "1",
+            ],
+        )
+        assert config["use_sampled_opd_loss"] is True
+        assert config["last_message_only"] is True
+
+    def test_sampled_opd_requirements_are_reported_not_coerced(self, tmp_path):
+        """Rewriting a requested lmbda to satisfy an arm would change the experiment
+        without saying so."""
+        result = _render(
+            tmp_path,
+            extra=["--loss-arm", "sampled_opd", "--vllm-num-servers", "1"],
+            expect_rc=2,
+        )
+        assert "requires lmbda=1.0" in result.stderr
+
+
+class TestTheArmTableCannotDeclareAnUnenforcedRequirement:
+    """A meta-assertion over the table itself.
+
+    The enforcement loop is generic so that an arm cannot declare a requirement no branch
+    reads. This asserts the converse: no arm names a requirement KIND the loop does not
+    implement -- which would be a requirement that exists in the table, reads as enforced,
+    and is not.
+    """
+
+    @staticmethod
+    def _module():
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_rgc", _RENDER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_every_requirement_kind_is_implemented(self):
+        module = self._module()
+        for name, arm in module.LOSS_ARMS.items():
+            for kind in arm.get("requires", {}):
+                assert kind in module._REQUIREMENT_KINDS, (
+                    f"arm {name!r} requires {kind!r}, which the enforcement loop does "
+                    "not implement"
+                )
+
+    def test_every_arm_documents_itself(self):
+        """The help text lists the arms by name; a nameless objective in a rendered
+        config is not something the next person can act on."""
+        for name, arm in self._module().LOSS_ARMS.items():
+            assert arm["doc"], f"arm {name!r} has no doc"
+
+    def test_every_requirement_explains_why(self):
+        """Half of these requirements are not the dataclass's rules -- they exist because
+        outside them the arm silently becomes a different one. A refusal without that
+        reason reads as an arbitrary restriction to work around."""
+        for name, arm in self._module().LOSS_ARMS.items():
+            if arm.get("requires"):
+                assert arm.get("why"), f"arm {name!r} constrains without saying why"
+
+    def test_the_standalone_flag_map_names_real_flags(self):
+        """A key here that is not actually a CLI flag would make the contradiction check
+        compare against an attribute that does not exist, i.e. crash on an arm rather
+        than refuse a contradiction."""
+        module = self._module()
+        args = module._parse_args(
+            [
+                "--output",
+                "/dev/null",
+                "--total-nodes",
+                "1",
+                "--model-name-or-path",
+                "x",
+                "--teacher-model-name-or-path",
+                "y",
+                "--dataset-name",
+                "z",
+            ]
+        )
+        for key in module._STANDALONE_ARM_FLAGS:
+            assert hasattr(args, key), f"{key} is not a parsed argument"
+
+
+class TestCorpusTokenizerCheck:
+    """Off by default, and LOUD when asked for without the package it needs."""
+
+    def test_it_is_off_by_default(self, tmp_path):
+        """Otherwise every existing recipe would start failing on an import."""
+        assert "check_corpus_tokenizer" not in _render(tmp_path)
+
+    def test_asking_for_it_without_the_source_is_an_error(self, tmp_path):
+        """NOT a skip. A validator that quietly does not run is worse than one that is
+        absent, because the operator believes they checked. The message has to name the
+        config key that would deliver the package."""
+        out = tmp_path / "c.yaml"
+        cmd = [
+            sys.executable,
+            str(_RENDER),
+            "--output",
+            str(out),
+            "--total-nodes",
+            "1",
+            "--check-corpus-tokenizer",
+            "true",
+        ]
+        for flag, value in _REQUIRED.items():
+            cmd += [flag, value]
+        # An empty PYTHONPATH, so the outcome does not depend on what happens to be on the
+        # path of whoever runs the suite.
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["PYTHONPATH"] = ""
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, env=env
+        )
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "deliver_distill_source" in result.stderr
+        assert not out.exists(), "a refused render must not leave a config behind"

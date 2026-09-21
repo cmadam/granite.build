@@ -45,6 +45,154 @@ _ONLINE_ONLY = (
 )
 
 
+# ─── Loss arms ────────────────────────────────────────────────────────────────────────
+#
+# CustomGOLDConfig exposes nine boolean loss switches. They are NOT orthogonal, and this
+# branch already knows it: gold-onpolicy-smoke/parameters.yaml notes that "CustomGOLDConfig
+# rejects liger with several on-policy options". This table is that knowledge made
+# mechanical, for the two kinds of invalid combination an enum cannot express:
+#
+#   (a) COMBINATIONS THE DATACLASS REJECTS in __post_init__. Failing here only saves the
+#       allocation -- the run would have died anyway, just later and after the models loaded.
+#
+#   (b) COMBINATIONS THAT SILENTLY TRAIN THE WRONG OBJECTIVE, which is worse because the run
+#       SUCCEEDS. use_liger_fused_jsd selects a fused-kernel branch constructed with beta,
+#       alpha, temperature and use_kl_interpolation ONLY; every other secondary switch is
+#       dropped by that path without a word. So liger together with use_ce_loss,
+#       use_distillm2, use_distillm2_like, use_adaptive_kld or use_reversed_distillm2_like
+#       trains fused generalized JSD while the config claims another objective. Exactly one
+#       of those five is caught by the dataclass; the other four pass validation.
+#
+# DELIBERATELY WITHOUT TRAINER LINE NUMBERS. The upstream copy of this table cites
+# custom_gold_trainer.py line numbers, and they are NOT transferable: they were read off a
+# fork whose additions shift every line below them, and kd_code_dir points at a checkout
+# this account cannot read to re-derive them. A precise-looking wrong citation is worse than
+# none, so the branch conditions are named by their flags -- which are stable -- instead.
+#
+# WHAT IS DELIBERATELY NOT AN ARM, because `beta` already reaches it: forward KL is `jsd` at
+# beta 0.0, reverse KL is `jsd` at beta 1.0. Arms for those would be two ways to say one
+# thing, free to disagree.
+#
+# EACH ARM CARRIES ITS OWN REQUIREMENTS rather than having them coerced, because the second
+# kind of requirement below is one nothing downstream would catch: outside its bounds the arm
+# does not fail, it silently BECOMES a different arm.
+LOSS_ARMS: Dict[str, Dict[str, Any]] = {
+    "jsd": {
+        "flags": {},
+        "doc": "mixture generalized JSD; beta 0.0 = forward KL, 1.0 = reverse KL",
+    },
+    "kl_interpolation": {
+        "flags": {"use_kl_interpolation": True},
+        "doc": "convex (1-beta)*FKL + beta*RKL instead of the mixture JSD",
+        # Not a dataclass rule; the arm is simply pointless outside it. The beta == 0 and
+        # beta == 1 short-circuits PRECEDE the interpolation branch, so at those values the
+        # flag is never read and this arm is byte-identical to `jsd`.
+        "requires": {"beta_strictly_between": (0.0, 1.0)},
+        "why": (
+            "the interpolation branch sits after the beta == 0 and beta == 1 "
+            "short-circuits, so at those values the flag is never read and this arm is "
+            "identical to loss_arm='jsd'"
+        ),
+    },
+    "adaptive_kld": {
+        "flags": {"use_adaptive_kld": True},
+        "doc": "adaptive KL divergence weighting inside generalized_jsd_loss",
+    },
+    "liger_fused_jsd": {
+        "flags": {"use_liger_fused_jsd": True},
+        "doc": "same JSD math via Liger's fused linear kernel; lower peak memory",
+    },
+    "liger_fused_kl_interpolation": {
+        "flags": {"use_liger_fused_jsd": True, "use_kl_interpolation": True},
+        # The ONE composition with liger that is genuinely honoured: the fused loss object
+        # takes use_kl_interpolation as a constructor argument. Every other secondary flag is
+        # silently dropped by that path, which is why no other liger pairing is offered.
+        "doc": "fused liger kernel computing the convex FKL/RKL interpolation",
+        "requires": {"beta_strictly_between": (0.0, 1.0)},
+        "why": (
+            "the fused skewed-JSD loss receives beta at construction and the interpolation "
+            "is only meaningful strictly between the two pure divergences"
+        ),
+    },
+    "distillm2": {
+        "flags": {"use_distillm2": True},
+        "doc": "DistiLLM-2, comparative: reverse KL on on-policy tokens, forward KL off",
+        # Both terms are guarded by .any(), so outside 0 < lmbda < 1 this does not crash --
+        # it DEGENERATES. At lmbda 0.0 every token is off-policy and the loss IS forward KL;
+        # at 1.0 every token is on-policy and it IS reverse KL. Silent equivalence.
+        "requires": {"lmbda_strictly_between": (0.0, 1.0)},
+        "why": (
+            "the comparative loss needs both policy classes present in a batch; at "
+            "lmbda 0.0 it degenerates to forward KL and at 1.0 to reverse KL, either of "
+            "which loss_arm='jsd' expresses directly at beta 0.0 / 1.0"
+        ),
+    },
+    "distillm2_like": {
+        "flags": {"use_distillm2_like": True},
+        "doc": "DistiLLM-2 shape, non-comparative; policy class decided per microbatch",
+        "requires": {"lmbda_strictly_between": (0.0, 1.0)},
+        "why": (
+            "the on/off-policy branch is what distinguishes this arm; outside "
+            "0 < lmbda < 1 one side is unreachable and it reduces to a fixed divergence"
+        ),
+    },
+    "reversed_distillm2_like": {
+        "flags": {"use_reversed_distillm2_like": True},
+        # A SIBLING branch of distillm2_like, not a modifier of it: setting both would make
+        # this one dead code, which is why it is a separate arm with the flag alone.
+        "doc": "distillm2_like with the on/off-policy divergence roles exchanged",
+        "requires": {"lmbda_strictly_between": (0.0, 1.0)},
+        "why": (
+            "same reason as distillm2_like: the exchanged roles are only observable when "
+            "both policy classes occur"
+        ),
+    },
+    "sampled_opd": {
+        "flags": {"use_sampled_opd_loss": True},
+        "doc": "REINFORCE-style policy gradient on sampled tokens; optional truncated IS",
+        # The dataclass's own rules, surfaced rather than coerced: quietly rewriting a
+        # requested lmbda to satisfy a loss arm would change the experiment without saying so.
+        "requires": {"lmbda_eq": 1.0, "last_message_only": True},
+        "why": "CustomGOLDConfig.__post_init__ demands both",
+    },
+    "uld": {
+        "flags": {"use_uld_loss": True},
+        # NOT in the chain above at all: it compares SORTED logit distributions, so teacher
+        # and student need not share a vocabulary. The arm for a genuinely cross-tokenizer
+        # pair; for Granite/Granite it buys nothing over an aligned comparison.
+        "doc": "Universal Logit Distillation over sorted logits; the cross-tokenizer arm",
+    },
+    "ce": {
+        "flags": {"use_ce_loss": True},
+        # An SFT control that runs INSIDE this trainer, on the same data path, collator and
+        # masking as every distillation arm -- so a gap between them cannot be a data-pipeline
+        # artefact. Not a replacement for distill-sft-baseline, which trains with no teacher
+        # resident at all.
+        "doc": "cross entropy only -- in-trainer SFT control, teacher still loaded",
+        "requires": {"lmbda_eq": 0.0},
+        "why": (
+            "with no teacher term in the loss, on-policy generation would train the student "
+            "on its own samples with no teacher signal at all, and a control that trains on "
+            "its own output is not a control. Note the cost this arm pays regardless: "
+            "use_ce_loss does not unload the teacher, so it holds memory it never reads"
+        ),
+    },
+}
+
+# Requirement kinds _validate_arm knows how to enforce. Named separately so a typo'd
+# requirement key is an error rather than a requirement that silently does not apply.
+_REQUIREMENT_KINDS = frozenset(
+    {"lmbda_eq", "lmbda_strictly_between", "beta_strictly_between", "last_message_only"}
+)
+
+# Arm flags that ALSO have a standalone CLI flag on this renderer. An arm and its standalone
+# flag disagreeing is a contradiction rather than a precedence question: see _validate_arm.
+_STANDALONE_ARM_FLAGS = {
+    "use_liger_fused_jsd": "--use-liger-fused-jsd",
+    "use_sampled_opd_loss": "--use-sampled-opd-loss",
+}
+
+
 def _lr(value: float) -> float:
     """Return a learning rate as a float with two-decimal exponent precision.
 
@@ -53,6 +201,97 @@ def _lr(value: float) -> float:
     reads a number rather than a string.
     """
     return float(f"{float(value):.2e}")
+
+
+def _validate_arm(args: argparse.Namespace, *, online: bool) -> Dict[str, Any]:
+    """Return the loss-arm's flags, or {} when no arm was named.
+
+    NO ARM IS THE DEFAULT, and that is a deliberate three-way distinction rather than
+    defaulting to ``jsd``. Every recipe on this branch pins ``USE_LIGER_FUSED_JSD: false``
+    and three of their READMEs instruct re-running with ``--param USE_LIGER_FUSED_JSD=true``
+    to answer an open question. If ``jsd`` were the default arm, that documented escape hatch
+    would start hard-erroring on a contradiction the operator never asked for. So:
+
+      * no arm            -- the standalone flags are authoritative, exactly as before. The
+                             rendered config is unchanged, which is what keeps
+                             test_off_policy_key_set_is_exact green.
+      * ``--loss-arm jsd`` -- an explicit claim about the objective, and now a contradiction
+                             with ``--use-liger-fused-jsd true`` is a real disagreement to
+                             refuse rather than a default arguing with an operator.
+    """
+    if not args.loss_arm:
+        return {}
+    if args.loss_arm not in LOSS_ARMS:
+        raise ValueError(
+            f"loss_arm={args.loss_arm!r} is not one of {sorted(LOSS_ARMS)}"
+        )
+
+    arm = LOSS_ARMS[args.loss_arm]
+    flags: Dict[str, Any] = dict(arm["flags"])
+    why = arm.get("why", "")
+    tail = f" WHY: {why}." if why else ""
+
+    # Per-arm requirements, driven off the table rather than written out per arm. Eleven arms
+    # and six requirements written by hand is six near-identical blocks, and the failure mode
+    # of six near-identical blocks is a SEVENTH arm added with a "requires" entry and no block
+    # to read it: a requirement that exists, reads as enforced, and is not. The final branch
+    # makes that impossible.
+    for kind, bound in arm.get("requires", {}).items():
+        if kind == "lmbda_eq" and args.lmbda != bound:
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} requires lmbda={bound}; got {args.lmbda}."
+                f"{tail} Set lmbda explicitly rather than having it changed for you"
+            )
+        if kind == "beta_strictly_between" and not bound[0] < args.beta < bound[1]:
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} requires {bound[0]} < beta < {bound[1]}; "
+                f"got beta={args.beta}.{tail}"
+            )
+        if kind == "lmbda_strictly_between" and not bound[0] < args.lmbda < bound[1]:
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} requires {bound[0]} < lmbda < {bound[1]}; "
+                f"got lmbda={args.lmbda}.{tail}"
+            )
+        if kind == "last_message_only" and bool(args.last_message_only) != bool(bound):
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} requires last_message_only={bound}.{tail}"
+            )
+        if kind not in _REQUIREMENT_KINDS:
+            raise ValueError(
+                f"internal: loss_arm={args.loss_arm!r} declares requirement {kind!r}, "
+                "which this renderer does not implement. Fix the arm table or this loop"
+            )
+
+    # A named arm and a standalone flag disagreeing is a CONTRADICTION, refused in both
+    # directions -- not a precedence question resolved quietly in favour of one of them.
+    # Both directions matter, and the second is the dangerous one: `--loss-arm uld
+    # --use-liger-fused-jsd true` would select the fused branch and drop the ULD flag
+    # without a word, producing a run that reports ULD in its config and trained JSD.
+    for key, flag in _STANDALONE_ARM_FLAGS.items():
+        implied = bool(flags.get(key, False))
+        if bool(getattr(args, key)) != implied:
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} implies {key}={implied} but {flag} was given "
+                f"as {bool(getattr(args, key))}. Refusing rather than silently preferring "
+                f"one: either drop --loss-arm and drive the objective with {flag} directly, "
+                f"or pass {flag} {str(implied).lower()}"
+            )
+
+    # An arm whose flag lives in the on-policy block, selected on an off-policy render, would
+    # have that flag DROPPED at emission -- the config would claim the arm and the trainer
+    # would never see it. The one arm this can happen to is sampled_opd, whose lmbda_eq 1.0
+    # requirement makes it on-policy by intent while vllm_num_servers is what actually gates
+    # emission here.
+    if not online:
+        dropped = sorted(k for k in flags if k in _ONLINE_ONLY)
+        if dropped:
+            raise ValueError(
+                f"loss_arm={args.loss_arm!r} sets {', '.join(dropped)}, which is emitted "
+                "only on the on-policy path (vllm_num_servers > 0). Rendering it off-policy "
+                "would drop the flag and train a different objective than the config names; "
+                "set vllm_num_servers, or choose an off-policy arm"
+            )
+    return flags
 
 
 def build_config(args: argparse.Namespace) -> Dict[str, Any]:
@@ -135,6 +374,20 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         "response_template": _decode_escapes(args.response_template),
     }
 
+    # The arm's flags, and ONLY the ones not already emitted above. A flag that is also a
+    # standalone CLI flag (use_liger_fused_jsd) or lives in the on-policy block
+    # (use_sampled_opd_loss) is already in the config with the right value, because
+    # _validate_arm refused any render where args and arm disagreed. So this adds exactly the
+    # switches the renderer had no flag for, and adds NOTHING when no arm was named -- which
+    # is what keeps every existing recipe's key set unchanged.
+    config.update(
+        {
+            key: value
+            for key, value in _validate_arm(args, online=online).items()
+            if key not in _ONLINE_ONLY and key not in _STANDALONE_ARM_FLAGS
+        }
+    )
+
     if online:
         config.update(
             {
@@ -166,6 +419,44 @@ def _decode_escapes(value: str) -> str:
     interpreted, so every other backslash reaches the trainer as written.
     """
     return value.replace("\\n", "\n")
+
+
+def check_corpus_tokenizer(args: argparse.Namespace) -> None:
+    """Refuse to train a student against a corpus built for a different tokenizer.
+
+    THE FAILURE THIS CATCHES IS SILENT AND EXPENSIVE. After retagging, two Granite
+    tokenizers' ids are interchangeable, but their pre_tokenizers still differ (a Split regex
+    on 4.1 vs plain ByteLevel on 4.2), so the same text segments differently. A run on the
+    wrong corpus does not error: it trains on mis-segmented text at full speed with a falling
+    loss. distill-pipeline-smoke chains corpus-prep straight into this step, which is exactly
+    where a mismatch can be introduced by changing one parameter.
+
+    LAZY AND LOUD, never silent. The check lives in the shared package, which reaches this
+    container only when the step sets ``deliver_distill_source: true``. Asking for the check
+    without the source is an error naming that key -- because a validator that quietly does
+    not run is worse than one that is absent: the operator believes they checked.
+    """
+    try:
+        from gb_steps_post_training.distillation import (  # noqa: PLC0415
+            render_common,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            "--check-corpus-tokenizer was requested but gb_steps_post_training is not "
+            f"importable ({exc}). That package reaches this container through the shared "
+            "checkout, so set gold_config.deliver_distill_source: true in the build -- or "
+            "drop the check deliberately rather than leaving it to fail open"
+        ) from exc
+
+    # The corpus argument is the DATASET path the trainer will read. corpus_tokenizer_identity
+    # resolves a file's sibling manifest, so this works with the flag the step already passes
+    # and needs no second path to be kept in step with it.
+    try:
+        render_common.validate_student_against_corpus(
+            args.model_name_or_path, args.dataset_name
+        )
+    except render_common.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _bool(value: str) -> bool:
@@ -223,6 +514,27 @@ def _parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--beta", type=float, default=0.0)
     p.add_argument("--use-liger-fused-jsd", type=_bool, default=False)
+    p.add_argument(
+        "--loss-arm",
+        default="",
+        help=(
+            "distillation objective as a validated preset; one of: "
+            + ", ".join(sorted(LOSS_ARMS))
+            + ". EMPTY BY DEFAULT, which leaves the standalone loss flags authoritative and "
+            "the rendered config unchanged. Naming an arm sets its switches and enforces its "
+            "requirements, and disagreeing with a standalone flag is then an error"
+        ),
+    )
+    p.add_argument(
+        "--check-corpus-tokenizer",
+        type=_bool,
+        default=False,
+        help=(
+            "verify the student's tokenizer matches the one the corpus was built with. "
+            "Requires gold_config.deliver_distill_source: true; errors rather than skipping "
+            "if the package is absent."
+        ),
+    )
     p.add_argument("--response-template", default="<|im_start|>assistant")
 
     p.add_argument(
@@ -248,6 +560,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
 def main(argv=None) -> int:
     args = _parse_args(argv)
     try:
+        # Before the config is built, so a tokenizer mismatch costs nothing: the alternative
+        # is discovering it from a loss curve after the allocation has been held for hours.
+        if args.check_corpus_tokenizer:
+            check_corpus_tokenizer(args)
         config = build_config(args)
     except ValueError as e:
         print(f"render_gold_config: {e}", file=sys.stderr)
