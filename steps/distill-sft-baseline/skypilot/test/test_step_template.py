@@ -276,12 +276,21 @@ class TestFlagSurface:
     """template -> run-sft.sh drift, asserted in both directions."""
 
     BOOLEAN_KEYS = ("use_liger_memory_opt", "use_liger_swiglu_mlp")
+    # Consumed by the run block's own Jinja guard and deliberately never reaching
+    # run-sft.sh: the residency preflight runs BEFORE the trainer is launched, in the
+    # template, so a `--check-weight-residency` flag on run-sft.sh would be one nothing
+    # reads. Named after gold-distill's set of the same name, which exempts
+    # deliver_distill_source for exactly this reason. That both keys are actually wired,
+    # switchable and overridable is asserted in gold-distill's
+    # test_weight_residency_contract.py, which owns them across the three steps that carry
+    # the preflight -- so the exemption cannot hide a key that goes nowhere.
+    STEP_ONLY = ("check_weight_residency", "allow_offline_weights")
 
     def test_every_config_key_reaches_the_script(self, step, run_script):
         cfg = step["config"]
         for block in ("sft_config", "workload", "tracking"):
             for key in cfg[block]:
-                if key in self.BOOLEAN_KEYS:
+                if key in self.BOOLEAN_KEYS or key in self.STEP_ONLY:
                     continue
                 assert (
                     "--" + key.replace("_", "-")
@@ -299,15 +308,35 @@ class TestFlagSurface:
             assert f"--no-{key.replace('_', '-')}" in run_script
             assert f"{flag} {{{{" not in run_script
 
+    @staticmethod
+    def _preflight_flags():
+        """Flags of the residency preflight, read out of its own argparse.
+
+        The preflight is a different program invoked on its own line, so its flags are not
+        run-sft.sh's business. Deriving them here rather than writing a literal means the
+        exemption cannot outlive the flag it excuses: drop --allow-offline from the module
+        and this test starts demanding run-sft.sh parse it again.
+        """
+        module = _HERE / "src" / "check_weight_residency.py"
+        if not module.exists():
+            return set()
+        return set(
+            re.findall(
+                r'ap\.add_argument\(\s*"(--[a-z][a-z0-9-]*)"', module.read_text()
+            )
+        )
+
     def test_script_parses_every_flag_the_template_passes(self, run_script, sft_sh):
         handled = set(re.findall(r"^\s*(--[a-z-]+)\)", sft_sh, re.M))
+        # git's own three, plus whatever the residency preflight parses for itself.
+        elsewhere = {"--quiet", "--porcelain", "--all"} | self._preflight_flags()
         body = "\n".join(
             line
             for line in _as_shell(run_script).splitlines()
             if not line.lstrip().startswith("#")
         )
         for flag in set(re.findall(r"(?<![-\w])(--[a-z][a-z0-9-]*)", body)):
-            if flag in ("--quiet", "--porcelain", "--all"):  # git's own flags
+            if flag in elsewhere:
                 continue
             assert flag in handled, f"run-sft.sh does not parse {flag}"
 
