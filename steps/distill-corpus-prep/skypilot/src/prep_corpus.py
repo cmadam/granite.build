@@ -8,6 +8,25 @@
 # Verbatim apart from `black`/`isort` reflow, which CI requires repo-wide. Keep it that
 # way so re-syncing upstream stays a three-way merge; behaviour changes belong upstream.
 #
+# RE-SYNCED past that commit for three flags and nothing else: --explode-assistant-turns,
+# --explode-max-per-conv and --max-completion-length, with the four helpers they need
+# (_length_summary, prompt_budget_of, explode_assistant_turns, prompt_token_count) and the
+# per-record emit refactored out of build()'s loop, since one input record can now become
+# several rows. Every one is default-OFF: `train.jsonl` and the row sidecar come out
+# byte-identical to what this file produced before the re-sync, and the manifest gains five
+# keys that read `false`/`null`/`0`.
+#
+# ONE VISIBLE CHANGE, and it is deliberate: the two new policies are in expectation(), so an
+# out_dir already built by the older copy of this file now REFUSES on its marker ("DIFFERENT
+# expectation") instead of reporting SKIP. That is the correct answer -- a fingerprint that
+# omitted the flags would let a build with --explode-assistant-turns walk past an un-exploded
+# corpus and call it done -- but it means a resumed recipe whose corpus predates this change
+# needs its marker removed once. Delete `out_dir/.step-done.json` (the path main() prints on
+# an AlreadyDone) to adopt an existing corpus, or rebuild it.
+#
+# The commit these came from is the one `code_config.expect_ref` names in step-template.yaml;
+# it is not repeated here, because two places to write a ref is one place for it to be stale.
+#
 # It imports gb_steps_post_training.distillation at module scope, which is delivered at
 # RUN time from the checkout named by code_config (see step-template.yaml). That is why
 # the tests for this file are gated on GB_DISTILL_CODE_DIR — see test/conftest.py.
@@ -70,7 +89,7 @@ import random
 import re
 import sys
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping
 
 from gb_steps_post_training.distillation import step_state, tokenizer_identity
 
@@ -228,6 +247,44 @@ class AlreadyDone(Exception):
         self.lines = lines
 
 
+def _length_summary(values: list[int]) -> dict[str, Any]:
+    """max/mean/p50/p90 of a non-empty length list, by nearest-rank on the sorted values.
+
+    Nearest-rank rather than interpolation, and clamped to the last index: these are token
+    counts to compare against an integer budget, so a p90 of 24575.5 would be a length no row
+    has. numpy is not imported by this step and will not be imported for four numbers.
+    """
+    ordered = sorted(values)
+    idx90 = min(int(len(ordered) * 0.9), len(ordered) - 1)
+    return {
+        "max": ordered[-1],
+        "mean": round(sum(ordered) / len(ordered), 1),
+        "p50": ordered[len(ordered) // 2],
+        "p90": ordered[idx90],
+    }
+
+
+def prompt_budget_of(args: argparse.Namespace) -> int | None:
+    """The prompt allowance, DERIVED -- never a literal, and never stored as one.
+
+    ONE FUNCTION, THREE CALLERS (the filter, the manifest, the expectation), because the number
+    is a difference of two configured values and a fourth place to write `24576` is a fourth
+    place for it to be wrong. The trainer computes it the same way at
+    custom_gold_trainer.py:2045 (`args.max_length - args.max_completion_length`), so the pinned
+    settings for the unified sweep -- max_length 32768, max_completion_length 8192 -- give 24576
+    here without 24576 appearing anywhere in this file.
+
+    None means "no prompt filter": --max-completion-length defaults to 0, which is also how the
+    trainer spells it off (`args.max_completion_length is None` at :2036 takes the plain
+    filter). Under None, measure() does not render the prompt at all, so every corpus built
+    before this option existed rebuilds byte-identically.
+    """
+    mcl = int(getattr(args, "max_completion_length", 0) or 0)
+    if mcl <= 0:
+        return None
+    return int(args.max_length) - mcl
+
+
 def expectation(args: argparse.Namespace, identity: str) -> dict:
     """Everything that changes the bytes this step writes, and nothing that does not.
 
@@ -253,6 +310,34 @@ def expectation(args: argparse.Namespace, identity: str) -> dict:
             "min_messages": args.min_messages,
             "documents_policy": args.documents_policy,
             "emit_row_id": args.emit_row_id,
+            # IN THE FINGERPRINT, not merely in the manifest. Explosion changes which rows
+            # exist, so a rerun that flips it produces a different corpus; if it were absent
+            # here the step would match the previous expectation and SKIP, leaving an
+            # un-exploded corpus behind a config that asks for an exploded one. That is the
+            # same shape as the finished-output_dir resume trap in gold.py:506 -- work
+            # skipped while reporting success.
+            "explode_assistant_turns": args.explode_assistant_turns,
+            "explode_max_per_conv": (
+                args.explode_max_per_conv if args.explode_assistant_turns else None
+            ),
+            # IN THE FINGERPRINT for the same reason explosion is, and the trap is sharper
+            # here because the flag's whole purpose is to REMOVE rows. Absent from the
+            # expectation, turning the filter on would match the previous run's fingerprint
+            # and SKIP -- leaving an unfiltered corpus on disk behind a config that asks for a
+            # filtered one, and reporting success. The consumer then trains four arms on rows
+            # the other two silently drop, which is precisely the incomparability this filter
+            # was added to remove.
+            #
+            # BOTH keys, not just the derived one: `prompt_budget` alone would make
+            # (max_length 32768, mcl 8192) and (max_length 24576, mcl 0) fingerprint-equal on
+            # this axis, and they are different corpora -- the first also drops rows over
+            # 32768 in total, the second over 24576.
+            "max_completion_length": (
+                int(args.max_completion_length)
+                if prompt_budget_of(args) is not None
+                else None
+            ),
+            "prompt_budget": prompt_budget_of(args),
         },
         "seed": args.seed,
         "eval_fraction": args.eval_fraction,
@@ -462,6 +547,73 @@ def normalise(
     return kept, ""
 
 
+def explode_assistant_turns(
+    rec: dict, *, max_per_conv: int, seed_key: str
+) -> list[dict]:
+    """Turn one multi-turn conversation into several prefixes, each ending on an assistant.
+
+    WHY THIS EXISTS -- it makes supervision symmetric across objectives, which no flag can.
+    Under `last_message_only: true` the trainer supervises exactly the final assistant turn,
+    so a conversation with 4 assistant turns contributes 1 and wastes 3. Under `false` it
+    supervises all 4. The published sweep therefore trained ULD on 53.4% of the answer
+    tokens its GOLD arms saw, because ULD's teacher path FORCES last_message_only: the
+    off-policy render at custom_gold_trainer.py:3296 builds the teacher's view as
+    `msgs[:-1]` against `teacher_full = msgs`, making the teacher's completion structurally
+    the last message and nothing else. That is a confound in the objective comparison,
+    not a tuning choice.
+
+    Exploding at prep time removes it without touching the alignment core. A conversation
+    whose assistant turns sit at indices k1..kn becomes up to n rows, row j being
+    `messages[:kj+1]`. Then `msgs[:-1]` is exactly right for EVERY row on BOTH sides, and
+    `last_message_only: true` can be set for all six arms at once -- so the arms differ in
+    objective and nothing else. The alternative, teaching the teacher path to render
+    per-turn, means editing the code that slices at a single SCALAR `teacher_prompt_length`
+    shared across the batch (:3360-3460): per-row multi-segment breaks that contract, and
+    that same core has already produced a loss of `student_logits.sum() * 0.0` -- an exact
+    zero with a live graph, so job 1492353 advanced every step, wrote checkpoints, reported
+    success, and trained nothing. This path cannot fail that way.
+
+    THE LAST ASSISTANT TURN IS ALWAYS KEPT, which is what makes the change auditable: the
+    full conversation is one of the emitted rows, so the exploded corpus is a SUPERSET of
+    the un-exploded one and previously-trained numbers stay comparable. The remaining
+    `max_per_conv - 1` slots are filled at random from the earlier turns rather than by
+    taking the first ones, because taking the first would supervise only conversation
+    openings -- systematically the easiest turns, before any tool result has come back.
+
+    THE CAP IS A COST BOUND, NOT A PREFERENCE. Prefixes are re-encoded once per emitted row,
+    so forward tokens grow with the number of variants while SUPERVISED tokens do not. At
+    `max_per_conv 2` the tool axis roughly doubles its forward cost; uncapped, a 20-turn
+    conversation would cost 20x for the same supervision.
+
+    SEEDED PER ROW, from the row's own id rather than from a shared RNG, so the choice does
+    not depend on iteration order. That matters here specifically: `--shard-count` splits
+    the input round-robin, so a shared RNG would hand the same conversation different
+    variants depending on which shard drew it, and the corpus would stop being a function
+    of (dataset, seed).
+
+    Returns the variants in ascending prefix length. A conversation with fewer than two
+    assistant turns cannot be exploded and comes back unchanged as a single-element list --
+    which is every row of the reasoning and instruction-following axes.
+    """
+    msgs = rec["messages"]
+    idx = [i for i, m in enumerate(msgs) if m["role"] == "assistant"]
+    if len(idx) < 2 or max_per_conv < 1:
+        return [rec]
+    if max_per_conv >= len(idx):
+        chosen = list(idx)
+    else:
+        # random.Random(str) is seeded from the string's hash; hashlib keeps it stable
+        # across interpreter runs, which PYTHONHASHSEED randomisation would not.
+        rng = random.Random(hashlib.sha256(seed_key.encode("utf-8")).hexdigest())
+        chosen = sorted(rng.sample(idx[:-1], max_per_conv - 1) + [idx[-1]])
+    out = []
+    for k in chosen:
+        variant = dict(rec)
+        variant["messages"] = [dict(m) for m in msgs[: k + 1]]
+        out.append(variant)
+    return out
+
+
 # ------------------------------------------------------------------ measuring
 
 
@@ -490,6 +642,74 @@ def last_mask_span(mask) -> int:
     return end - start + 1
 
 
+def prompt_token_count(record: dict, tok) -> int:
+    """Length of the PROMPT alone, rendered exactly as custom_gold_trainer.py:1961-1971 does.
+
+    THIS IS A SECOND COPY OF THE TRAINER'S RENDER, AND THAT IS THE COST OF THE FEATURE. The
+    objection is recorded at the --emit-row-id comment in build(): a predicate re-implemented
+    here can drift from the trainer's, and a corpus that claims to be pre-filtered while
+    filtering on a different rule is worse than one that makes no claim. Three things pay for
+    it:
+
+      1. Upstream's checks/prompt-budget-parity.py imports BOTH this function and the
+         trainer's real prepare/filter path and asserts they agree row by row on real corpus
+         rows. Not a copy of the logic on either side -- the actual two call sites, so drift
+         fails a check instead of shipping. That harness lives in the checkout `code_config`
+         names, not in this repository; the parity claim is only as fresh as the ref pinned
+         there.
+      2. Every kwarg here is the trainer's, including per-row `render_thinking` (the trainer's
+         `row_thinking`, :1924) and the `documents` non-list coercion (:1902-1904, pandas NaN).
+         The one difference is deliberate and inert: the trainer reads `tools` back out of an
+         Arrow string column, this reads it before the emit re-serialises it, so both branches
+         of its coercion are handled.
+      3. The alternative is worse, which is the actual argument. The trainer's filter fires
+         only when `lmbda != 0.0` (:2036), so the on-policy arms train on a strictly smaller
+         row set than the off-policy ones -- from the same corpus, with no record of the
+         difference. Six arms whose only intended difference is the loss would then differ in
+         their data too, and the sweep would not be comparable. Filtering at build time is
+         what makes one corpus mean one row set for all six arms.
+
+    Returns a token count. Raises whatever the template raises; the caller attributes it.
+    """
+    prompt_messages = record["messages"][:-1]
+    documents = record.get("documents")
+    if not isinstance(documents, (list, tuple)):
+        documents = []
+    tools_raw = record.get("tools")
+    if isinstance(tools_raw, str):
+        tools = json.loads(tools_raw or "[]")
+    elif isinstance(tools_raw, (list, tuple)):
+        tools = list(tools_raw)
+    else:
+        tools = []
+    ids = tok.apply_chat_template(
+        prompt_messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=False,
+        documents=documents,
+        tools=tools,
+        enable_thinking=bool(record.get("render_thinking", False)),
+        **(record.get("chat_template_kwargs") or {}),
+    )
+    # SHAPE-CHECKED BEFORE len(), because len() on the wrong shape is silently a small number
+    # rather than an error, and a budget test against a small number keeps everything. Two
+    # shapes have actually been returned by this API: a BatchEncoding (mapping), where len()
+    # counts KEYS -- 2 -- and produced the "keep-rate 1.0 with p50=2" signature in an earlier
+    # survey; and a list of per-conversation lists, where len() counts CONVERSATIONS -- 1.
+    # Both are indistinguishable from a very short prompt downstream. The trainer's own
+    # `len(x["prompts"])` at :2045 has the same exposure, so a mismatch here is a real finding
+    # about the trainer and not a local inconvenience: it is raised, not worked around.
+    if isinstance(ids, Mapping) or (ids and isinstance(ids[0], (list, tuple))):
+        raise PrepError(
+            f"apply_chat_template(tokenize=True, return_dict=False) returned "
+            f"{type(ids).__name__}, not a flat token list, so len() would not be a token "
+            f"count. The trainer's prompt filter (custom_gold_trainer.py:2045) takes len() of "
+            f"this same call's result -- check that filter before changing this one."
+        )
+    return len(ids)
+
+
 def measure(
     record: dict,
     tok,
@@ -497,6 +717,7 @@ def measure(
     max_length: int,
     length_policy: str,
     boundary: str = "all_assistant",
+    prompt_budget: int | None = None,
     detail: dict | None = None,
     totals: dict | None = None,
 ) -> tuple[dict | None, str, int, int]:
@@ -505,6 +726,11 @@ def measure(
     n_target is the number of tokens THE TRAINER WILL SUPERVISE under `boundary`: the final
     assistant turn for `last_message`, every assistant turn for `all_assistant`. A record
     with none of them is dropped -- it is a sample the trainer would compute no loss on.
+
+    `prompt_budget`, when given, additionally drops a record whose PROMPT alone renders to
+    >= budget tokens, on the trainer's own predicate -- see the block at the end of this
+    function and prompt_token_count(). None (the default) skips the extra render entirely, so a
+    corpus built without it is byte-identical to one built before the option existed.
 
     `totals`, when given, gets THIS record's all-assistant mask count under
     `mask_tokens_all_assistant` -- overwritten per call, not accumulated, so the caller can
@@ -552,6 +778,7 @@ def measure(
     # and build() reports the two differently.
     if n_all == 0:
         return None, "empty_assistant_mask", n_tokens, 0
+    outcome = ""
     if n_tokens > max_length:
         if length_policy == "drop":
             return None, "over_max_length", n_tokens, n_target
@@ -559,8 +786,52 @@ def measure(
         # level cannot be reflected back into `messages` without re-detokenising -- so the
         # emitted record is the untruncated text and the trainer truncates it identically.
         # Recorded in the manifest as `truncated` so the count is not invisible.
-        return record, "truncated", n_tokens, n_target
-    return record, "", n_tokens, n_target
+        outcome = "truncated"
+
+    # THE PROMPT BUDGET, tested LAST and so on a set that is disjoint from over_max_length.
+    # Ordering is the whole design here. A row can fail both tests, and putting this first
+    # would move rows out of `over_max_length` into `over_prompt_budget` -- silently changing
+    # what a count means between two corpora built by the same command at different times.
+    # Last, the two counts partition cleanly: `over_max_length` is "too long in total" and
+    # `over_prompt_budget` is "fits in total, but its prompt alone leaves no room for the
+    # completion". The second is the one a recipe can act on, by raising max_length or lowering
+    # max_completion_length; the first cannot be fixed by rebalancing the split.
+    #
+    # `>=` MIRRORS THE TRAINER'S STRICT `<` KEEP-TEST (custom_gold_trainer.py:2045), which is
+    # why the allowance at max_length 32768 / max_completion_length 8192 is 24,575 tokens and
+    # not 24,576. Dropping here on `>` would keep exactly the rows at length == budget, which
+    # the trainer then drops for the on-policy arms -- one row set for four arms and a
+    # different one for two, which is the failure this filter exists to prevent.
+    #
+    # Also tested on a TRUNCATED-policy keep, deliberately. The trainer's prompt filter does not
+    # consult length_policy: a row it keeps and truncates in total can still have an
+    # over-budget prompt, and it drops that row.
+    if prompt_budget is not None:
+        try:
+            n_prompt = prompt_token_count(record, tok)
+        except PrepError:
+            raise  # a shape fault, not a data fault -- see prompt_token_count()
+        except Exception as exc:
+            # A SEPARATE reason from the full render's `template_error:*`, for two reasons: the
+            # empty-mask template-fault detector in build() compares its count against
+            # n_rendered and must not see prompt-render faults, and a prompt-only failure means
+            # something specific -- add_generation_prompt=True is the only difference between
+            # the two calls, so this points at the template's generation block.
+            if detail is not None:
+                detail.setdefault(
+                    f"prompt_template_error:{type(exc).__name__}", str(exc)[:600]
+                )
+            return (
+                None,
+                f"prompt_template_error:{type(exc).__name__}",
+                n_tokens,
+                n_target,
+            )
+        if totals is not None:
+            totals["prompt_tokens"] = n_prompt
+        if n_prompt >= prompt_budget:
+            return None, "over_prompt_budget", n_tokens, n_target
+    return record, outcome, n_tokens, n_target
 
 
 # ------------------------------------------------------------------ driver
@@ -625,6 +896,18 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
                 "shard count. Cap the input before prep, or prep unsharded."
             )
 
+    # REFUSED, not clamped. A non-positive allowance would drop the entire corpus and then fail
+    # on "0 of N records survived filtering", pointing at --max-length and the think policy --
+    # the message that check prints -- rather than at the split that actually caused it.
+    prompt_budget = prompt_budget_of(args)
+    if prompt_budget is not None and prompt_budget <= 0:
+        raise PrepError(
+            f"--max-completion-length {args.max_completion_length} leaves no room for a prompt "
+            f"inside --max-length {args.max_length} (allowance {prompt_budget}). The trainer "
+            "splits max_length between prompt and completion rather than spending it on either, "
+            "so the completion length must be well under the total."
+        )
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -648,17 +931,112 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
     totals: dict[str, int] = {}
     n_mask_all = 0
     kept: list[dict] = []
-    # One entry per INPUT record, kept or dropped. This is the per-datapoint training
-    # manifest; corpus_manifest.json stays aggregate. Two files rather than one because a
-    # 811,172-row array inside the manifest would make the file that every consumer reads
-    # for tokenizer_identity unreadable, and the aggregate counts are what most consumers
-    # want. The sidecar is ~90 bytes/row, so ~73 MB at full corpus scale.
+    # One entry per EMITTED ROW, kept or dropped -- which is one entry per input record
+    # unless --explode-assistant-turns is on, where a conversation contributes one entry per
+    # prefix and they share a `src_id`, separated by `explode_index`. This is the
+    # per-datapoint training manifest; corpus_manifest.json stays aggregate. Two files rather
+    # than one because a 811,172-row array inside the manifest would make the file that every
+    # consumer reads for tokenizer_identity unreadable, and the aggregate counts are what most
+    # consumers want. The sidecar is ~90 bytes/row, so ~73 MB at full corpus scale.
     rows: list[dict] = []
     lengths: list[int] = []
     targets: list[int] = []
+    # Populated only under --max-completion-length. Kept rows only, so the percentiles describe
+    # the corpus that exists rather than the one before filtering -- and the manifest says how
+    # close the survivors run to the budget, which is what decides whether the split is set
+    # right. A p90 far below the budget means the budget cost nothing; a p90 just under it means
+    # the next corpus will lose rows to a small change in max_completion_length.
+    prompt_lengths: list[int] = []
     n_in = 0
     n_truncated = 0
     n_rendered = 0
+    # Explosion bookkeeping. Both stay 0 without --explode-assistant-turns, and both go in
+    # the manifest: the forward-token cost of this feature is `n_explode_variants /
+    # n_exploded_convs`, and a reader who cannot see that number cannot price the run.
+    n_exploded_convs = 0
+    n_explode_variants = 0
+
+    def _emit(rec, rid, explode_index, reason, n_tok, n_tgt):
+        """Serialise one surviving record into the corpus and the sidecar.
+
+        A closure over build()'s accumulators rather than a module-level helper: it
+        mutates six of them, and threading those through a signature would make the
+        call site longer than the body. It exists at all because ONE INPUT RECORD CAN
+        PRODUCE SEVERAL ROWS under --explode-assistant-turns, so this ran once per
+        record and now runs once per emitted row.
+
+        `explode_index` is None for an unexploded record, and the sidecar entry then
+        omits the field entirely -- so a corpus built without the flag has a
+        byte-identical sidecar to one built before the flag existed.
+        """
+        nonlocal n_mask_all
+        # Accumulated here, over kept records only -- see measure()'s docstring.
+        n_mask_all += totals.get("mask_tokens_all_assistant", 0)
+        if "prompt_tokens" in totals:
+            prompt_lengths.append(totals["prompt_tokens"])
+        # `tools` GOES BACK TO A STRING BEFORE IT IS EMITTED, and `documents` does not.
+        # normalise() parses both so measure() can render them (a string tools field is
+        # iterated character by character by the template -- LSF 1137876), but the TRAINER
+        # reads the two fields differently: it json.loads `tools`
+        # (custom_gold_trainer.py:1745, again at :3075) and forwards `documents` to the
+        # template as-is (:1750). Emitting the parsed list therefore made the deliverable
+        # corpus crash the trainer's own preprocessing on the first tools-bearing row --
+        # 17.5% of en-sft-4.1-0.2-16K, none of them in the 2,000-row probe head, so every
+        # run so far was green. Found by upstream's checks/collator-masking.py on job 1162592.
+        # Serialised HERE, before row_id(), so the id still hashes exactly the bytes that
+        # reach train.jsonl and a holder of that file can still recompute it.
+        # Only when present: an absent column reads as null and the trainer defaults it.
+        if isinstance(rec.get("tools"), list):
+            rec["tools"] = json.dumps(rec["tools"], ensure_ascii=False)
+        # `out_id` hashes the EMITTED record, not the source one, and both are kept.
+        # normalise() TRANSFORMS records (role aliases, think stripping, tools parsed from
+        # their JSON string), so the two ids genuinely differ for any transformed row.
+        # Recording only src_id would leave a holder of train.jsonl unable to look a row up;
+        # recording only out_id would break the link back to the source dataset. Provenance
+        # has to be traceable from BOTH ends or it answers only half the question.
+        oid = row_id(rec)
+        if args.emit_row_id:
+            # THE ID TRAVELS WITH THE ROW. This is the difference between a manifest that
+            # says what prep emitted and one that can say what the TRAINER consumed.
+            #
+            # The trainer applies its own row filter, and an arm-dependent one:
+            # custom_gold_trainer.py:2045 additionally drops prompts over
+            # `max_length - max_completion_length`, but only when lmbda != 0.0 (:2036).
+            # Predicting that from here would mean re-implementing the trainer's prompt render
+            # (add_generation_prompt=True, per-row enable_thinking, its tokenizer copy, its
+            # template) in a second place that can drift from the first -- and a provenance
+            # record that has silently drifted is worse than none, because it still looks
+            # authoritative. Carrying the id instead lets the trainer answer from the dataset
+            # it actually built, which is the only place the question has a true answer.
+            #
+            # THAT OBJECTION NOW HAS AN ANSWER, and --max-completion-length takes it: the
+            # render IS re-implemented (prompt_token_count), because the alternative was two
+            # different row sets across the six arms of one sweep. What makes it safe is not
+            # confidence, it is upstream's checks/prompt-budget-parity.py asserting prep's
+            # predicate against the TRAINER'S OWN, so drift fails a check. This comment's
+            # argument still holds for its own subject: the row ids remain the record of what
+            # the trainer consumed, since only the trainer knows what its arm did.
+            #
+            # Safe as an extra column: the tokenize map (:1814) sets no remove_columns, and
+            # select_columns runs only under packing, which these configs do not use -- so
+            # the field survives to trainer.train_dataset. It is also inert for rendering,
+            # which reads only messages/tools/documents/chat_template_kwargs.
+            rec[ROW_ID_FIELD] = oid
+        entry = {
+            "src_id": rid,
+            "out_id": oid,
+            "disposition": "kept",
+            "reason": reason or "",
+            "tokens": n_tok,
+            "target_tokens": n_tgt,
+            "kept_index": len(kept),
+        }
+        if explode_index is not None:
+            entry["explode_index"] = explode_index
+        rows.append(entry)
+        kept.append(rec)
+        lengths.append(n_tok)
+        targets.append(n_tgt)
 
     # Counts EVERY record read, including other shards'. n_in counts only this shard's, so
     # that the sidecar's one-entry-per-assigned-record invariant still means what it says.
@@ -685,78 +1063,88 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             drops[reason] = drops.get(reason, 0) + 1
             rows.append({"src_id": rid, "disposition": "dropped", "reason": reason})
             continue
-        rec, reason, n_tok, n_tgt = measure(
-            rec,
-            tok,
-            max_length=args.max_length,
-            length_policy=args.length_policy,
-            boundary=args.completion_boundary,
-            detail=detail,
-            totals=totals,
-        )
-        n_rendered += 1
-        if rec is None:
-            drops[reason] = drops.get(reason, 0) + 1
-            rows.append({"src_id": rid, "disposition": "dropped", "reason": reason})
-            continue
-        if reason == "truncated":
-            n_truncated += 1
-        # Accumulated here, over kept records only -- see measure()'s docstring.
-        n_mask_all += totals.get("mask_tokens_all_assistant", 0)
-        # `tools` GOES BACK TO A STRING BEFORE IT IS EMITTED, and `documents` does not.
-        # normalise() parses both so measure() can render them (a string tools field is
-        # iterated character by character by the template -- LSF 1137876), but the TRAINER
-        # reads the two fields differently: it json.loads `tools`
-        # (custom_gold_trainer.py:1745, again at :3075) and forwards `documents` to the
-        # template as-is (:1750). Emitting the parsed list therefore made the deliverable
-        # corpus crash the trainer's own preprocessing on the first tools-bearing row --
-        # 17.5% of en-sft-4.1-0.2-16K, none of them in the 2,000-row probe head, so every
-        # run so far was green. Found by checks/collator-masking.py on job 1162592.
-        # Serialised HERE, before row_id(), so the id still hashes exactly the bytes that
-        # reach train.jsonl and a holder of that file can still recompute it.
-        # Only when present: an absent column reads as null and the trainer defaults it.
-        if isinstance(rec.get("tools"), list):
-            rec["tools"] = json.dumps(rec["tools"], ensure_ascii=False)
-        # `out_id` hashes the EMITTED record, not the source one, and both are kept.
-        # normalise() TRANSFORMS records (role aliases, think stripping, tools parsed from
-        # their JSON string), so the two ids genuinely differ for any transformed row.
-        # Recording only src_id would leave a holder of train.jsonl unable to look a row up;
-        # recording only out_id would break the link back to the source dataset. Provenance
-        # has to be traceable from BOTH ends or it answers only half the question.
-        oid = row_id(rec)
-        if args.emit_row_id:
-            # THE ID TRAVELS WITH THE ROW. This is the difference between a manifest that
-            # says what prep emitted and one that can say what the TRAINER consumed.
-            #
-            # The trainer applies its own row filter, and an arm-dependent one:
-            # custom_gold_trainer.py:1824 additionally drops prompts over
-            # `max_length - max_completion_length`, but only when lmbda != 0.0. Predicting
-            # that from here would mean re-implementing the trainer's prompt render
-            # (add_generation_prompt=True, enable_thinking=False, its tokenizer copy, its
-            # template) in a second place that can drift from the first -- and a provenance
-            # record that has silently drifted is worse than none, because it still looks
-            # authoritative. Carrying the id instead lets the trainer answer from the dataset
-            # it actually built, which is the only place the question has a true answer.
-            #
-            # Safe as an extra column: the tokenize map (:1814) sets no remove_columns, and
-            # select_columns runs only under packing, which these configs do not use -- so
-            # the field survives to trainer.train_dataset. It is also inert for rendering,
-            # which reads only messages/tools/documents/chat_template_kwargs.
-            rec[ROW_ID_FIELD] = oid
-        rows.append(
-            {
-                "src_id": rid,
-                "out_id": oid,
-                "disposition": "kept",
-                "reason": reason or "",
-                "tokens": n_tok,
-                "target_tokens": n_tgt,
-                "kept_index": len(kept),
-            }
-        )
-        kept.append(rec)
-        lengths.append(n_tok)
-        targets.append(n_tgt)
+        # ONE INPUT RECORD CAN BECOME SEVERAL EMITTED ROWS. Without
+        # --explode-assistant-turns this is always [rec] and every count below means
+        # exactly what it meant before this flag existed. With it, the sidecar's invariant
+        # changes from one-entry-per-input-record to one-entry-per-emitted-row: `src_id`
+        # repeats across an exploded conversation's rows and `explode_index` separates
+        # them. The manifest records that (see the `explode` block below) rather than
+        # leaving a reader to infer it from duplicate ids.
+        if args.explode_assistant_turns:
+            variants = explode_assistant_turns(
+                rec, max_per_conv=args.explode_max_per_conv, seed_key=rid
+            )
+            if len(variants) > 1:
+                n_exploded_convs += 1
+                n_explode_variants += len(variants)
+        else:
+            variants = [rec]
+
+        for v_i, rec in enumerate(variants):
+            exploded = len(variants) > 1
+            if exploded:
+                # RE-VALIDATED, not trusted because its parent was valid. A prefix is a
+                # different conversation: it can fall under --min-messages, lose the only
+                # <think> block under --think-policy require, or -- where a conversation's
+                # first assistant turn precedes any user turn -- have no user turn at all.
+                # Re-running the same contract is the whole reason a variant cannot enter
+                # the corpus on its parent's credentials. Idempotent on an already
+                # normalised record: the role aliases and the think-strip have no second
+                # effect, and `tools` is already a list, which normalise accepts.
+                rec, v_reason = normalise(
+                    rec,
+                    think_policy=args.think_policy,
+                    boundary=args.completion_boundary,
+                    min_messages=args.min_messages,
+                    stats=notes,
+                    documents_policy=args.documents_policy,
+                )
+                if rec is None:
+                    # Namespaced, because these rejections have no counterpart in the
+                    # un-exploded run: a prefix failing must never be read as the source
+                    # dataset rejecting a record.
+                    key = f"explode_variant:{v_reason}"
+                    drops[key] = drops.get(key, 0) + 1
+                    rows.append(
+                        {
+                            "src_id": rid,
+                            "explode_index": v_i,
+                            "disposition": "dropped",
+                            "reason": key,
+                        }
+                    )
+                    continue
+            rec, reason, n_tok, n_tgt = measure(
+                rec,
+                tok,
+                max_length=args.max_length,
+                length_policy=args.length_policy,
+                boundary=args.completion_boundary,
+                prompt_budget=prompt_budget,
+                detail=detail,
+                totals=totals,
+            )
+            n_rendered += 1
+            if rec is None:
+                # NOT namespaced, deliberately, unlike the normalise rejections above. The
+                # template-fault detector below fires on
+                # `drops["empty_assistant_mask"] == n_rendered`, and that check is the one
+                # thing standing between a template with no {% generation %} markers and a
+                # corpus of entirely unsupervised rows. Namespacing these would blind it on
+                # any exploded corpus -- trading a real safety check for tidier bookkeeping.
+                drops[reason] = drops.get(reason, 0) + 1
+                entry = {"src_id": rid, "disposition": "dropped", "reason": reason}
+                if exploded:
+                    entry["explode_index"] = v_i
+                rows.append(entry)
+                continue
+            if reason == "truncated":
+                n_truncated += 1
+            _emit(rec, rid, v_i if exploded else None, reason, n_tok, n_tgt)
+        # Checked after the variant loop, not inside it, so an exploded conversation is
+        # emitted whole or not at all. Stopping mid-conversation would leave the corpus
+        # holding a prefix whose siblings were cut by the cap -- a sample the cap chose
+        # rather than the seed, and one that no rerun would reproduce.
         if args.max_examples and len(kept) >= args.max_examples:
             break
 
@@ -773,11 +1161,30 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "templates/chatml_granite_42_generation.jinja)."
         )
     if not kept:
+        # THE ADVICE NAMES THE FLAG THAT DID IT. Listing three innocent flags is worse than
+        # listing none: an operator whose corpus was emptied by the prompt budget reads
+        # "check --max-length", widens it -- which makes the allowance LARGER and so looks like
+        # the fix -- and gets the same zero, because `max_length - max_completion_length` is
+        # still smaller than every prompt. The budget is spelled out arithmetically for the
+        # same reason: it is a difference, not a setting, so quoting only the two inputs leaves
+        # the reader to do the subtraction that surprised them in the first place.
+        advice = (
+            "Check --max-length, --think-policy and --completion-boundary against the "
+            "dataset's actual shape."
+        )
+        if drops.get("over_prompt_budget"):
+            advice = (
+                f"{drops['over_prompt_budget']} of them were dropped by the PROMPT BUDGET: "
+                f"--max-length {args.max_length} minus --max-completion-length "
+                f"{args.max_completion_length} leaves {prompt_budget} tokens for the prompt, "
+                f"and every prompt rendered longer. Widening --max-length raises that "
+                f"allowance; lowering --max-completion-length raises it too, at the cost of a "
+                f"shorter generation. " + advice
+            )
         raise PrepError(
             f"0 of {n_in} records survived filtering. Drop reasons: {drops or 'none'}. "
             + "".join(f"First {k}: {v} " for k, v in detail.items())
-            + "Check --max-length, --think-policy and --completion-boundary against the "
-            "dataset's actual shape."
+            + advice
         )
 
     # Deterministic split from an explicit seed. Shuffling INDICES rather than the records
@@ -839,6 +1246,22 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             "min_messages": args.min_messages,
             "documents_policy": args.documents_policy,
             "emit_row_id": args.emit_row_id,
+            "explode_assistant_turns": args.explode_assistant_turns,
+            # Recorded even when explosion is off, because "built without explosion" and
+            # "built before the flag existed" are different claims and only one is checkable.
+            "explode_max_per_conv": (
+                args.explode_max_per_conv if args.explode_assistant_turns else None
+            ),
+            # Same key set as expectation()'s `policies`, asserted by
+            # test_the_manifest_and_the_expectation_agree_on_which_keys_are_policies. The
+            # derived value is recorded ALONGSIDE its input rather than left to be recomputed:
+            # a consumer holding this manifest can check the trainer's `max_length -
+            # max_completion_length` against the number this corpus was actually filtered on,
+            # which is the comparison that catches a config drifting away from its data.
+            "max_completion_length": (
+                int(args.max_completion_length) if prompt_budget is not None else None
+            ),
+            "prompt_budget": prompt_budget,
         },
         "seed": args.seed,
         "eval_fraction": args.eval_fraction,
@@ -850,6 +1273,11 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         "counts": {
             "input": n_in,
             "rendered": n_rendered,
+            # 0/0 when explosion is off. `explode_variants / exploded_conversations` is the
+            # forward-token multiplier this feature costs, and it is the number that decides
+            # whether --explode-max-per-conv is set right for a given corpus.
+            "exploded_conversations": n_exploded_convs,
+            "explode_variants": n_explode_variants,
             "kept": len(kept),
             "truncated": n_truncated,
             "dropped": sum(drops.values()),
@@ -874,6 +1302,17 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             # `all_assistant`; under `last_message` the gap is the supervised signal the
             # boundary discards, which is the number a recipe needs to choose between them.
             "total_mask_tokens_all_assistant": n_mask_all,
+            # Present only under --max-completion-length, so a corpus built without it keeps a
+            # manifest identical to one built before the flag existed. PERCENTILES, not just a
+            # max: the max is one row and says nothing about how much room the split left, while
+            # p90 against `prompt_budget` is the headroom figure -- and the pair (p90, max) is
+            # what distinguishes a distribution clipped by a generator's own ceiling from a
+            # heavy-tailed one, which is the difference that decided the 32768 window.
+            **(
+                {"prompt_tokens": _length_summary(prompt_lengths)}
+                if prompt_lengths
+                else {}
+            ),
         },
         "splits": splits,
     }
@@ -906,14 +1345,25 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             1 for r in rows if r["disposition"] == "kept" and r.get("split") == "train"
         ),
     }
-    # An entry per input record, or the sidecar does not mean what the key above says it
-    # means. Cheap to assert, and it is the invariant that the whole file rests on.
-    if len(rows) != n_in and not args.max_examples:
+    # An entry per EMITTED ROW, which is one per input record until --explode-assistant-turns
+    # turns a conversation into several. Cheap to assert, and it is the invariant the whole
+    # file rests on.
+    #
+    # THE EXPECTED COUNT IS DERIVED, NOT WIDENED. Every variant contributes exactly one entry
+    # -- kept, or dropped at its re-validation, or dropped at measure -- so an exploded build
+    # carries `explode_variants - exploded_conversations` entries beyond n_in and not one
+    # more. Relaxing this to `>=` under explosion would have kept the check's shape while
+    # giving up the only thing it does: catching a path out of the variant loop that records
+    # nothing. (Upstream still compares against n_in here, which makes any exploded build
+    # raise this error on an otherwise complete sidecar; fixed in this copy and reported.)
+    expected_rows = n_in + (n_explode_variants - n_exploded_convs)
+    if len(rows) != expected_rows and not args.max_examples:
         raise PrepError(
-            f"sidecar has {len(rows)} entries for {n_in} input records assigned to shard "
-            f"{shard_index}/{shard_count} -- a record was "
-            "neither kept nor recorded as dropped, so the per-row manifest is incomplete "
-            "and must not be published as one"
+            f"sidecar has {len(rows)} entries, expected {expected_rows} for {n_in} input "
+            f"records assigned to shard {shard_index}/{shard_count} "
+            f"({n_explode_variants} variants from {n_exploded_convs} exploded "
+            "conversations) -- a record was neither kept nor recorded as dropped, so the "
+            "per-row manifest is incomplete and must not be published as one"
         )
 
     (out_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
@@ -951,6 +1401,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="must match distill-gold-train's max_length; a corpus filtered at a "
         "different length silently contains examples the trainer truncates",
     )
+    # WHY A CORPUS-BUILD FLAG NAMED AFTER A TRAINER ARGUMENT. `max_length` is SPLIT between
+    # prompt and completion by the trainer, not spent on whichever the row needs: at
+    # custom_gold_trainer.py:2045 a row survives only when its rendered PROMPT is strictly
+    # shorter than `max_length - max_completion_length`. That filter is gated on `lmbda != 0.0`
+    # (:2036), so the on-policy arms train on fewer rows than the off-policy ones from the same
+    # corpus, with nothing on disk recording the difference. Applying it here makes one corpus
+    # mean one row set for every arm, and puts the removal count in the manifest.
+    #
+    # Default 0 = OFF, so this changes no existing corpus and no existing command. Set it to the
+    # trainer's own max_completion_length; the allowance is derived (prompt_budget_of), so the
+    # number 24576 never appears in this file.
+    p.add_argument(
+        "--max-completion-length",
+        type=int,
+        default=0,
+        help="the trainer's max_completion_length (0 = no prompt filter). Drops "
+        "rows whose rendered prompt is >= max_length minus this, which is the "
+        "trainer's own per-row test for the on-policy arms -- applied at build "
+        "time so every arm trains on the same rows. Counted in the manifest as "
+        "`over_prompt_budget`.",
+    )
     p.add_argument(
         "--length-policy",
         choices=LENGTH_POLICIES,
@@ -973,6 +1444,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="last_message: the final turn must be the assistant's, matching "
         "GOLD's last_message_only. all_assistant: every assistant turn is "
         "supervised.",
+    )
+    # WHY THIS IS NOT JUST `--completion-boundary all_assistant`. That flag changes WHICH
+    # tokens the trainer supervises inside one row, and it cannot be used for the ULD arms:
+    # ULD's teacher render (custom_gold_trainer.py:3296) builds the teacher's view as
+    # `msgs[:-1]`, so the teacher's completion IS the last message and `last_message_only`
+    # is forced true. Explosion instead changes the ROWS, so `last_message` supervises every
+    # assistant turn across the corpus while each individual row still ends on one -- which
+    # is the only way all six arms of a unified sweep can share a supervision scope.
+    p.add_argument(
+        "--explode-assistant-turns",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="emit one row per assistant turn (each row a prefix ending on that "
+        "turn) instead of one row per conversation. Makes "
+        "--completion-boundary last_message supervise every assistant turn "
+        "across the corpus. Single-assistant conversations are unaffected.",
+    )
+    p.add_argument(
+        "--explode-max-per-conv",
+        type=int,
+        default=2,
+        help="cap on rows emitted per conversation when exploding (default 2). "
+        "The last assistant turn is always one of them, so the exploded "
+        "corpus is a superset of the un-exploded one; the rest are drawn at "
+        "random, seeded from the row id. A cost bound: prefixes are "
+        "re-encoded per row, so forward tokens scale with this and "
+        "supervised tokens do not.",
     )
     p.add_argument("--eval-fraction", type=float, default=0.0)
     p.add_argument("--seed", type=int, default=42)
