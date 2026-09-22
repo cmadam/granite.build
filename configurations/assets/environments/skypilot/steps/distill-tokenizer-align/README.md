@@ -14,9 +14,10 @@ tokenizer artifacts every later distillation step reads.
 ## Why this step exists
 
 A Granite directory's `tokenizer_config.json` declares `tokenizer_class: "GPT2Tokenizer"`.
-`AutoTokenizer` honours that, constructs that class, and **the class imposes its own plain
-`ByteLevel` pre_tokenizer over the one stored in `tokenizer.json`**. Nothing errors — the text
-simply segments differently (26.1 vs 3.29 PPL/token, measured upstream).
+`AutoTokenizer` honours that and builds **that class**, which rebuilds its backend from
+`vocab`+`merges` and installs a plain `ByteLevel(use_regex=True)` — discarding whatever
+`pre_tokenizer` `tokenizer.json` stored. Nothing errors, and the result still reports
+`is_fast=True`: **class identity is the mechanism here, not fast-versus-slow.**
 
 The 4.1 base **student** is where this bites: its `pre_tokenizer` is
 `Sequence[Split(regex), ByteLevel]`, and the override discards that `Split`. Two fixes that
@@ -27,6 +28,20 @@ look obvious and are both wrong:
 - **Deleting `tokenizer_class` is not sufficient.** With a `config.json` present,
   `model_type: granite` resolves through `TOKENIZER_MAPPING_NAMES` to `GPT2Tokenizer` anyway.
   So the overlay builder **pins** the key to `PreTrainedTokenizerFast`.
+
+### What the pin does not do
+
+It stops the class lookup from replacing the rule stored in `tokenizer.json`. It does **not**
+decide whether that stored rule is the one the model was **trained** with. For the 4.1/4.2
+family it is, which is why the pin is the whole fix for this pairing. For
+`granite-5.0-20b-sft` it is not: that directory's stored
+`Sequence[Split(regex), ByteLevel(use_regex=False)]` is vestigial, and the model's own
+likelihood prefers the imposed plain `ByteLevel` by **17.0–19.8% of total NLL** over 512
+documents — so pinning alone would hand a trainer a segmentation the model never saw. A
+teacher like that needs the pin **plus** a `pre_tokenizer` transplant, and which rule it was
+trained with is a **measurement**, not a reading of its files. Rank candidates on **total
+NLL**, never PPL/token: two pre-split rules emit different token counts, so a per-token mean
+is not comparable across them.
 
 ## The three outputs, and who consumes them
 
@@ -52,8 +67,8 @@ access clones server-side on the gbserver host.
 
 ```yaml
 code_config:
-  code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training"
-  expect_ref: "70c1550a171aa8e09a9ad9047a5bf763c39e8579"
+  code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
+  expect_ref: "09bfcb1662529644bd09f620c24293aa43f3b807"
 ```
 
 `expect_ref` is checked against the checkout's actual `HEAD` and the step **fails loudly** on a

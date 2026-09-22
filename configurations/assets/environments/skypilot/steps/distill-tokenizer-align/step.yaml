@@ -4,14 +4,27 @@ version: 1.0.0
 # ChatML, and emit the tokenizer artifacts every later distillation step reads.
 #
 # WHY THIS STEP EXISTS. A Granite directory's tokenizer_config.json declares
-# `tokenizer_class: "GPT2Tokenizer"`. AutoTokenizer honours that, constructs that
-# class, and the class imposes its own plain ByteLevel pre_tokenizer over the one
-# stored in tokenizer.json. Nothing errors — the text simply segments differently
-# (26.1 vs 3.29 PPL/token, measured upstream). The 4.1 base student is where this
+# `tokenizer_class: "GPT2Tokenizer"`. AutoTokenizer honours that and builds THAT
+# class, which rebuilds its backend from vocab+merges and installs a plain
+# ByteLevel(use_regex=True) — discarding whatever pre_tokenizer tokenizer.json
+# stored. Nothing errors, and the result still reports is_fast=True: CLASS IDENTITY
+# is the mechanism here, not fast-versus-slow. The 4.1 base student is where this
 # bites: its pre_tokenizer is Sequence[Split(regex), ByteLevel] and the override
 # discards that Split. Deleting the key is NOT sufficient either — with a
 # config.json present, `model_type: granite` resolves through TOKENIZER_MAPPING_NAMES
 # to GPT2Tokenizer anyway — so build_overlay PINS it to PreTrainedTokenizerFast.
+#
+# WHAT THE PIN DOES NOT DO. It stops the class lookup from replacing the rule stored
+# in tokenizer.json. It does NOT decide whether that stored rule is the one the model
+# was TRAINED with. For the 4.1/4.2 family it is, which is why the pin is the whole
+# fix for this pairing. For granite-5.0-20b-sft it is not: that directory's stored
+# Sequence[Split(regex), ByteLevel(use_regex=False)] is vestigial, and the model's own
+# likelihood prefers the imposed plain ByteLevel by 17.0–19.8% of TOTAL NLL over 512
+# documents, so pinning alone would hand a trainer a segmentation the model never saw.
+# A teacher like that needs the pin PLUS a pre_tokenizer transplant, and which rule it
+# was trained with is a MEASUREMENT, not a reading of its files — rank candidates on
+# TOTAL NLL, never PPL/token, which is not comparable across two rules that emit
+# different token counts.
 #
 # Division of labour, which is what keeps this step small: the shared distillation
 # package does the work (build_overlay, retag_student, align_state, masking). This

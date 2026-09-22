@@ -28,11 +28,12 @@
 # tokenizer.json as raw JSON, copies three tokenizer files, and pins tokenizer_class on its
 # own output. So it is immune BY CONSTRUCTION to the trap the overlay exists to dodge --
 # a Granite dir's tokenizer_config.json declares `tokenizer_class: "GPT2Tokenizer"`, so
-# AutoTokenizer constructs that class, which imposes its own plain ByteLevel pre_tokenizer
-# over the one stored in tokenizer.json. It does not error -- it silently mis-segments
-# (26.1 vs 3.29 PPL/token, per the scratchpad's own measurement). Stage 3 takes
-# "$TEACHER_MODEL" for that reason, and the overlays exist for the DOWNSTREAM consumers
-# that do load a tokenizer through transformers.
+# AutoTokenizer builds THAT class, which rebuilds its backend from vocab+merges and
+# installs a plain ByteLevel(use_regex=True) -- discarding whatever pre_tokenizer
+# tokenizer.json stored. It does not error, and it still reports is_fast=True: CLASS
+# IDENTITY is the mechanism, not fast-versus-slow. Stage 3 takes "$TEACHER_MODEL" for
+# that reason, and the overlays exist for the DOWNSTREAM consumers that do load a
+# tokenizer through transformers.
 #
 # Two things NOT to infer from that (both measured -- jobs 1136957/1137115/1137253, and
 # see docs/tokenizer_mismatch.md):
@@ -47,6 +48,21 @@
 # ByteLevel. The bug bites the 4.1 base STUDENT, whose pre_tokenizer is
 # Sequence[Split(regex), ByteLevel] -- the override discards that Split. Both overlays are
 # built anyway: the teacher's costs nothing and stops the asymmetry from being load-bearing.
+#
+# WHAT THE PIN DOES NOT DO, because this is the trap one family up. Pinning the class stops
+# the lookup from replacing the rule stored in tokenizer.json; it does NOT decide whether
+# that stored rule is the one the model was TRAINED with. For the 4.1/4.2 family it is,
+# which is why the pin is the whole fix for this pairing. For granite-5.0-20b-sft it is
+# NOT: its stored Sequence[Split(regex), ByteLevel(use_regex=False)] is vestigial, and the
+# model's own likelihood prefers the imposed plain ByteLevel by 17.0-19.8% of TOTAL NLL
+# over 512 documents (jobs 1857118, 1857242), so the pin ALONE turned a working directory
+# into one that cost an 8-GPU arm at 0/24 steps. Such a teacher needs the pin PLUS a
+# pre_tokenizer transplant (scripts/bluevela/build-model-mirror.py --pre-tokenizer-from),
+# and which rule it was trained with is a MEASUREMENT, not a reading of its files:
+# scripts/bluevela/compare-tokenizer-nll.py, ranked on TOTAL NLL and never PPL/token --
+# two pre-split rules emit different token counts, so a per-token mean is not comparable
+# across them, and the older 26.1-vs-3.29 band does not transfer because that was a slow
+# class rebuilding the MERGES.
 #
 # WHY ONE STEP AND NOT TWO. Overlay-building and retagging are both tokenizer alignment
 # against the same teacher and they are always run as a pair -- every consumer that wants

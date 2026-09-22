@@ -447,9 +447,13 @@ class TestDistillSourceDelivery:
         than as an obscure ValueError from that file's .index()."""
         assert "code_config" in step["config"]
         cc = step["config"]["code_config"]
+        # The project-controlled clone, not the shared tree: a38e2d7 moved every ported
+        # step onto it after the shared tree advanced under a running build. The value
+        # itself is owned by test_source_contract.py's _PINNED_DIR, which asserts it for
+        # gold-distill too now that the contract glob is `*distill*`.
         assert (
             cc["code_dir"]
-            == "/proj/granite-build/g4os/gb-steps-collection-post-training"
+            == "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
         )
         assert cc["python"] == "/stage/.venv/bin/python"
         # Empty on purpose: the default path needs no credential in the container.

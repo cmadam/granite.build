@@ -54,13 +54,17 @@ student it is about to train.
 
 WHY THE TOKENIZER IS LOADED WITHOUT AutoTokenizer. Same reason retag_student.py does not use
 it: a Granite directory's tokenizer_config.json declares `tokenizer_class: "GPT2Tokenizer"`,
-so AutoTokenizer constructs that class, which imposes its own plain ByteLevel pre_tokenizer
-over the one stored in tokenizer.json. It does not error -- it silently mis-segments
-(26.1 vs 3.29 PPL/token, measured; docs/tokenizer_mismatch.md). Since this step's whole
-purpose is to measure lengths with the tokenizer that will actually train, being wrong here
-would be self-defeating in a way no test downstream would catch. So the tokenizer is built
-directly as PreTrainedTokenizerFast(tokenizer_file=...) -- immune by construction, exactly
-like the retag -- and the chat template is read from chat_template.jinja by hand.
+so AutoTokenizer builds THAT class, which rebuilds its backend from vocab+merges and installs
+a plain ByteLevel(use_regex=True) -- discarding whatever pre_tokenizer tokenizer.json stored.
+It does not error, and it still reports is_fast=True: CLASS IDENTITY is the mechanism, not
+fast-versus-slow (docs/tokenizer_mismatch.md). Since this step's whole purpose is to measure
+lengths with the tokenizer that will actually train, being wrong here would be self-defeating
+in a way no test downstream would catch. So the tokenizer is built directly as
+PreTrainedTokenizerFast(tokenizer_file=...) -- which takes the rule stored in tokenizer.json
+and nothing else, exactly like the retag -- and the chat template is read from
+chat_template.jinja by hand. Whether that stored rule is the one a MODEL was trained with is
+a separate question, settled by measurement rather than by reading its files; this step only
+has to agree with the student that will train, which the manifest is what enforces.
 
 THE CHECK THAT EARNS ITS KEEP. --completion-boundary is verified, not merely recorded. A
 chat template without `{% generation %}` markers yields an all-zero assistant mask, and
