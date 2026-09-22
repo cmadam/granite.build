@@ -99,3 +99,53 @@ def test_no_step_ships_a_dockerfile(name):
     """Every ported step is a non-image step: common.mk keys off the Dockerfile's
     ABSENCE, so adding one silently turns image/publish-image back on."""
     assert not (_templates()[name].parent / "Dockerfile").exists()
+
+
+# ─── The pinned checkout ───────────────────────────────────────────────────────
+# Asserted here rather than in test_step_template.py because it is a property of the
+# CONTRACT: all six steps must pin the same tree at the same commit, and the value
+# itself has to be one this project controls. The byte-identity tests above already
+# guarantee sameness; these say what the shared value must BE.
+
+_PINNED_DIR = "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
+_PINNED_REF = "09bfcb1662529644bd09f620c24293aa43f3b807"
+_SHARED_DIR = "/proj/granite-build/g4os/gb-steps-collection-post-training"
+
+
+@pytest.mark.parametrize("name", sorted(_templates()))
+def test_every_step_pins_the_project_controlled_checkout(name):
+    """Not the shared clone. That tree is advanced by its upstream author, and every
+    time it moves all six pins stop matching and the step exits 1 -- mid-build, in
+    1820703f, between `align` and `corpus`. Reverting it is a standoff lost on the next
+    fetch, and the failure reads as a recipe bug rather than a moved dependency."""
+    text = _templates()[name].read_text(encoding="utf-8")
+    assert f'code_dir: "{_PINNED_DIR}"' in text, f"{name} does not pin the -gb checkout"
+    assert (
+        f'code_dir: "{_SHARED_DIR}"' not in text
+    ), f"{name} still points at the shared tree, which moves without warning"
+
+
+@pytest.mark.parametrize("name", sorted(_templates()))
+def test_every_step_pins_a_full_commit(name):
+    """A branch head makes two runs a week apart different runs while reporting the
+    same provenance, and a prefix is not a commit."""
+    text = _templates()[name].read_text(encoding="utf-8")
+    assert f'expect_ref: "{_PINNED_REF}"' in text, f"{name} pins a different commit"
+    assert len(_PINNED_REF) == 40
+
+
+def test_the_pin_is_reachable_from_the_patch_it_carries():
+    """The pinned commit is the base commit plus this repo's patch. Stating the base in
+    the patch file is what lets someone rebuild the checkout from scratch; without it
+    the pin names a tree that cannot be reconstructed."""
+    patch = (
+        _STEPS_ROOT
+        / _REFERENCE
+        / "skypilot"
+        / "patches"
+        / "retag_student_identity_vocab.diff"
+    )
+    assert patch.is_file(), f"missing {patch}"
+    text = patch.read_text(encoding="utf-8")
+    assert "70c1550a171aa8e09a9ad9047a5bf763c39e8579" in text, "base commit unstated"
+    assert "retag_student.py" in text
