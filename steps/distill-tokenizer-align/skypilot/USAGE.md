@@ -90,9 +90,46 @@ the tightest option if this ever has to be automated.
 | `align_config.student_model` | `""` | The **raw, pre-retag** 4.1 3B base student — the one directory that genuinely mis-segments. |
 | `align_config.out_dir` | `align` | Relative values resolve against `$GB_BUILD_WORKDIR`. The three outputs are derived from it and are not separately configurable. |
 | `align_config.chat_template` | `templates/chatml_granite_42_generation.jinja` | **Relative resolves against the checkout.** Empty ⇒ `--no-chat-template` plus a loud warning: the student then has no template and GOLD cannot build assistant masks. A template *without* `{% generation %}` markers is worse than none — it makes the masks all-zero, which raises inside the trainer instead of here. |
+| `align_config.require_chatml` | `true` | Whether the **teacher's** tokenizer and the retagged student's must speak ChatML. Set it `false` only together with a same-family `chat_template` — see [Markup families](#markup-families-and-require_chatml). |
 | `align_config.copy_mode` | `copy` | `copy` \| `symlink` \| `hardlink`. Only `copy` is safe across filesystems. Never symlink an overlay a later step may write to. |
-| `align_config.verify` | `true` | Keep it true: `verify()` is what catches a resolved backend disagreeing with `tokenizer.json`, and it is four cheap encoding probes. |
+| `align_config.verify` | `true` | Keep it true: `verify()` is what catches a resolved backend disagreeing with `tokenizer.json`, and it is four cheap encoding probes. Gates the retagged student's post-condition, which asserts the ChatML markers only when `require_chatml` is true but checks the pre_tokenizer either way. |
 | `align_config.dry_run` | `false` | Resolve and report what would be written, without writing it. Skips the resume marker entirely, in both directions. |
+
+## Markup families and `require_chatml`
+
+Upstream hard-codes `--require-chatml` on the teacher overlay and `require_chatml=True`
+on the retagged student's post-condition. That is correct for the pair this step was
+written against — granite-4.2 **is** a ChatML family — and wrong as a universal.
+
+granite 4.0 and 4.1 carry `<|start_of_role|>` and `<|end_of_role|>` in
+`added_tokens_decoder` and no `<|im_start|>` anywhere; the raw backend returns
+`<|im_start|>` as the six bytes `[27, 91, 318, 5011, 91, 29]`. So a granite-4.1 teacher
+aborts in stage `[1/4]` under the upstream default, and the message is about ChatML
+rather than about the pair, which is the wrong place to start debugging.
+
+`require_chatml: false` is the knob for a **same-family pair** — a granite-4.0 student
+with a granite-4.1 teacher, say, where the two `tokenizer.json` files are byte-identical
+and there are no new turn tokens for the retag to introduce.
+
+Three things to know before setting it:
+
+* **Set it false only together with a chat template of the teacher's family.** False with
+  the default `templates/chatml_granite_42_generation.jinja` is the worst of both:
+  alignment succeeds, and the teacher then scores a prompt format it has never seen. The
+  step cannot catch that for you — the template is a path, and its contents are not
+  compared against the vocabulary.
+* **The turn boundary is still checked**, just elsewhere. Stage `[4/4]` derives the
+  masking contract from the installed template and fails the step if the marker cannot be
+  recovered, so a template whose boundary is undiscoverable never records a completed
+  align. Do not read `false` as "unchecked".
+* **The pre_tokenizer half of the post-condition is unaffected.** That is the half that
+  catches the mis-segmentation this step exists to prevent (26.1 vs 3.29 PPL/token), and
+  it is family-independent. It runs whenever `verify` is true.
+
+Note that the student overlay in stage `[2/4]` is built with `--no-require-chatml`
+regardless, and always has been: it comes from the **pre-retag** base student, whose
+vocabulary contains no turn tokens of any family. Demanding them there would fail a
+correct artifact.
 
 ## Wiring it
 

@@ -63,6 +63,12 @@ CHAT_TEMPLATE=""
 COPY_MODE="copy"
 VERIFY="true"
 DRY_RUN="false"
+# Whether the TEACHER and the retagged student must speak ChatML. Default true, which is
+# what upstream hard-codes and what the granite-4.2 reference pair needs. It is a knob
+# because the markup family is a property of the PAIR, not of alignment: granite 4.0/4.1
+# carry <|start_of_role|>/<|end_of_role|> and no <|im_start|> at all, so a granite-4.1
+# teacher fails stage [1/4] under the upstream default -- the run never starts.
+REQUIRE_CHATML="true"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,6 +77,8 @@ while [[ $# -gt 0 ]]; do
     --out-dir)        OUT_DIR="$2"; shift 2 ;;
     --chat-template)  CHAT_TEMPLATE="$2"; shift 2 ;;
     --copy-mode)      COPY_MODE="$2"; shift 2 ;;
+    --require-chatml)    REQUIRE_CHATML="true"; shift ;;
+    --no-require-chatml) REQUIRE_CHATML="false"; shift ;;
     --verify)         VERIFY="true"; shift ;;
     --no-verify)      VERIFY="false"; shift ;;
     --dry-run)        DRY_RUN="true"; shift ;;
@@ -97,12 +105,14 @@ STUDENT_OVERLAY="${OUT_DIR}/student_overlay"
 RETAGGED="${OUT_DIR}/retagged_student"
 
 verify_flag() { [[ "$VERIFY" == "true" ]] && echo "--verify" || echo "--no-verify"; }
+chatml_flag() { [[ "$REQUIRE_CHATML" == "true" ]] && echo "--require-chatml" || echo "--no-require-chatml"; }
 
 echo "=== distill-tokenizer-align ==="
 echo "  student : ${STUDENT_MODEL}"
 echo "  teacher : ${TEACHER_MODEL}"
 echo "  out     : ${OUT_DIR}"
 echo "  verify  : ${VERIFY}   dry-run: ${DRY_RUN}   copy-mode: ${COPY_MODE}"
+echo "  chatml  : ${REQUIRE_CHATML}"
 
 # The three artifact lines are printed from ONE place, because a step that reports SKIP still has
 # to hand its consumers the paths -- a resumed recipe whose step 2 says "already done" and then
@@ -168,7 +178,7 @@ echo
 echo "--- [1/4] teacher overlay -> ${TEACHER_OVERLAY}"
 "$PYBIN" -m "${PKG}.build_overlay" \
   --source "$TEACHER_MODEL" --out "$TEACHER_OVERLAY" \
-  --copy-mode "$COPY_MODE" "$(verify_flag)" --require-chatml
+  --copy-mode "$COPY_MODE" "$(verify_flag)" "$(chatml_flag)"
 
 # The student overlay is NOT consumed by the retag. It exists because the plan's coupling
 # note is real and now measured (LSF job 1136957): the teacher's tokenizer.json carries a
@@ -220,8 +230,17 @@ fi
 "$PYBIN" -m "${PKG}.retag_student" "${RETAG_ARGS[@]}"
 
 # Post-condition on the step's PRIMARY output. The retag's whole purpose is to make the
-# student able to represent ChatML turn boundaries, so assert it did: <|im_start|> and
-# <|im_end|> must now be single ids, and the pre_tokenizer must still be the trained one.
+# student able to represent the TEACHER'S turn boundaries, so assert it did: under
+# --require-chatml that means <|im_start|> and <|im_end|> must now be single ids. Either
+# way the pre_tokenizer must still be the trained one, which is the half of verify() that
+# is family-independent and the half that catches the expensive mistake.
+#
+# Under --no-require-chatml the marker half of this check is not merely skipped, it moves:
+# for a same-family pair (granite 4.0 student, granite 4.1 teacher) the vocabularies are
+# already identical, so there are no new turn tokens to assert. What must hold instead is
+# that the installed template's masking contract can be DERIVED, and stage [4/4] below is
+# that assertion -- it runs unconditionally and fails the step if the marker cannot be
+# recovered from the template. So do not read a false here as "the boundary is unchecked".
 # This is the check that would have caught retag v1, where the mean-initialised EOS row
 # left a model that trained fine and could not emit EOS.
 #
@@ -233,13 +252,17 @@ fi
 # which is precisely why it is worth doing here rather than trusting the pin.
 if [[ "$VERIFY" == "true" && "$DRY_RUN" != "true" ]]; then
   echo
-  echo "--- post-condition: retagged student speaks ChatML"
-  "$PYBIN" - "$RETAGGED" <<'PYCHECK'
+  if [[ "$REQUIRE_CHATML" == "true" ]]; then
+    echo "--- post-condition: retagged student speaks ChatML"
+  else
+    echo "--- post-condition: retagged student tokenizer is intact (chatml not required)"
+  fi
+  "$PYBIN" - "$RETAGGED" "$REQUIRE_CHATML" <<'PYCHECK'
 import sys
 from pathlib import Path
 from gb_steps_post_training.distillation.build_overlay import verify, OverlayError
 try:
-    for line in verify(Path(sys.argv[1]), require_chatml=True):
+    for line in verify(Path(sys.argv[1]), require_chatml=sys.argv[2] == "true"):
         print(f"  verified: {line}")
 except OverlayError as e:
     print(f"ERROR: retagged student failed its post-condition: {e}", file=sys.stderr)

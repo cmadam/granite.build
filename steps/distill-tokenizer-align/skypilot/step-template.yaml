@@ -78,7 +78,7 @@ config:
 
   # ─── Alignment ────────────────────────────────────────────────────────────────
   # Small and flat, unlike gold-distill's: there is no dataclass on the other side.
-  # run-align.sh takes eight flags and forwards them to entrypoints whose own
+  # run-align.sh takes nine flags and forwards them to entrypoints whose own
   # surfaces are equally small, so the flag-drift problem that forced gold-distill
   # to render a YAML file does not exist here. Flags stay flags.
   align_config:
@@ -113,8 +113,26 @@ config:
     # inodes with a read-only model store is cheap. Never symlink an overlay a later
     # step might write to.
     copy_mode: "copy"
-    # Run verify() on every artifact, plus the ChatML post-condition on the retagged
-    # student. Defaults true and should stay true: verify() is what catches a
+    # Whether the TEACHER's tokenizer, and the retagged student's, must speak ChatML.
+    #
+    # Upstream hard-codes this true and it is correct for the reference pair, because
+    # granite-4.2 IS a ChatML family. It is a knob because the markup family is a
+    # property of the PAIR, not of alignment. granite 4.0 and 4.1 carry
+    # <|start_of_role|> / <|end_of_role|> and no <|im_start|> anywhere in
+    # added_tokens_decoder, so a granite-4.1 teacher fails stage [1/4] under the
+    # upstream default — the run does not start, and the message is about ChatML
+    # rather than about the pair.
+    #
+    # Set false ONLY together with a chat_template of the same family. False with the
+    # default ChatML template is the worst of both: alignment succeeds and the teacher
+    # then scores a prompt format it has never seen. The marker itself is still
+    # checked in that case — stage [4/4] derives the masking contract from the
+    # installed template and fails if it cannot.
+    require_chatml: true
+    # Run verify() on every artifact, plus the post-condition on the retagged
+    # student (which asserts ChatML markers only when require_chatml is true; the
+    # pre_tokenizer half runs either way). Defaults true and should stay true:
+    # verify() is what catches a
     # resolved backend that disagrees with tokenizer.json — the entire failure mode
     # this step exists to prevent — and it is four cheap encoding probes.
     verify: true
@@ -305,6 +323,7 @@ environment_configs:
               --out-dir "$OUT_DIR" \
               --chat-template "$CHAT_TEMPLATE" \
               --copy-mode "{{ config.align_config.copy_mode }}" \
+              {% if config.align_config.require_chatml %}--require-chatml{% else %}--no-require-chatml{% endif %} \
               {% if config.align_config.verify %}--verify{% else %}--no-verify{% endif %} \
               {% if config.align_config.dry_run %}--dry-run{% else %}--no-dry-run{% endif %}
     monitors:
