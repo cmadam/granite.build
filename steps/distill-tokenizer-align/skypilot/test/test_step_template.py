@@ -304,3 +304,59 @@ class TestConfigDefaults:
         from gbcommon.types.stepconfig import StepType
 
         assert step["type"] in {m.value for m in StepType}
+
+
+class TestChatmlIsAPropertyOfThePair:
+    """``require_chatml`` exists because the markup family belongs to the PAIR, not
+    to alignment.
+
+    Upstream hard-codes ``--require-chatml`` on the teacher overlay and
+    ``require_chatml=True`` on the retagged student's post-condition. That is right
+    for granite-4.2, which IS a ChatML family, and it makes stage [1/4] abort on a
+    granite-4.0/4.1 teacher — whose ``added_tokens_decoder`` carries
+    ``<|start_of_role|>`` / ``<|end_of_role|>`` and no ``<|im_start|>`` at all.
+
+    These tests pin the three things that must stay true of the knob: it defaults to
+    the upstream behaviour, the STUDENT overlay is never gated on it, and turning it
+    off does not also turn off the pre_tokenizer half of the post-condition.
+    """
+
+    def test_defaults_to_upstream_behaviour(self, step):
+        """False by default would silently relax the reference pair's check."""
+        assert step["config"]["align_config"]["require_chatml"] is True
+
+    def test_the_script_defaults_it_on_too(self, align_sh):
+        """The template and the script must agree, because run-align.sh is also run
+        by hand when someone reproduces a stage out of band."""
+        assert re.search(r'^REQUIRE_CHATML="true"$', align_sh, re.M)
+
+    def test_the_teacher_overlay_is_gated_on_it(self, align_sh):
+        """Stage [1/4] is the one that aborts on a non-ChatML teacher, so it is the
+        one that has to consult the flag rather than state it."""
+        teacher = align_sh.split("--- [1/4]")[1].split("--- [2/4]")[0]
+        assert '"$(chatml_flag)"' in teacher
+        assert "--require-chatml" not in teacher
+
+    def test_the_student_overlay_is_never_gated_on_it(self, align_sh):
+        """Stage [2/4] builds from the PRE-retag base student, whose vocabulary has
+        no turn tokens of any family. Demanding them there fails a correct artifact,
+        which is why this one stays hard-coded negative."""
+        student = align_sh.split("--- [2/4]")[1].split("--- [3/4]")[0]
+        assert "--no-require-chatml" in student
+        assert "chatml_flag" not in student
+
+    def test_the_post_condition_still_runs_when_chatml_is_not_required(self, align_sh):
+        """The marker half of verify() is family-specific; the pre_tokenizer half is
+        not, and it is the half that catches the 26.1-vs-3.29-PPL mis-segmentation.
+        So the post-condition must be gated on `verify`, never on `require_chatml`."""
+        assert 'require_chatml=sys.argv[2] == "true"' in align_sh
+
+        # The block is entered on VERIFY and DRY_RUN alone.
+        guard = 'if [[ "$VERIFY" == "true" && "$DRY_RUN" != "true" ]]; then'
+        assert guard in align_sh
+        block = align_sh.split(guard, 1)[1].split("PYCHECK", 1)[0]
+
+        # REQUIRE_CHATML appears inside the block only to choose the echo, and that
+        # branch is closed before the check itself runs — so the check is not skipped.
+        assert block.index("fi") < block.index('"$PYBIN"')
+        assert '"$PYBIN" - "$RETAGGED" "$REQUIRE_CHATML"' in block
