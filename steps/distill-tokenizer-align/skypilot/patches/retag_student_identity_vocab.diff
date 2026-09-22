@@ -1,0 +1,94 @@
+retag_student: treat an identical vocabulary as a vacuous role map, not a bad donor
+
+Applies to: gb-steps-collection-post-training
+            src/gb_steps_post_training/distillation/retag_student.py
+Base commit: 70c1550a171aa8e09a9ad9047a5bf763c39e8579  (this step's code_config.expect_ref)
+
+WHY THIS PATCH EXISTS, AND WHY IT IS NOT IN THIS REPO'S OWN SOURCE
+
+retag_student.py refuses any teacher without <|im_start|>, on the grounds that its
+role map cannot apply to a non-ChatML donor. That is correct when the two tokenizers
+DIFFER -- a role map that does not fit is how a turn marker silently falls back to
+mean-init, which is the v1 gibberish failure.
+
+It is wrong when they are the same file. granite-4.0-350m and granite-4.1-3b have
+byte-identical tokenizer.json (sha256 e2bad664..., 7,153,421 bytes), so build_plan
+classifies all 100352 teacher ids as `reuse` and there is nothing to retag. Verified
+against the real tokenizers: reuse=100352 move=0 transplant=0 meaninit=0. On LSF
+(build b2d37592) the step printed exactly those numbers and exited 1 on the next line.
+
+This repo ships no Python for this step -- run-align.sh shells out to upstream entry
+points resolved from code_config.code_dir at run time -- so there is no flag, config
+key or orchestration choice here that can reach the refusal. Unlike align_config's
+require_chatml, which IS ours because it only selects which flag build_overlay gets.
+
+WHY THE CONDITION IS READ OFF THE PLAN, NOT FROM tokenizer_identity.hash_tokenizer
+
+retag_student already imports tokenizer_identity (line 424) to WRITE
+tokenizer_identity.json, so a hash-based check would match house style. The plan is
+used instead because build_plan has already classified every id and already raises
+when the accounting does not add up, so identical_vocab cannot disagree with the
+surgery that follows. A hash could match two files whose added_tokens resolve to
+different ids, or differ between two files that are semantically identical -- and in
+either case it is the plan, not the hash, that governs what the code then does.
+
+HOW TO APPLY
+
+  git clone /proj/granite-build/g4os/gb-steps-collection-post-training \
+            /proj/granite-build/g4os/gb-steps-collection-post-training-epic61
+  cd /proj/granite-build/g4os/gb-steps-collection-post-training-epic61
+  git checkout -b epic61/retag-identity-vocab 70c1550a171aa8e09a9ad9047a5bf763c39e8579
+  git apply steps/distill-tokenizer-align/patches/retag_student_identity_vocab.diff
+  git commit -am "retag_student: treat an identical vocabulary as a vacuous role map"
+  git rev-parse HEAD
+
+A SEPARATE checkout, because six steps share code_dir and expect_ref 70c1550
+(tokenizer-align, corpus-prep, sft-baseline, hf-export, eval, logit-precompute) and
+the step exits 1 on a ref mismatch. Bumping the shared tree would break the other
+five; only this step's code_dir is repointed.
+
+Offer upstream to the owner of gb-steps-collection-post-training when convenient; if
+accepted, delete the side checkout and move code_dir/expect_ref back.
+
+--- a/src/gb_steps_post_training/distillation/retag_student.py
++++ b/src/gb_steps_post_training/distillation/retag_student.py
+@@ -246,6 +246,17 @@
+     specials = special_ids_from(args.teacher)
+     tied = bool(s_cfg.get("tie_word_embeddings"))
+ 
++    # Is there anything to retag at all? Read off the plan rather than by
++    # re-reading the two tokenizer.json files: build_plan has already classified
++    # every teacher id, and already raises when the accounting does not add up, so
++    # this cannot disagree with the surgery that follows.
++    identical_vocab = (
++        not plan["move"]
++        and not plan["transplant"]
++        and not plan["meaninit"]
++        and plan["n_student"] == plan["n_teacher"] == len(plan["reuse"])
++    )
++
+     print(f"student : {args.student}")
+     print(f"teacher : {args.teacher}")
+     print(f"out     : {args.out}")
+@@ -268,9 +279,20 @@
+     critical = [("EOS", specials["eos_token_id"])]
+     # The turn-open marker is looked up by content, not assumed to be at a fixed
+     # id, and its absence is itself an error: a ChatML donor without <|im_start|>
+-    # is not a ChatML donor.
++    # is not a ChatML donor -- UNLESS the two vocabularies are the same, in which
++    # case there is no role map to apply and nothing for it to be wrong about.
+     if "<|im_start|>" in t_ids:
+         critical.append(("turn-open", t_ids["<|im_start|>"]))
++    elif identical_vocab:
++        # Same vocabulary, id for id. Stated rather than passed over in silence,
++        # because "no turn marker was checked" is the kind of thing that should be
++        # visible in a log when someone later asks why a run masked the wrong span.
++        # The boundary is still asserted, just elsewhere: the caller derives the
++        # masking contract from the chat template this run installs.
++        print("teacher tokenizer has no <|im_start|> and is not a ChatML donor, "
++              "but its vocabulary is IDENTICAL to the student's "
++              f"({plan['n_teacher']} ids, all reuse) -- nothing to retag, so the "
++              "role map is vacuous rather than inapplicable")
+     else:
+         raise SystemExit("teacher tokenizer has no <|im_start|>; not a ChatML "
+                          "donor, so the role map below does not apply")

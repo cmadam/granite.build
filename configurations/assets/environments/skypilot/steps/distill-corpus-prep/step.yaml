@@ -35,15 +35,33 @@ config:
     # token that can read this repo is necessarily broad, because the repo is owned
     # by a personal namespace and a fine-grained PAT cannot scope to it at all.
     #
-    # Refresh it in place when the pin below moves; the cluster account has its own
-    # GHE key, so cluster-side `git fetch && git checkout <sha>` needs no secret:
-    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training fetch --all
-    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training checkout <sha>
-    code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training"
+    # A checkout THIS PROJECT CONTROLS, and that is the point of the "-gb" suffix.
+    #
+    # It used to be the shared clone at .../gb-steps-collection-post-training, and
+    # that broke: the shared tree is advanced by its upstream author, and every time
+    # it moves, all six ported steps' expect_ref stops matching and the step exits 1.
+    # It happened mid-build (1820703f): the tree went from 70c1550 to e8b3d9c between
+    # one target and the next, align passed and corpus died on the pin. Reverting the
+    # shared tree is a standoff lost on the next fetch, and the failure looks like a
+    # recipe bug rather than a moved dependency.
+    #
+    # This clone is 70c1550 plus ONE additive commit (09bfcb1) touching only
+    # retag_student.py: an identical student/teacher vocabulary is treated as a
+    # vacuous role map rather than a bad ChatML donor. Only distill-tokenizer-align
+    # calls retag_student, so the other five steps read behaviour byte-identical to
+    # the 70c1550 they pinned before. The patch and its full rationale ship at
+    # steps/distill-tokenizer-align/skypilot/patches/.
+    #
+    # Upstream advances are now taken DELIBERATELY: rebase the patch onto the newer
+    # commit, bump this pin in all six steps together, and re-run the smoke tier.
+    # That is a feature -- a dependency that moves under a running build is not one.
+    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training-gb fetch --all
+    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training-gb rebase <newer>
+    code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
     # The commit code_dir is EXPECTED to be at. Recorded either way, but when this is
     # set and the checkout is at a different commit the step says so loudly rather
     # than training against whatever happens to be checked out. Empty => no check.
-    expect_ref: "70c1550a171aa8e09a9ad9047a5bf763c39e8579"
+    expect_ref: "09bfcb1662529644bd09f620c24293aa43f3b807"
     # OVERRIDE, for a host with no /proj: clone at run time instead. Used ONLY when
     # code_dir does not resolve. https, because the token path below is https-only.
     repo: ""
