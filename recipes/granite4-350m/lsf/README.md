@@ -19,6 +19,25 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 | `sft-10k-eval-test` | SFT (2 epochs) chained to the 27-target eval suite via output binding |
 | `ifrl-smoke`        | IFRL GRPO smoke test (rm-server + code-server + 2-update trainer) |
 | `export-results`    | Copy results from shared FS to the configured output store  |
+| `distill-probe`     | Two-question gate: does the 350m load in the distillation image, and is the tokenizer confound real |
+| `distill-smoke`     | Off-policy GOLD distillation from granite-4.1-3b, end to end at smoke scale (7 targets) |
+| `distill-stage1`    | Off-policy GOLD distillation, the real run: 2 nodes x 8 H100, effective batch 96, 8192 context |
+
+## Distillation
+
+`distill-*` distil the SFT checkpoint towards a `granite-4.1-3b` teacher, rather than
+training it further on hard labels. They reuse the GOLD steps built by epic 61 (see
+`recipes/granite4-gold/lsf/`) against a new pair, and their baseline is the **existing**
+after-SFT eval row — so the student is the SFT checkpoint, and there is no control arm
+because the control was already run and already measured.
+
+Run them in this order, each gating the next:
+
+1. [`distill-probe`](distill-probe/README.md) — ~4 GPU-minutes, nothing trained.
+2. [`distill-smoke`](distill-smoke/README.md) — the full graph at 64 rows and 2 steps.
+3. stage 1 proper — off-policy, one epoch of the SFT mixture.
+4. stage 2 — on-policy on the IFRL and IdentityRL prompt sets, from stage 1's export.
+
 
 ## Defaults are BlueVela-specific
 
