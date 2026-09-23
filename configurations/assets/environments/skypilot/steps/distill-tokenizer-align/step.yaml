@@ -41,7 +41,7 @@ config:
   # test/test_source_contract.py — one contract, learned once. Change it here and
   # the other steps' tests fail until they are changed to match.
   code_config:
-    # THE DEFAULT: a checkout on the shared filesystem, exactly as gold-distill gets
+    # THE DEFAULT: a checkout on the shared filesystem, exactly as distill-gold gets
     # the kd-sandbox trainer from `kd_code_dir`. One pattern in the branch, not two.
     #
     # NO CREDENTIAL REACHES THE CONTAINER on this path, and that is the point. Every
@@ -108,9 +108,9 @@ config:
     setup_command: ""
 
   # ─── Alignment ────────────────────────────────────────────────────────────────
-  # Small and flat, unlike gold-distill's: there is no dataclass on the other side.
+  # Small and flat, unlike distill-gold's: there is no dataclass on the other side.
   # run-align.sh takes nine flags and forwards them to entrypoints whose own
-  # surfaces are equally small, so the flag-drift problem that forced gold-distill
+  # surfaces are equally small, so the flag-drift problem that forced distill-gold
   # to render a YAML file does not exist here. Flags stay flags.
   align_config:
     # Both are DIRECTORY paths, not HF repo ids: the teacher for this pairing is not
@@ -174,7 +174,7 @@ config:
 # ALL THREE artifacts are declared. An undeclared output makes the buildrun resolver
 # drop the NEWARTIFACT event, and the target then completes with no output AND no
 # error — a silent failure that costs a full training run. Their consumers:
-#   retagged_student -> gold-distill's model_name_or_path, and the tokenizer
+#   retagged_student -> distill-gold's model_name_or_path, and the tokenizer
 #                       distill-corpus-prep tokenizes with.
 #   teacher_overlay  -> the teacher tokenizer for the eval steps, kept separate from
 #                       the teacher MODEL path on purpose.

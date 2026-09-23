@@ -1,7 +1,7 @@
 # GOLD distillation smoke recipe
 
 A minutes-long 2-node GOLD run on BlueVela (LSF via SkyPilot), before committing
-to the full multi-hour run. It exercises the `gold-distill` step's plumbing — the
+to the full multi-hour run. It exercises the `distill-gold` step's plumbing — the
 2-node allocation, per-node rank assignment, config rendering inside the container
 against the `/proj` checkout, and checkpoint publication — not the science.
 
@@ -27,7 +27,7 @@ Override any value with `--param KEY=VALUE`. The three headline parameters:
       --space <your-space> \
       --param STUDENT_MODEL=/proj/granite-build/g4os/kd-sandbox/student_overlays/<student> \
       --param TEACHER_MODEL=/proj/granite-build/g4os/kd-sandbox/teacher_overlays/<teacher> \
-      --param TRAINING_DATASET=/proj/granite-build/g4os/gbtest/gold-distill-smoke/<data>_nothink.jsonl
+      --param TRAINING_DATASET=/proj/granite-build/g4os/gbtest/distill-gold-smoke/<data>_nothink.jsonl
 
 ## Changing the pair
 
@@ -35,7 +35,7 @@ This is the one substitution to make carefully, and there are two separate const
 with **opposite** failure behaviour.
 
 Student and teacher must share a tokenizer — identical token IDs, not merely an
-identical vocabulary size. This is a limitation of the `gold-distill` step, not of
+identical vocabulary size. This is a limitation of the `distill-gold` step, not of
 GOLD: upstream GOLD distils across differing tokenizers via its ULD loss, and the
 trainer carries that path, but the step exposes none of its keys. Break this one and
 the trainer **raises** — `verify_tokenizer_consistency()` fails with both sources
@@ -50,7 +50,7 @@ still fail here.
 
 The tokenizer family does not track the version number, so the pairs have to be
 grouped by hand. See
-[Choosing a student/teacher pair](../../../../steps/gold-distill/skypilot/USAGE.md#choosing-a-studentteacher-pair)
+[Choosing a student/teacher pair](../../../../steps/distill-gold/skypilot/USAGE.md#choosing-a-studentteacher-pair)
 in the step's `USAGE.md` for the survey and the grouping command.
 
 ## Lineage
