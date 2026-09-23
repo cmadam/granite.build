@@ -27,7 +27,7 @@ Override any value with `--param KEY=VALUE`. The three headline parameters:
       --space <your-space> \
       --param STUDENT_MODEL=/proj/granite-build/g4os/kd-sandbox/student_overlays/<student> \
       --param TEACHER_MODEL=/proj/granite-build/g4os/kd-sandbox/teacher_overlays/<teacher> \
-      --param TRAINING_DATASET=/proj/granite-build/g4os/gbtest/distill-gold-smoke/<data>_nothink.jsonl
+      --param TRAINING_DATASET=/proj/granite-build/g4os/gbtest/gold-distill-smoke/<data>_nothink.jsonl
 
 ## Changing the pair
 

@@ -46,7 +46,7 @@ STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1
 # both measure nothing and exercise the empty-completion path the trainer had to be
 # patched to survive. Must stay think-filtered: an inline <think>...</think> in an
 # assistant turn breaks gold's completion extraction.
-TRAINING_DATASET: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
+TRAINING_DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
 
 # ─── Training hyperparameters ─────────────────────────────────────────
 NUM_TRAIN_EPOCHS: 1.0
