@@ -266,7 +266,7 @@ granite.build:
                 from transformers import AutoTokenizer, AutoModelForCausalLM
 
                 src, work = sys.argv[1], pathlib.Path(sys.argv[2])
-                corpus = "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
+                corpus = "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
                 N = 200
 
                 rows = []

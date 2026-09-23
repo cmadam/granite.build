@@ -36,7 +36,7 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # exercised either way — so the base student is used here deliberately.
 TEACHER_MODEL: "/proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
 STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
-TRAINING_DATASET: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
+TRAINING_DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
 
 # ─── Training hyperparameters ─────────────────────────────────────────
 # Two steps: one proves the trainer reaches the server, two prove a weight sync
