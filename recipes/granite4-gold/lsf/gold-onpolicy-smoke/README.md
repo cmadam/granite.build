@@ -25,7 +25,7 @@ trainer's allocation to the server's. `t_gen` non-zero says the student really
 generated against that server rather than reading fixed completions — the two numbers
 that are both 0 in an off-policy run. And `t_sync 1.5s` against ~5s of generation says
 the sync is cheap enough to do every step, which is what `vllm_sync_frequency: 1` asks
-for. So the fallback — `gold-distill`'s in-allocation role split — is not needed.
+for. So the fallback — `distill-gold`'s in-allocation role split — is not needed.
 
 Read the NCCL log anyway when something changes. `NCCL_DEBUG: INFO` with `INIT,NET` is
 on deliberately, and `NCCL_TIMEOUT_MS` is 10 minutes rather than the reference hour,

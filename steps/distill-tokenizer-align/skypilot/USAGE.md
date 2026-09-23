@@ -47,7 +47,7 @@ is not comparable across them.
 
 | Artifact | What it is | Consumer |
 |---|---|---|
-| `retagged_student` | the base student re-embedded onto the teacher's tokenizer, with a chat template installed | `gold-distill`'s `model_name_or_path`; the tokenizer `distill-corpus-prep` tokenizes with |
+| `retagged_student` | the base student re-embedded onto the teacher's tokenizer, with a chat template installed | `distill-gold`'s `model_name_or_path`; the tokenizer `distill-corpus-prep` tokenizes with |
 | `teacher_overlay` | the teacher's tokenizer files only, `tokenizer_class` pinned | the teacher tokenizer for the eval steps — kept separate from the teacher MODEL path on purpose |
 | `student_overlay` | the *pre-retag* student's tokenizer files, pinned the same way | `distill-corpus-prep`, as the trustworthy comparison point when it asserts one-tokenizer-per-run |
 
@@ -59,7 +59,7 @@ output *and* no error — a silent failure that costs a full training run.
 
 This step ships **no image and no Python of its own** beyond `src/run-align.sh`. The work is done
 by `gb_steps_post_training.distillation`, which is delivered at run time from a checkout on the
-shared filesystem — the same arrangement `gold-distill` uses for the kd-sandbox trainer.
+shared filesystem — the same arrangement `distill-gold` uses for the kd-sandbox trainer.
 
 **No credential reaches the container.** That is deliberate: every other step in this repo either
 clones nothing or clones a public repo unauthenticated, and granite.build's own private-repo

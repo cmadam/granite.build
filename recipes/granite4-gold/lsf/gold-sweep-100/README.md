@@ -94,7 +94,7 @@ substitute one of the `/proj/granite-build/g4os/kd-sandbox` overlays — the cor
 prepared against this tokenizer relationship, and the step can only run the
 shared-vocabulary JSD path (it exposes none of the trainer's cross-tokenizer `uld_*`
 keys, so pre-alignment is the only route open to it). See
-[Choosing a student/teacher pair](../../../../steps/gold-distill/skypilot/USAGE.md#choosing-a-studentteacher-pair).
+[Choosing a student/teacher pair](../../../../steps/distill-gold/skypilot/USAGE.md#choosing-a-studentteacher-pair).
 
 ## Effective batch
 

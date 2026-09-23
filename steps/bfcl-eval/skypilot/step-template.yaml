@@ -186,7 +186,7 @@ environment_configs:
     monitors:
       skypilot_monitor:
         # Artifact/binding convention from the shipped library, with `periodic` retrieval
-        # for the reason gold-distill and distill-eval override it: generation over a full
+        # for the reason distill-gold and distill-eval override it: generation over a full
         # BFCL corpus runs for hours, and under the default on_completion mode a stalled
         # run looks exactly like a slow one. 900s matches the legacy asset's poll.
         ref: space://monitors/skypilot

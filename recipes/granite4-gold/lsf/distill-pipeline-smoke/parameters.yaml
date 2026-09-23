@@ -91,7 +91,7 @@ STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1
 # trains on, so the schema is known-good. An inline <think>...</think> in an
 # assistant turn breaks GOLD's completion extraction silently, which is what
 # makes the filtering a correctness property and not a preference.
-DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+DATASET: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
 # Relative to the ported steps' code_dir. The one template on this cluster known
 # to carry a real {% generation %} block tag, which is what lets prep measure the
 # completion boundary at all: MEASURED, none of the 13 hand-built /proj overlay

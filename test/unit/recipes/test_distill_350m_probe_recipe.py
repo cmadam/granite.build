@@ -159,7 +159,7 @@ class TestTheProbesAnswerTheirQuestions:
     def test_the_student_probe_tries_both_attention_implementations(self, commands):
         """ "Loads, but FA2 does not resolve" is a different diagnosis from "does not
         load": the first breaks only the SFT-control arm, because sft.py selects FA2
-        for granitemoehybrid and gold-distill never sets attn_implementation."""
+        for granitemoehybrid and distill-gold never sets attn_implementation."""
         cmd = commands["load-student"]
         assert "flash_attention_2" in cmd and "eager" in cmd
         assert "traceback.print_exc()" in cmd, "a failure must print WHY"

@@ -21,7 +21,7 @@ config:
   # test/test_source_contract.py — one contract, learned once. Change it here and
   # the other steps' tests fail until they are changed to match.
   code_config:
-    # THE DEFAULT: a checkout on the shared filesystem, exactly as gold-distill gets
+    # THE DEFAULT: a checkout on the shared filesystem, exactly as distill-gold gets
     # the kd-sandbox trainer from `kd_code_dir`. One pattern in the branch, not two.
     #
     # NO CREDENTIAL REACHES THE CONTAINER on this path, and that is the point. Every
@@ -95,11 +95,11 @@ config:
     # mismatch between what the recipe asked for and what LSF granted is a run that
     # trains at a different effective batch size than the config says.
     gpus_per_node: 8
-    # 1, unlike gold-distill's 2. There is no vLLM server here and no student rollout, so
+    # 1, unlike distill-gold's 2. There is no vLLM server here and no student rollout, so
     # there is no split-role allocation to size. run-sft.sh REFUSES nodes > 1, because it
     # gets no host list and a multi-node accelerate launch would have no main_process_ip,
     # port or machine_rank per node. Lifting that needs the provisioner's RANK/TOTAL_NODES/
-    # MASTER_ADDR fed in exactly as gold-distill does — a deliberate follow-up, not a
+    # MASTER_ADDR fed in exactly as distill-gold does — a deliberate follow-up, not a
     # default.
     nodes: 1
 
@@ -141,14 +141,14 @@ config:
     #     '<|im_start|>assistant\n'  ->  '<|im_start|>assistant'
     #
     # which masks a span one token off, trains, and reports success — measured on
-    # gold-distill (build d8470f14) and fixed there the same way. So this is SINGLE-quoted
+    # distill-gold (build d8470f14) and fixed there the same way. So this is SINGLE-quoted
     # YAML holding a literal backslash-n, which has no trailing whitespace for anything to
     # strip, and the launcher decodes it once inside the container.
     response_template: '<|im_start|>assistant\n'
 
     max_length: 4096
 
-    # ── Optimization. Same keys and same defaults as gold-distill, deliberately: a control
+    # ── Optimization. Same keys and same defaults as distill-gold, deliberately: a control
     # that trains at a different batch size or learning rate than the treatment is not a
     # control.
     per_device_train_batch_size: 1
@@ -242,7 +242,7 @@ environment_configs:
             # NO HF_HUB_OFFLINE: this step LOADS A MODEL, and the `kernels` package resolves
             # kernels-community/causal-conv1d through the Hub API at load time, which offline
             # mode turns into OfflineModeIsEnabled after the load has begun (measured on
-            # distill-eval, build 15267e81). gold-distill, which trains on this same image,
+            # distill-eval, build 15267e81). distill-gold, which trains on this same image,
             # sets HF_HOME and leaves the Hub reachable.
             HF_HOME: /opt/hf-cache
             # Fetch any required hub kernel that is not already in the image's cache,
@@ -413,7 +413,7 @@ environment_configs:
             # trainer through a BARE `accelerate` (ACCELERATE="${ACCELERATE:-accelerate}").
             # Without this the run reaches the launch and dies with
             # `accelerate: command not found`, rc=127, after the model has been resolved
-            # and the kernels fetched (build 75fa47d2). gold-distill exports the same line
+            # and the kernels fetched (build 75fa47d2). distill-gold exports the same line
             # for the same reason; the dispatcher runs this with `bash <file>` (non-login),
             # so the export sticks — a login shell would re-run /etc/profile and drop it.
             export PATH=/stage/.venv/bin:$PATH
@@ -487,7 +487,7 @@ environment_configs:
             echo "GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:${OUT_DIR}"
     monitors:
       skypilot_monitor:
-        # `periodic` retrieval, like gold-distill: a training run lasts far longer than the
+        # `periodic` retrieval, like distill-gold: a training run lasts far longer than the
         # library default on_completion mode surfaces anything for, so a stalled run would
         # look identical to a slow one.
         ref: space://monitors/skypilot
@@ -497,7 +497,7 @@ environment_configs:
             mode: "{{ config.log_retrieval_mode | default('periodic') }}"
             interval_seconds: "{{ config.log_retrieval_interval_seconds | default(900) }}"
           extra_event_configs:
-          # TRL logs a metrics dict, the same shape gold-distill pins against.
+          # TRL logs a metrics dict, the same shape distill-gold pins against.
           - event_type: WORKLOAD_STATUS_EVENT
             line_regex: "'loss':"
             event_fields:
