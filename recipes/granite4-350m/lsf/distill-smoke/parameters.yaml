@@ -112,7 +112,7 @@ STUDENT_MODEL: "/proj/granite-build/g4os/skypilot-test/sft/checkpoints/v0-202605
 # is not meant to be: its content is irrelevant to every question this recipe asks,
 # and its schema is known-good. Stage 1 trains on the raw ancestor of the SFT mixture,
 # which is a different parameter in a different recipe.
-DATASET: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
+DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
 # ABSOLUTE, and granite-native. run-align.sh only prefixes the steps' code_dir when
 # the value is relative, so an absolute path needs no step change.
 #

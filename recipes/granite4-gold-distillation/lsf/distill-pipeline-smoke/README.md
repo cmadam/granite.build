@@ -29,7 +29,7 @@ Override any value with `--param KEY=VALUE`. The pair and the data:
 
     --param TEACHER_MODEL=/proj/granite-build/g4os/kd-sandbox/teacher_overlays/<teacher> \
     --param STUDENT_MODEL=/proj/granite-build/g4os/kd-sandbox/student_overlays/<student> \
-    --param DATASET=/proj/granite-build/g4os/gbtest/distill-gold-smoke/<data>_nothink.jsonl
+    --param DATASET=/proj/granite-build/g4os/gbtest/gold-distill-smoke/<data>_nothink.jsonl
 
 ## Why the targets are in this order
 

@@ -85,7 +85,7 @@ granite.build:
                 zone: "normal"
                 memory: 32
             corpus_config:
-              dataset: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
+              dataset: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
               tokenizer: "{{ bindings.tokenizer.binding.path }}"
               # ABSOLUTE, and not the usual relative-to-workdir value, because the eval
               # target below has to name eval.jsonl and CANNOT compose that path itself:
