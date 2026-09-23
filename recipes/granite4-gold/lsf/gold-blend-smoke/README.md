@@ -29,7 +29,7 @@ shape (rather than nodes carved out of one allocation) was chosen and how it was
 
 `STUDENT_MODEL` here defaults to the same base retagged student `gold-smoke` used —
 correct for a smoke run (the NCCL sync path is exercised regardless of what the student
-generates), but **not** correct for a real blend run. Per `gold-distill`'s own `USAGE.md`
+generates), but **not** correct for a real blend run. Per `distill-gold`'s own `USAGE.md`
 and `gold-onpolicy-smoke`'s README: on-policy/blend should continue from a good off-policy
 checkpoint, not the base student, since a base student generates noise under vLLM.
 
@@ -68,7 +68,7 @@ blend path is genuinely exercised, not just configured.
 
 ## Known gaps (step-level, not fixable from this recipe)
 
-- `gold-distill` has no `seed` key — the trainer's random seed cannot be pinned from a
+- `distill-gold` has no `seed` key — the trainer's random seed cannot be pinned from a
   recipe. Not a blocker for a smoke run; worth raising upstream if exact reproducibility
   across runs matters later.
 - No independent on-policy rollout sampling temperature (`top_p` is the only exposed

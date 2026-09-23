@@ -178,8 +178,8 @@ class TestFlagSurface:
     # run-precompute.sh: the residency preflight runs BEFORE the teacher is loaded, in the
     # template, so a `--check-weight-residency` flag on run-precompute.sh would be one
     # nothing reads -- and test_script_parses_every_flag_the_template_passes below would
-    # then fail on it, correctly. Named after gold-distill's set of the same name. That both
-    # keys are actually wired, switchable and overridable is asserted in gold-distill's
+    # then fail on it, correctly. Named after distill-gold's set of the same name. That both
+    # keys are actually wired, switchable and overridable is asserted in distill-gold's
     # test_weight_residency_contract.py, which owns them across the three steps that carry
     # the preflight.
     STEP_ONLY = ("check_weight_residency", "allow_offline_weights")

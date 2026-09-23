@@ -76,7 +76,7 @@ granite.build:
             corpus_config:
               # A think-filtered conversation JSONL — the same slice the gold smoke recipe
               # trains on, so the schema is known-good.
-              dataset: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+              dataset: "/proj/granite-build/g4os/gbtest/distill-gold-smoke/smoke_2000_nothink.jsonl"
               tokenizer: "{{ bindings.tokenizer.binding.path }}"
               out_dir: "corpus-smoke"
               # Same budget the gold smoke recipe trains at, so this corpus would be

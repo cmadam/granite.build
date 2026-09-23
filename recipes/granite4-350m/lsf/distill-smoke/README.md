@@ -76,7 +76,7 @@ Here it bites both, and align fixes only the student — so `TEACHER_MODEL` must
 pinned copy. See [The pinned teacher](#the-pinned-teacher).
 
 Once both sides are pinned there is no cross-tokenizer problem left, which matters:
-`gold-distill` exposes no `teacher_tokenizer_path` and none of the trainer's `uld_*`
+`distill-gold` exposes no `teacher_tokenizer_path` and none of the trainer's `uld_*`
 keys, so the shared-vocabulary JSD path is the only one reachable from any build.
 
 ### 3. The student is granitemoehybrid

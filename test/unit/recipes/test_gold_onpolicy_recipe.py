@@ -98,7 +98,7 @@ def test_no_single_dollar_substitution_markers():
 def test_three_targets_in_the_expected_roles(targets):
     assert set(targets) == {"vllm-server", "train", "teardown"}
     assert targets["vllm-server"]["steps"][0]["step_uri"] == "space://steps/vllm-server"
-    assert targets["train"]["steps"][0]["step_uri"] == "space://steps/gold-distill"
+    assert targets["train"]["steps"][0]["step_uri"] == "space://steps/distill-gold"
     assert (
         targets["teardown"]["steps"][0]["step_uri"] == "space://steps/skypilot-teardown"
     )
@@ -283,8 +283,8 @@ def test_response_template_transports_its_newline_as_an_escape(targets):
     A real newline here does not survive: gbserver's config fill runs every string
     through Jinja and strips one trailing newline, so the step would receive a
     template with no line boundary and mask loss from the wrong token, silently.
-    gold-distill's renderer decodes the escape in the container. See
-    ../gold-sweep-100/parameters.yaml for the mechanism and test_gold_distill.py
+    distill-gold's renderer decodes the escape in the container. See
+    ../gold-sweep-100/parameters.yaml for the mechanism and test_distill_gold.py
     for the decode."""
     template = _gold(targets)["response_template"]
 

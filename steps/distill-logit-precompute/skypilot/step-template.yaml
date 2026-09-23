@@ -36,7 +36,7 @@ config:
   # test/test_source_contract.py — one contract, learned once. Change it here and
   # the other steps' tests fail until they are changed to match.
   code_config:
-    # THE DEFAULT: a checkout on the shared filesystem, exactly as gold-distill gets
+    # THE DEFAULT: a checkout on the shared filesystem, exactly as distill-gold gets
     # the kd-sandbox trainer from `kd_code_dir`. One pattern in the branch, not two.
     #
     # NO CREDENTIAL REACHES THE CONTAINER on this path, and that is the point. Every
@@ -107,7 +107,7 @@ config:
     hf_home: ""
     # ASSERTED against the GPUs actually visible in the container, not trusted.
     gpus_per_node: 8
-    # 1, and unlike gold-distill's 2 this is not a topology waiting to be filled in.
+    # 1, and unlike distill-gold's 2 this is not a topology waiting to be filled in.
     # run-precompute.sh REFUSES nodes > 1, and here that refusal protects something
     # subtler than a rendezvous: sharding is `i % num_nodes == node_id`, so a single node
     # started under a num_nodes it does not have silently precomputes ONE RESIDUE CLASS of
@@ -155,7 +155,7 @@ config:
     # begins — and it CANNOT cross gbserver's config fill as a real character: Jinja strips
     # exactly one trailing newline from each value, so '<|im_start|>assistant\n' would arrive
     # as '<|im_start|>assistant' and key the index to a span one token off. Measured on
-    # gold-distill (build d8470f14) and carried the same way here: single-quoted YAML holding
+    # distill-gold (build d8470f14) and carried the same way here: single-quoted YAML holding
     # a literal backslash-n, decoded once by the launcher inside the container.
     response_template: '<|im_start|>assistant\n'
 

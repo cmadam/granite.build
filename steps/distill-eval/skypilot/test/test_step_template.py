@@ -100,7 +100,7 @@ class TestLauncher:
         granite 4.x is hybrid Mamba, so loading a MODEL makes the `kernels` package
         resolve kernels-community/causal-conv1d through the Hub API. With
         HF_HUB_OFFLINE=1 that raises OfflineModeIsEnabled *after* the load has begun —
-        measured on build 15267e81. gold-distill, which loads a granite 4.x student and
+        measured on build 15267e81. distill-gold, which loads a granite 4.x student and
         a 30B teacher on this same image, sets HF_HOME and leaves the Hub reachable.
         """
         assert "HF_HUB_OFFLINE" not in launcher["envs"]
@@ -120,7 +120,7 @@ class TestMonitor:
 
     def test_log_retrieval_is_periodic_not_on_completion(self, monitor):
         """on_completion surfaces nothing until the end, so a stalled run looks identical
-        to a slow one — the same reason gold-distill overrides this."""
+        to a slow one — the same reason distill-gold overrides this."""
         assert monitor["config"]["log_retrieval"]["mode"].endswith("'periodic') }}")
 
     def test_the_intervals_are_recipe_overridable(self, monitor):

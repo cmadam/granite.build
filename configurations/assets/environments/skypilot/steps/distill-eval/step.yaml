@@ -22,7 +22,7 @@ config:
   # test/test_source_contract.py — one contract, learned once. Change it here and
   # the other steps' tests fail until they are changed to match.
   code_config:
-    # THE DEFAULT: a checkout on the shared filesystem, exactly as gold-distill gets
+    # THE DEFAULT: a checkout on the shared filesystem, exactly as distill-gold gets
     # the kd-sandbox trainer from `kd_code_dir`. One pattern in the branch, not two.
     #
     # NO CREDENTIAL REACHES THE CONTAINER on this path, and that is the point. Every
@@ -190,7 +190,7 @@ environment_configs:
             # 4.x is hybrid Mamba: at load time the `kernels` package resolves
             # kernels-community/causal-conv1d through the Hub API, so offline mode
             # fails with OfflineModeIsEnabled *after* the load has started (build
-            # 15267e81). gold-distill — the step that demonstrably loads a granite 4.x
+            # 15267e81). distill-gold — the step that demonstrably loads a granite 4.x
             # student and a 30B teacher on this same image — sets HF_HOME and leaves
             # the Hub reachable, so that is the proven configuration and this matches
             # it. distill-logit-precompute will need the same, for the same reason.
@@ -343,7 +343,7 @@ environment_configs:
     monitors:
       skypilot_monitor:
         # Artifact/binding convention from the shipped library, overridden to `periodic`
-        # retrieval for the same reason gold-distill overrides it: a teacher forward pass
+        # retrieval for the same reason distill-gold overrides it: a teacher forward pass
         # over 256 samples is not a seconds-long job, and the default on_completion mode
         # surfaces nothing until the end — so a stalled run looks identical to a slow one.
         ref: space://monitors/skypilot

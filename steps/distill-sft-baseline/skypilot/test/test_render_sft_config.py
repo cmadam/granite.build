@@ -8,7 +8,7 @@ Divergences, all about path resolution rather than behaviour:
   - upstream's sys.path inserts are removed. conftest.py resolves the step's own src/ and
     the shared distillation package (from GB_DISTILL_CODE_DIR).
   - the PARITY TESTS import distill-gold-train's renderer, which granite.build does not
-    contain: this repo's steps/gold-distill ships a DIFFERENT renderer (268 lines against
+    contain: this repo's steps/distill-gold ships a DIFFERENT renderer (268 lines against
     upstream's 575), because it drives kd-sandbox's trainer rather than the vendored
     gb_steps_post_training one. So those tests would be asserting a parity that does not
     exist here.

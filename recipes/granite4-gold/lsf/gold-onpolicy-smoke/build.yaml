@@ -7,7 +7,7 @@
 # weight-sync group span two LSF allocations? On-policy GOLD pushes the student's
 # updated weights to the vLLM server every vllm_sync_frequency step over NCCL, not
 # HTTP, and two targets means two allocations. If it cannot, the fallback is
-# gold-distill's in-allocation role split and this graph is the wrong shape.
+# distill-gold's in-allocation role split and this graph is the wrong shape.
 #
 # THREE TARGETS, and the ordering between them is implicit — there is no depends_on
 # key. A target starts when ALL its input bindings resolve:
@@ -102,7 +102,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/gold-distill
+        - step_uri: space://steps/distill-gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}

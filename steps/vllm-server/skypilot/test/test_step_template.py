@@ -134,7 +134,7 @@ class TestMarkers:
 
     def test_the_advertised_address_is_resolved_not_a_bare_hostname(self, run_script):
         """The consumer is in a DIFFERENT allocation, so the address has to resolve
-        from there. Resolved the way gold-distill resolves MASTER_ADDR, because
+        from there. Resolved the way distill-gold resolves MASTER_ADDR, because
         that is the validated path on this cluster."""
         assert "/etc/hosts" in run_script
         assert "getent ahostsv4" in run_script

@@ -24,7 +24,7 @@ drops the template's. Tests assert both halves: the script prints it, the templa
 ## The monitor is overridden
 
 `log_retrieval.mode` is `periodic`, not the library default `on_completion`, for the same reason
-`gold-distill` overrides it: a teacher forward pass over 256 samples is not a seconds-long job,
+`distill-gold` overrides it: a teacher forward pass over 256 samples is not a seconds-long job,
 and `on_completion` surfaces nothing until the end — so a stalled run looks identical to a slow
 one. Both intervals stay recipe-overridable.
 

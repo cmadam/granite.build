@@ -29,7 +29,7 @@ Override any value with `--param KEY=VALUE`. The pair and the data:
 
     --param TEACHER_MODEL=/proj/granite-build/g4os/kd-sandbox/teacher_overlays/<teacher> \
     --param STUDENT_MODEL=/proj/granite-build/g4os/kd-sandbox/student_overlays/<student> \
-    --param DATASET=/proj/granite-build/g4os/gbtest/gold-distill-smoke/<data>_nothink.jsonl
+    --param DATASET=/proj/granite-build/g4os/gbtest/distill-gold-smoke/<data>_nothink.jsonl
 
 ## Why the targets are in this order
 
@@ -179,11 +179,11 @@ export and never would have.
 Upstream's `distill-gold-train` step takes a `teacher_tokenizer_path` and is given
 `align.teacher_overlay`, because a trainer that loads the teacher tokenizer from
 the teacher *directory* silently re-acquires the `tokenizer_class` trap — it does
-not error, it mis-segments. The `gold-distill` step used here exposes no such key:
+not error, it mis-segments. The `distill-gold` step used here exposes no such key:
 the kd-sandbox trainer reads the teacher tokenizer from `TEACHER_MODEL`. On this
 recipe's pairing that is benign, because the teacher path is itself a prepared
 overlay or a snapshot whose `tokenizer_class` is correct — but it is a real gap,
-and closing it means either a `teacher_tokenizer_path` key on `gold-distill` or
+and closing it means either a `teacher_tokenizer_path` key on `distill-gold` or
 porting upstream's step.
 
 ## Where the results land

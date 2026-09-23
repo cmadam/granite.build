@@ -43,7 +43,7 @@ without `keep_trailing_newline`, so **Jinja strips exactly one trailing newline 
 ```
 
 A run then masks a span one token off, trains, and reports success — nothing errors, no NaN,
-checkpoints written, loss plausible. That was measured on `gold-distill` (build `d8470f14`) and is
+checkpoints written, loss plausible. That was measured on `distill-gold` (build `d8470f14`) and is
 fixed the same way here: the default is **single-quoted YAML holding a literal backslash-n**,
 which has no trailing whitespace for anything to strip, and the launcher decodes it once inside
 the container.
@@ -67,7 +67,7 @@ Source delivery (`code_config`) is identical in every ported distillation step �
 |---|---|---|
 | `hf_home` | `""` | Overrides `HF_HOME` for this step only. |
 | `gpus_per_node` | `8` | **Asserted** against the visible GPUs, not trusted: a mismatch between what the recipe asked for and what LSF granted is a run that trains at a different effective batch size than the config says. |
-| `nodes` | `1` | More is **refused**. The script gets no host list, so a multi-node `accelerate launch` would have no `main_process_ip`, port or `machine_rank` per host. Refusing beats launching one node while reporting N — which would train a control at 1/N of the declared global batch and report the declared one. Lifting it needs the provisioner's `RANK`/`TOTAL_NODES`/`MASTER_ADDR` fed in as `gold-distill` does. |
+| `nodes` | `1` | More is **refused**. The script gets no host list, so a multi-node `accelerate launch` would have no `main_process_ip`, port or `machine_rank` per host. Refusing beats launching one node while reporting N — which would train a control at 1/N of the declared global batch and report the declared one. Lifting it needs the provisioner's `RANK`/`TOTAL_NODES`/`MASTER_ADDR` fed in as `distill-gold` does. |
 
 **`sft_config`** — the keys worth commentary:
 
@@ -78,7 +78,7 @@ Source delivery (`code_config`) is identical in every ported distillation step �
 | `allow_offline_weights` | `false` | Proceed through the refusal, loudly. For when the recall is already under way. |
 | `corpus_path` | `""` | `distill-corpus-prep`'s `corpus`. |
 | `deepspeed_config` | `configs/distillation/deepspeed/accelerate_deepspeed_zero3.yaml` | **Relative resolves against the delivered checkout.** Upstream defaults it to `/opt/distill-sft-baseline/deepspeed/…`, which is that directory copied into *its* image and does not exist in this one. Seven variants ship (zero2, zero3, zero3_offload, zero3_tuned, …), which is why this stays a knob. It is an **accelerate** config, not a bare DeepSpeed one, and it is load-bearing — its own header records a predecessor whose `offload_param  offload_param_device: none` parsed as *one* key, so the setting was silently dead. |
-| `per_device_train_batch_size`, `gradient_accumulation_steps`, `learning_rate`, `seed` | `1`, `8`, `1e-6`, `42` | Same keys and defaults as `gold-distill`, deliberately: a control that trains at a different batch size or learning rate than the treatment is not a control. |
+| `per_device_train_batch_size`, `gradient_accumulation_steps`, `learning_rate`, `seed` | `1`, `8`, `1e-6`, `42` | Same keys and defaults as `distill-gold`, deliberately: a control that trains at a different batch size or learning rate than the treatment is not a control. |
 | `resume` | `auto` | `auto` \| `never` \| `require`. The trainer resumes on the mere **presence** of a checkpoint directory, so this is enforced as preflight validation rather than trusted. |
 | `use_liger_memory_opt` / `use_liger_swiglu_mlp` | `false` / `false` | Rendered as `--flag`/`--no-flag` pairs. **This step is where that house rule was learned**: Jinja renders a YAML boolean with Python casing, so `--use-liger-memory-opt {{ … }}` reached the script as the literal string `False`; nothing errors, and a shell test against `"true"` is then false forever, silently, in both directions. |
 | `extra_config_yaml` | `""` | Escape hatch for the long tail of `CustomSFTConfig`. Merged **under** the explicit keys, so a collision is an error rather than a silent winner. |
@@ -126,7 +126,7 @@ GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 94 ported upstr
 ```
 
 The ported suite includes upstream's parity tests, which compare this renderer against
-`distill-gold-train`'s. That renderer is not in granite.build — `steps/gold-distill` ships a
+`distill-gold-train`'s. That renderer is not in granite.build — `steps/distill-gold` ships a
 different one, because it drives kd-sandbox's trainer — so they are pointed at the **upstream**
 renderer in the delivered checkout. What they then assert is still worth knowing: upstream's
 control and its treatment share their guards, their optimization defaults and their tracking

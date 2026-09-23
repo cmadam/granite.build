@@ -210,8 +210,8 @@ def test_response_template_transports_its_newline_as_an_escape(recipe, tmp_path)
     token off while reporting success.
 
     So the newline crosses the wire as a literal backslash-n, which has no trailing
-    whitespace to strip, and gold-distill's renderer decodes it exactly once at the
-    far end (test_gold_distill.py covers that decode).
+    whitespace to strip, and distill-gold's renderer decodes it exactly once at the
+    far end (test_distill_gold.py covers that decode).
 
     Getting the escape itself through two templating layers is the trap.
     Double-quoted in parameters.yaml, YAML would decode \\n to a real newline here.

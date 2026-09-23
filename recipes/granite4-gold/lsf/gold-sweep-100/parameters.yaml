@@ -114,9 +114,9 @@ USE_LIGER_FUSED_JSD: false
 # Hence SINGLE quotes with a DOUBLED backslash: YAML leaves '\\n' alone, so a
 # literal \n reaches build.yaml's double-quoted scalar, which decodes it to the
 # two characters backslash-n — no trailing whitespace for anything to strip.
-# gold-distill's render_gold_config.py decodes it once, inside the container.
+# distill-gold's render_gold_config.py decodes it once, inside the container.
 # test_gold_sweep_recipe.py asserts the escape survives the render;
-# test_gold_distill.py asserts the decode and that the fill cannot eat it.
+# test_distill_gold.py asserts the decode and that the fill cannot eat it.
 RESPONSE_TEMPLATE: '<|im_start|>assistant\\n'
 
 # ─── NCCL / distributed diagnostics ───────────────────────────────────
