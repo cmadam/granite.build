@@ -13,7 +13,7 @@ show up.
 
 ## Run
 
-    gb build start -f recipes/granite4-gold/lsf/gold-sweep-smoke/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-smoke/build.yaml \
       --space <your-space>
 
 ## What "minutes" means
@@ -60,9 +60,9 @@ published sweep arm set it `true`; this project's own finding is that granite's
 be right for the trainer we run.
 
     # as shipped
-    gb build start -f recipes/granite4-gold/lsf/gold-sweep-smoke/build.yaml --space <space>
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-smoke/build.yaml --space <space>
     # then
-    gb build start -f recipes/granite4-gold/lsf/gold-sweep-smoke/build.yaml --space <space> \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-smoke/build.yaml --space <space> \
       --param USE_LIGER_FUSED_JSD=true --param RUN_NAME=gold-sweep-smoke-liger
 
 `true` is usable only if the loss is finite **and** `beta` demonstrably moves it — upstream

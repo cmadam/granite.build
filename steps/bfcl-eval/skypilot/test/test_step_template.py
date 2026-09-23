@@ -142,7 +142,7 @@ class TestLauncher:
         )
 
     def test_the_monitor_honours_the_keys_the_pipeline_recipe_passes(self, skypilot):
-        """recipes/granite4-gold/lsf/distill-pipeline-smoke passes poll_interval_seconds
+        """recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke passes poll_interval_seconds
         and log_retrieval_interval_seconds to this step. A step that does not thread them
         into its monitor config does not error -- it ignores them, which is how a recipe
         ends up believing it set a poll interval it did not set."""

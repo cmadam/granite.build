@@ -18,7 +18,7 @@ shared Makefile conventions.
 with **no authoring directory**, running
 `docker:us.icr.io/cil15-shared-registry/bfcl-py311:0.02`. That image is IBM-internal and
 cannot be pulled from outside, so the final target of
-`recipes/granite4-gold/lsf/distill-pipeline-smoke` is unrunnable for anyone without ICR
+`recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke` is unrunnable for anyone without ICR
 access. This step is the public replacement: same config surface, image built from public
 bases, harness version pinned in [`uv.lock`](uv.lock) rather than baked into an opaque tag.
 

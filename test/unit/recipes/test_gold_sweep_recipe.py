@@ -42,7 +42,7 @@ import yaml
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
 
-_LSF = pathlib.Path(__file__).resolve().parents[3] / "recipes" / "granite4-gold" / "lsf"
+_LSF = pathlib.Path(__file__).resolve().parents[3] / "recipes" / "granite4-gold-distillation" / "lsf"
 
 _RECIPES = ("gold-sweep-100", "gold-sweep-smoke")
 

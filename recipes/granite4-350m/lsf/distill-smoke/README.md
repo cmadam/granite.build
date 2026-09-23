@@ -1,6 +1,6 @@
 # distill-smoke — granite4-350m distillation, end to end, at smoke scale
 
-[`distill-pipeline-smoke`](../../../granite4-gold/lsf/distill-pipeline-smoke/README.md)'s
+[`distill-pipeline-smoke`](../../../granite4-gold-distillation/lsf/distill-pipeline-smoke/README.md)'s
 seven-target graph retargeted from the 4.1-3b/4.2-30b reference pair to ours:
 
 | | |
