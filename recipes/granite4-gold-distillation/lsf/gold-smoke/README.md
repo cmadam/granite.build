@@ -12,18 +12,18 @@ context, `save_steps: 10`. The model pair is not — see below.
 
 `parameters.yaml` sits next to `build.yaml`, so it is picked up automatically:
 
-    gb build start -f recipes/granite4-gold/lsf/gold-smoke/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-smoke/build.yaml \
       --space <your-space>
 
 Explicitly, or to point at a different parameter set:
 
-    gb build start -f recipes/granite4-gold/lsf/gold-smoke/build.yaml \
-      --parameters-path recipes/granite4-gold/lsf/gold-smoke/parameters.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-smoke/build.yaml \
+      --parameters-path recipes/granite4-gold-distillation/lsf/gold-smoke/parameters.yaml \
       --space <your-space>
 
 Override any value with `--param KEY=VALUE`. The three headline parameters:
 
-    gb build start -f recipes/granite4-gold/lsf/gold-smoke/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-smoke/build.yaml \
       --space <your-space> \
       --param STUDENT_MODEL=/proj/granite-build/g4os/kd-sandbox/student_overlays/<student> \
       --param TEACHER_MODEL=/proj/granite-build/g4os/kd-sandbox/teacher_overlays/<teacher> \

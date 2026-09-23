@@ -43,7 +43,7 @@ from gbcli.utils.buildutil import apply_parameters
 _RECIPE = (
     pathlib.Path(__file__).resolve().parents[3]
     / "recipes"
-    / "granite4-gold"
+    / "granite4-gold-distillation"
     / "lsf"
     / "distill-pipeline-smoke"
 )

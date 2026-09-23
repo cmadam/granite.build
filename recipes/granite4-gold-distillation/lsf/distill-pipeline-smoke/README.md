@@ -17,12 +17,12 @@ rows.
 
 `parameters.yaml` sits next to `build.yaml`, so it is picked up automatically:
 
-    gb build start -f recipes/granite4-gold/lsf/distill-pipeline-smoke/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke/build.yaml \
       --space <your-space>
 
 With the SFT arm:
 
-    gb build start -f recipes/granite4-gold/lsf/distill-pipeline-smoke/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke/build.yaml \
       --space <your-space> --param INCLUDE_SFT=true
 
 Override any value with `--param KEY=VALUE`. The pair and the data:
