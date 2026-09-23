@@ -39,7 +39,7 @@ For a real run:
    path (`$GB_BUILD_WORKDIR/checkpoints/<run_name>_node<N>`).
 2. Pass that path into this recipe:
    ```
-   gb build start -f recipes/granite4-gold/lsf/gold-onpolicy-full-smoke/build.yaml \
+   gb build start -f recipes/granite4-gold-distillation/lsf/gold-onpolicy-full-smoke/build.yaml \
      --param STUDENT_MODEL=<off-policy checkpoint path>
    ```
 
@@ -50,7 +50,7 @@ another).
 ## Run
 
 ```
-gb build start -f recipes/granite4-gold/lsf/gold-onpolicy-full-smoke/build.yaml --space <your-space>
+gb build start -f recipes/granite4-gold-distillation/lsf/gold-onpolicy-full-smoke/build.yaml --space <your-space>
 ```
 
 Override any value with `--param KEY=VALUE`.

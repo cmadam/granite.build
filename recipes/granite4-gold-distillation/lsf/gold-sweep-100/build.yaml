@@ -1,29 +1,29 @@
 ######
-# gold-sweep-smoke — GOLD knowledge distillation for BlueVela (SkyPilot / LSF).
+# gold-sweep-100 — GOLD knowledge distillation for BlueVela (SkyPilot / LSF).
 #
-# The minutes-long gate for gold-sweep-100. Same SHAPE — step-bounded, one node, the
-# real prepped corpus and retagged student — with only the cost shrunk.
+# The lambda=0.0 off-policy arm of the 100-step sweep: 100 optimizer steps over the
+# full 802,027-row corpus at effective batch 192. Roughly 1.9 h on one 8xH100 node.
 #
 # One target. Values come from parameters.yaml beside this file; the comments
 # explaining WHY each value is what it is live there.
 #
-# This build.yaml is IDENTICAL to its sibling gold-sweep-100/build.yaml apart from the
+# This build.yaml is IDENTICAL to its sibling gold-sweep-smoke/build.yaml apart from the
 # build and target name — the two recipes are one arm at two scales and differ
 # only in parameters.yaml. test_gold_sweep_recipe.py asserts that equivalence, so
 # the pair cannot drift.
 #
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-gold/lsf/gold-sweep-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-100/build.yaml --space <space>
 #
 # Explicitly, or with a different parameter set:
-#   gb build start -f recipes/granite4-gold/lsf/gold-sweep-smoke/build.yaml \
-#     --parameters-path recipes/granite4-gold/lsf/gold-sweep-smoke/parameters.yaml \
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-100/build.yaml \
+#     --parameters-path recipes/granite4-gold-distillation/lsf/gold-sweep-100/parameters.yaml \
 #     --space <space>
 ######
 granite.build:
-  name: gold-sweep-smoke
+  name: gold-sweep-100
   targets:
-    gold-sweep-smoke:
+    gold-sweep-100:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       # The teacher, the student and the dataset, recorded as lineage inputs. These
       # are what make the three appear as this target's inputs in `gb build status`

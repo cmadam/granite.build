@@ -18,7 +18,7 @@ an OOM costs minutes instead of two hours.
 
 `parameters.yaml` sits next to `build.yaml`, so it is picked up automatically:
 
-    gb build start -f recipes/granite4-gold/lsf/gold-sweep-100/build.yaml \
+    gb build start -f recipes/granite4-gold-distillation/lsf/gold-sweep-100/build.yaml \
       --space <your-space>
 
 Override any value with `--param KEY=VALUE`.

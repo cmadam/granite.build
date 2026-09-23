@@ -28,7 +28,7 @@
 # run) has produced one.
 #
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-gold/lsf/gold-onpolicy-full-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-onpolicy-full-smoke/build.yaml --space <space>
 ######
 granite.build:
   name: gold-onpolicy-full-smoke

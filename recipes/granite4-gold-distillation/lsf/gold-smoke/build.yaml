@@ -5,11 +5,11 @@
 # explaining WHY each value is what it is live there.
 #
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-gold/lsf/gold-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-smoke/build.yaml --space <space>
 #
 # Explicitly, or with a different parameter set:
-#   gb build start -f recipes/granite4-gold/lsf/gold-smoke/build.yaml \
-#     --parameters-path recipes/granite4-gold/lsf/gold-smoke/parameters.yaml \
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-smoke/build.yaml \
+#     --parameters-path recipes/granite4-gold-distillation/lsf/gold-smoke/parameters.yaml \
 #     --space <space>
 ######
 granite.build:

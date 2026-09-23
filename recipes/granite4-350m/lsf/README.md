@@ -27,7 +27,7 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 
 `distill-*` distil the SFT checkpoint towards a `granite-4.1-3b` teacher, rather than
 training it further on hard labels. They reuse the GOLD steps built by epic 61 (see
-`recipes/granite4-gold/lsf/`) against a new pair, and their baseline is the **existing**
+`recipes/granite4-gold-distillation/lsf/`) against a new pair, and their baseline is the **existing**
 after-SFT eval row — so the student is the SFT checkpoint, and there is no control arm
 because the control was already run and already measured.
 

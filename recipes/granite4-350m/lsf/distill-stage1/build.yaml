@@ -2,7 +2,7 @@
 # distill-smoke — the granite4-350m distillation pipeline, end to end, at smoke
 # scale, on BlueVela (SkyPilot / LSF).
 #
-# This is recipes/granite4-gold/lsf/distill-pipeline-smoke retargeted from the
+# This is recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke retargeted from the
 # 4.1-3b/4.2-30b reference pair to OUR pair: the granite-4.0-350m SFT checkpoint as
 # student, granite-4.1-3b as teacher. It exists to clear three things that the
 # reference pair never exercised, for minutes rather than for a four-hour stage-1

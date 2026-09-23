@@ -21,7 +21,7 @@ granite.build:
     gold-smoke:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       # The pair and the dataset as lineage inputs — the same three the
-      # recipes/granite4-gold/lsf/gold-smoke recipe declares, with literal paths
+      # recipes/granite4-gold-distillation/lsf/gold-smoke recipe declares, with literal paths
       # because the build-test harness passes no parameters file. env:// pulls are
       # shared-FS no-ops, so these register three input artifacts and add no step.
       inputs:

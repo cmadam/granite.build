@@ -1,13 +1,14 @@
 ######
-# gold-onpolicy-smoke — on-policy GOLD distillation for BlueVela (SkyPilot / LSF),
-# with vLLM as a SEPARATE target rather than nodes carved out of the trainer's
-# allocation.
+# gold-blend-smoke — on-policy-blended GOLD distillation (lmbda 0.3) for BlueVela
+# (SkyPilot / LSF), with vLLM as a SEPARATE target rather than nodes carved out of
+# the trainer's allocation.
 #
-# NOT YET RUN. This recipe exists to answer one question: can the trainer's NCCL
-# weight-sync group span two LSF allocations? On-policy GOLD pushes the student's
-# updated weights to the vLLM server every vllm_sync_frequency step over NCCL, not
-# HTTP, and two targets means two allocations. If it cannot, the fallback is
-# distill-gold's in-allocation role split and this graph is the wrong shape.
+# Same three-target shape as gold-onpolicy-smoke (which proved this shape works:
+# build 9973e766 synced all 362 parameter tensors over NCCL across two LSF
+# allocations). This recipe swaps in the shared-path granite-4.2-30b/granite-4.1-3b
+# pair that gold-smoke already proved end to end (build 86ccd562, off-policy,
+# loss 0.282, checkpoint saved) and sets lmbda to 0.3 — the blended arm, where the
+# student generates 30% of the time and trains on the fixed corpus the rest.
 #
 # THREE TARGETS, and the ordering between them is implicit — there is no depends_on
 # key. A target starts when ALL its input bindings resolve:
@@ -20,11 +21,17 @@
 # health gate. teardown waits for the checkpoint, which the trainer emits as its
 # last log line, and for the cluster name.
 #
+# STUDENT_MODEL should be a good off-policy checkpoint for a real blend run (see
+# gold-onpolicy-smoke's README, "What a real on-policy run would change"), not the
+# base retagged student this smoke defaults to — pass one via
+# --param STUDENT_MODEL=<checkpoint path> once gold-smoke (or a longer off-policy
+# run) has produced one.
+#
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-gold/lsf/gold-onpolicy-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-gold-distillation/lsf/gold-blend-smoke/build.yaml --space <space>
 ######
 granite.build:
-  name: gold-onpolicy-smoke
+  name: gold-blend-smoke
   targets:
 
     # ── The server ────────────────────────────────────────────────────────────
@@ -38,13 +45,13 @@ granite.build:
         # {{ bindings.<x>.binding.state }}. No `type` and no store_push: nothing
         # is transferred.
         vllm_url:
-          uri: "mem://gold-onpolicy-vllm"
+          uri: "mem://gold-blend-vllm"
         # For teardown. LSF SERVICE clusters never autostop (the provisioner
         # refuses idle_minutes_to_autostop for SSH/HPC clouds) and never get a
         # terminal-status cleanup, so without this the allocation is held until
         # someone runs `sky down` by hand.
         cluster_name:
-          uri: "mem://gold-onpolicy-vllm-cluster"
+          uri: "mem://gold-blend-vllm-cluster"
       steps:
         - step_uri: space://steps/vllm-server
           config:
@@ -62,9 +69,10 @@ granite.build:
                 zone: "$${QUEUE}"
             vllm_config:
               kd_code_dir: "$${KD_CODE_DIR}"
-              # The STUDENT. On-policy GOLD has the student generate and the
-              # teacher score those generations, so serving the teacher here would
-              # be a different algorithm that still runs and still reports a loss.
+              # The STUDENT. On-policy/blended GOLD has the student generate and
+              # the teacher score those generations, so serving the teacher here
+              # would be a different algorithm that still runs and still reports
+              # a loss.
               model_path: "$${STUDENT_MODEL}"
               port: $${VLLM_PORT}
               # Must be >= the trainer's max_length, or a prompt the trainer
@@ -73,8 +81,7 @@ granite.build:
               health_timeout_seconds: $${VLLM_HEALTH_TIMEOUT_SECONDS}
               # The server's own ceiling on holding its node. teardown is gated on
               # train.checkpoint, which a crashed trainer never emits, so without
-              # this a trainer failure strands the allocation — as it did in
-              # d77546a9. Must exceed the health timeout above.
+              # this a trainer failure strands the allocation.
               max_lifetime_seconds: $${VLLM_MAX_LIFETIME_SECONDS}
 
     # ── The trainer ───────────────────────────────────────────────────────────

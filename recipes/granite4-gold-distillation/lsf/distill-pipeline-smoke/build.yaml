@@ -34,10 +34,10 @@
 # parameters bare (WORKDIR_ROOT, not the marker form) and carry no block tags.
 #
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-gold/lsf/distill-pipeline-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke/build.yaml --space <space>
 #
 # With the SFT arm:
-#   gb build start -f recipes/granite4-gold/lsf/distill-pipeline-smoke/build.yaml \
+#   gb build start -f recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke/build.yaml \
 #     --param INCLUDE_SFT=true --space <space>
 ######
 granite.build:
