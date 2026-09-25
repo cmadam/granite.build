@@ -89,6 +89,25 @@ def find_mmlsattr() -> str | None:
     return fallback if os.access(fallback, os.X_OK) else None
 
 
+def mmlsattr_env(mm: str) -> dict[str, str]:
+    """The environment to run `mm` in: this one, with GPFS's own lib/ on LD_LIBRARY_PATH.
+
+    mmlsattr links libgpfs.so, which a GPFS host resolves through /lib64/libgpfs.so -- a
+    symlink into /usr/lpp/mmfs/lib that exists on the HOST only. Inside the step's container,
+    with /usr/lpp/mmfs bind-mounted, the tool is found and then fails to load (rc 127), and
+    every file silently falls back to the weaker instrument. Measured on BlueVela,
+    2026-09-25: the same bind mount answers `Misc attributes: ARCHIVE` once the lib/ beside
+    the tool's bin/ is on the path. Derived from where the tool actually resolves, not
+    hardcoded, and added only if it exists -- elsewhere this is a no-op.
+    """
+    env = dict(os.environ)
+    lib = Path(os.path.realpath(mm)).parent.parent / "lib"
+    if lib.is_dir():
+        prior = env.get("LD_LIBRARY_PATH")
+        env["LD_LIBRARY_PATH"] = f"{lib}:{prior}" if prior else str(lib)
+    return env
+
+
 def parse_misc_attributes(text: str) -> set[str] | None:
     """The tokens of `mmlsattr -L`'s `Misc attributes:` field, or None if absent.
 
@@ -109,7 +128,12 @@ def attrs_of(real: str, mm: str | None) -> tuple[set[str] | None, str]:
     try:
         # Metadata only: -L reads the inode's attributes and does not stage data in.
         out = subprocess.run(
-            [mm, "-L", real], capture_output=True, text=True, timeout=60, check=False
+            [mm, "-L", real],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env=mmlsattr_env(mm),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, f"mmlsattr failed: {type(exc).__name__}"
