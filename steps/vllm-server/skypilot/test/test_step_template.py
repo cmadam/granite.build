@@ -132,6 +132,11 @@ class TestReadinessGate:
         for branch in ("$MAX_LIFETIME", "else"):
             assert branch in tail
 
+    def test_the_lifetime_cap_defaults_off(self, step):
+        """Every recipe that does not set it runs for hours and is torn down by
+        its teardown target; a default cap would kill those servers mid-run."""
+        assert step["config"]["vllm_config"]["max_lifetime_seconds"] == 0
+
 
 class TestMarkers:
     def test_both_use_the_shipped_generic_artifact_rule(self, run_script):
