@@ -5,12 +5,14 @@
 # first. The baseline this is measured against is the EXISTING after-SFT eval row,
 # which is why the student is the SFT checkpoint and there is no control arm.
 #
-# This recipe's subject is the PLUMBING of the chain — align -> corpus ->
-# [train-sft] -> train-gold -> export -> eval-transfer x2 -> eval-bfcl — not the
-# science. Every value below is chosen to make a wrong path, a missing artifact
-# or a disagreement between two steps cost minutes instead of hours. Nothing it
-# produces is a publishable measurement, and the transfer numbers it reports are
-# from a handful of optimizer steps over 48 rows.
+# SUPERSEDED BY distill-stage1-v2, which is what to run. This configuration produced
+# build df8512e0: a clean 13h20 run and a model worse on all 30+ benchmarks measured.
+#
+# The paragraph that stood here was the smoke recipe's, inherited by copy and never
+# rewritten: it described a plumbing check over 48 rows whose numbers were not a
+# measurement. That was false of this file the moment TARGET_ROWS became 800,000, and
+# three comments further down were false in the same way -- they are corrected below
+# rather than deleted, because each one misdescribes a value that is load-bearing.
 #
 # Override any value with: gb build start --param KEY=VALUE
 
@@ -289,8 +291,9 @@ RESPONSE_TEMPLATE: '<|start_of_role|>assistant<|end_of_role|>'
 # than in the optimiser.
 SFT_LEARNING_RATE: "1.0e-05"
 SFT_NUM_TRAIN_EPOCHS: 1
-# Effective batch 1 x 8 x 1 x 1 = 8 over 48 rows, i.e. six optimizer steps: a
-# few minutes, and long enough to produce a trajectory.
+# Inherited from the smoke tier and NOT sized for this corpus: the SFT arm is off here
+# (INCLUDE_SFT false) and would be a full pass over TARGET_ROWS rows on one GPU if it
+# were switched on.
 SFT_PER_DEVICE_TRAIN_BATCH_SIZE: 1
 SFT_GRADIENT_ACCUMULATION_STEPS: 8
 SFT_NUM_GPUS: 1
@@ -310,7 +313,6 @@ CHAT_TEMPLATE_THINKING: "keep"
 # All four metrics in one forward pass. entropy alone would not exercise the
 # teacher-dependent reductions, which are the point of the step.
 EVAL_METRICS: "jsd,kld,rkld,entropy"
-# 8 of the 16 held-out rows. Proving the wiring, not producing a measurement.
 # 256, the step's own default: this is a real read, not a plumbing check. Drawn with
 # the seed rather than taken as a prefix.
 EVAL_MAX_SAMPLES: 256
@@ -323,9 +325,10 @@ MAX_INCOMPLETE_FRACTION: 0.25
 EVAL_NUM_GPUS: 1
 
 # ─── BFCL ─────────────────────────────────────────────────────────────
-# ONE category, not "all": the full suite is hours of generation and this recipe
-# is asking whether the harness accepts the exported model at all. Expect a poor
-# score — the model underneath it has taken two optimizer steps.
+# ONE category, not "all": the full suite is hours of generation and this target is
+# asking whether the harness accepts the exported model at all. The real BFCL number
+# comes from full-eval on the exported model, which also yields the 27-benchmark row
+# comparable to the baseline.
 BFCL_TEST_CATEGORIES: "simple"
 BFCL_EVAL_NAME: "bfclv3"
 # The harness's own model handler name, which is what selects the prompt format.
@@ -336,10 +339,6 @@ BFCL_NUM_GPUS: 1
 BFCL_GPU_MEMORY_UTILIZATION: "0.5"
 
 # ─── Topology and resources ───────────────────────────────────────────
-# One node, two GPUs for GOLD. A 3B teacher and a 3B student under ZeRO-3 at 4096
-# context fit comfortably; two rather than one so the distributed path (and the
-# per-rank checkpoint files the export has to tolerate) is exercised rather than
-# skipped.
 # TWO nodes. Off-policy GOLD is pure data parallelism -- no vLLM server, no weight
 # sync, no generation -- so it scales well, and gold-smoke has proven a 2-node
 # allocation while the upstream reference ran 4. It halves wall clock at the same
@@ -373,10 +372,15 @@ CLUSTER: "bluevela"
 QUEUE: "normal"
 
 # ─── NCCL / distributed diagnostics ───────────────────────────────────
-# Single node, so there are no cross-node collectives to diagnose and INFO would
-# only add noise. Monitoring stays on (hard-wired in the build): with it off a
-# deadlock does not fail, it hangs holding the allocation and produces nothing to
-# read.
+# Empty, and that cost a run. This is a TWO-node allocation, so cross-node collectives
+# are exactly what there is to diagnose: build 8f02b739 hung at step 219 in the ZeRO-3
+# parameter all-gather and left no INIT,NET trace to take to the cluster admins, so it
+# had to be cancelled and relaunched with --param NCCL_DEBUG=INFO at the cost of 45-60
+# minutes of redone sources + align + corpus. distill-stage1-v2 defaults it to INFO.
+# The comment that stood here claimed a single node and no collectives to diagnose.
+#
+# Monitoring stays on (hard-wired in the build): with it off a deadlock does not fail,
+# it hangs holding the allocation and produces nothing to read.
 NCCL_DEBUG: ""
 NCCL_DEBUG_SUBSYS: "INIT,NET"
 # 10 minutes, not the reference hour: a smoke run wants a fast failure.

@@ -1,6 +1,17 @@
 ######
-# distill-smoke — the granite4-350m distillation pipeline, end to end, at smoke
-# scale, on BlueVela (SkyPilot / LSF).
+# distill-stage1 — off-policy GOLD for the granite4-350m pair, one epoch of the SFT
+# mixture, on BlueVela (SkyPilot / LSF).
+#
+# SUPERSEDED BY distill-stage1-v2. This ran as build df8512e0 and produced a model worse
+# on every one of the 30+ benchmarks measured (HumanEval 40.85 -> 0.61, MultiPL-E Java
+# 21.05 -> 0.00). Nothing here is broken: the objective has no ground-truth term, the
+# student had already nearly satisfied it, and one epoch gave entropy reduction 7,640
+# steps to be the only descent direction left. It is kept as the record of what ran.
+# Run ../distill-stage1-v2 instead.
+#
+# The header below is the smoke recipe's, which this file was copied from and which was
+# never rewritten -- the three things it says this recipe exists to clear are real and
+# were cleared, but they were cleared by distill-smoke, at 64 rows.
 #
 # This is recipes/granite4-gold/lsf/distill-pipeline-smoke retargeted from the
 # 4.1-3b/4.2-30b reference pair to OUR pair: the granite-4.0-350m SFT checkpoint as
@@ -54,7 +65,7 @@
 # parameters bare (WORKDIR_ROOT, not the marker form) and carry no block tags.
 #
 # Run (parameters.yaml is picked up automatically because it sits next to this file):
-#   gb build start -f recipes/granite4-350m/lsf/distill-smoke/build.yaml --space <space>
+#   gb build start -f recipes/granite4-350m/lsf/distill-stage1/build.yaml --space <space>
 #
 # The SFT arm stays OFF here and in stage 1. The student already IS an SFT
 # checkpoint — two epochs of it — and its eval row is the baseline this work is
@@ -62,7 +73,7 @@
 # model. See the README.
 ######
 granite.build:
-  name: distill-350m-smoke
+  name: distill-350m-stage1
   # A retry is here because of a MEASURED cluster fault, not as general
   # insurance. Builds 7853d33b and b5f030cd lost three GPU targets to
   # `RuntimeError: CUDA unknown error` raised inside torch at cuda_init, every
