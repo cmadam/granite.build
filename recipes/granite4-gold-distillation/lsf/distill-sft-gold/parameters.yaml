@@ -56,14 +56,18 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # than pulled fresh, since re-downloading a 30B model buys nothing a
 # known-good snapshot doesn't already have.
 TEACHER_MODEL_URI: "env:///proj/data-eng/hew/.cache/hf/hub/models--ibm-granite--granite-4.2-30b/snapshots/a0057a78b9d98a88aba90b6ef6e00d292440a222"
-# The student is pulled GENUINELY RAW from the Hub — not a pre-baked retag —
-# and align (this recipe's own target) re-embeds it onto the teacher's
-# tokenizer. No path to a raw granite-4.1-3b-base directory exists anywhere
-# on BlueVela's shared filesystem as recorded in this repo; every /proj path
-# under that name is already someone else's retag/overlay product, and
-# reusing one of those would make align's retag step a no-op while still
-# paying for it.
-STUDENT_MODEL_URI: "hf:///ibm-granite/granite-4.1-3b-base"
+# Pulling the genuinely raw base model fresh via hf:///ibm-granite/granite-4.1-3b-base
+# was tried and reverted: the built-in hfpull step has no image_id (unlike
+# every other step here) and fails during SkyPilot's setup phase installing
+# huggingface_hub on the bare LSF-provisioned node (JobStatus.FAILED_SETUP,
+# retried 3x, no further detail captured) — a real, separate bug in
+# gbserver's hfpull builtin, not something this recipe's parameters can work
+# around. Until that step is fixed, this reuses gold-sweep-100's own
+# pre-baked retagged student instead. align (this recipe's own target)
+# therefore retags an ALREADY-retagged student, which is a no-op that still
+# costs the align step's runtime — see build.yaml's header if you want to
+# skip align once hfpull is fixed and a raw student can be pulled directly.
+STUDENT_MODEL_URI: "env:///proj/data-eng/hew/gb-steps-collection-post-training/data/distillation/work/model_copies/granite-4.1-3b-base_retagged_v2"
 # The chat template installed on the retagged student. align's own default
 # (a path relative to the ported step's code checkout) is currently BROKEN —
 # the public gb-steps-distillation repo this step now clones does not ship

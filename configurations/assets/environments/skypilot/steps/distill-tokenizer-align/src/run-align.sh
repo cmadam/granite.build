@@ -190,6 +190,92 @@ fi
 
 mkdir -p "$OUT_DIR"
 
+# ---------------------------------------------------------- already-retagged input
+# retag_student.py writes retag_manifest.json into its OWN --out directory (see its tail),
+# naming the student and teacher it was given. So that file's presence in STUDENT_MODEL is
+# not a guess -- it is retag_student.py's own signature -- and it means STUDENT_MODEL is
+# already somebody's retagged_student output, not a raw base model.
+#
+# Retagging such a directory AGAIN is not idempotent: the second retag's chat_template
+# install lands on a tokenizer that may already carry a different installed template from
+# its first retag, and stage [4/4]'s masking-contract derivation can then disagree with
+# itself about where assistant spans start (measured: probe "two assistant turns, mixed
+# [thinking=True]" disagreed at [96] vs [96, 158] retagging an already-retagged
+# granite-4.1-3b-base against granite-4.2-30b). The fix is not to make the second retag's
+# verification pass -- it is to never do a second retag: reuse the recorded output as-is.
+#
+# [4/4] masking contract still RUNS here, unlike the retag -- it is not skipped. It only
+# reads the tokenizer that is about to be reused and derives masking.json from whatever
+# template is already installed; it writes nothing back into the tokenizer, so it carries
+# none of the double-retag risk above. align_state.declared_outputs() also requires it
+# unconditionally whenever a chat_template is given (see align_state.py), so a retagged
+# student pre-dating this masking step (recorded via retag_manifest.json but built before
+# masking.json existed) would otherwise fail mark() with a FileNotFoundError.
+if [[ -f "${STUDENT_MODEL}/retag_manifest.json" ]]; then
+  echo
+  echo "--- [skip] ${STUDENT_MODEL} already carries retag_manifest.json"
+  echo "  This student is already a distill-tokenizer-align output, not a raw base model."
+  echo "  Skipping [3/4] retag -- re-retagging an already-retagged student is not"
+  echo "  idempotent and can produce a masking contract that disagrees with itself."
+  echo "  Reusing ${STUDENT_MODEL} as this run's retagged_student unchanged."
+  case "$COPY_MODE" in
+    copy)     cp -a "${STUDENT_MODEL}/." "${RETAGGED}/" ;;
+    hardlink) mkdir -p "${RETAGGED}"; cp -al "${STUDENT_MODEL}/." "${RETAGGED}/" ;;
+    *)        echo "ERROR: unknown --copy-mode ${COPY_MODE}" >&2; exit 2 ;;
+  esac
+
+  echo
+  echo "--- [skip] teacher overlay -> ${TEACHER_OVERLAY}"
+  "$PYBIN" -m "${PKG}.build_overlay" \
+    --source "$TEACHER_MODEL" --out "$TEACHER_OVERLAY" \
+    --copy-mode "$COPY_MODE" "$(verify_flag)" "$(chatml_flag)"
+
+  echo
+  echo "--- [skip] student overlay -> ${STUDENT_OVERLAY}"
+  "$PYBIN" -m "${PKG}.build_overlay" \
+    --source "$STUDENT_MODEL" --out "$STUDENT_OVERLAY" \
+    --copy-mode "$COPY_MODE" "$(verify_flag)" --no-require-chatml
+
+  # tokenizer_identity.write() was added to retag_student.py after some already-retagged
+  # students (this one included) were produced, so retag_manifest.json's presence does not
+  # guarantee tokenizer_identity.json's -- and align_state.declared_outputs() requires the
+  # latter unconditionally (measured: FileNotFoundError on exactly this file). Backfilling
+  # it needs no retag: the identity is a name derived from the TEACHER plus a hash of the
+  # tokenizer already sitting in $RETAGGED, so this only records a fact about bytes that
+  # are not changing here.
+  if [[ ! -f "${RETAGGED}/tokenizer_identity.json" ]]; then
+    echo
+    echo "--- [skip] backfilling tokenizer_identity.json (absent on this older retag)"
+    "$PYBIN" -c "
+from pathlib import Path
+from gb_steps_post_training.distillation import tokenizer_identity
+identity = tokenizer_identity.derive_name(Path('${TEACHER_MODEL}'))
+dest = tokenizer_identity.write(
+    Path('${RETAGGED}'), identity,
+    produced_by='distill-tokenizer-align/run-align.sh (skip path)',
+    student='${STUDENT_MODEL}',
+    teacher='${TEACHER_MODEL}',
+)
+print(f'  recorded tokenizer identity {identity!r} -> {dest}')
+"
+  fi
+
+  if [[ -n "$CHAT_TEMPLATE" ]]; then
+    echo
+    echo "--- [4/4] masking contract -> ${RETAGGED}/masking.json"
+    "$PYBIN" -m "${PKG}.masking" emit --tokenizer "$RETAGGED"
+  else
+    echo "--- [4/4] masking contract: SKIPPED, no chat template was installed" >&2
+  fi
+
+  echo
+  echo "--- marking complete"
+  "$PYBIN" -m "${PKG}.align_state" mark "${STATE_ARGS[@]}"
+
+  publish_artifacts
+  exit 0
+fi
+
 echo
 echo "--- [1/4] teacher overlay -> ${TEACHER_OVERLAY}"
 "$PYBIN" -m "${PKG}.build_overlay" \

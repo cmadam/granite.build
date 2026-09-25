@@ -23,9 +23,12 @@
 # align -> corpus is not optional: the corpus must be measured with the tokenizer
 # that will train (lengths and the assistant-mask check are counted in tokens),
 # and corpus-prep needs align's chat template to locate assistant spans at all.
-# align's STUDENT_MODEL_URI pulls the genuinely raw granite-4.1-3b-base fresh
-# from the Hub and re-embeds it onto the teacher's tokenizer here, in this
-# recipe — there is no pre-baked retagged student this build depends on.
+# STUDENT_MODEL_URI currently points at gold-sweep-100's own pre-baked
+# retagged student (a real hf:// pull of the raw base model was tried and
+# reverted — the built-in hfpull step fails during SkyPilot setup on this
+# LSF environment; see parameters.yaml), so align retags an
+# already-retagged student here, which is a no-op that still costs its
+# runtime.
 #
 # Values come from parameters.yaml beside this file; the comments explaining
 # WHY each value is what it is live there.
