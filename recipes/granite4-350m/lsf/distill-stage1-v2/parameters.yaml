@@ -56,6 +56,42 @@ WORKDIR_ROOT: "/proj/granite-build/g4os/distill"
 BUILD_SUBDIR: "{{ run_metadata.build_id }}"
 SEED: 42
 
+# ─── Reusing an existing corpus ───────────────────────────────────────
+# Empty means "build the corpus in this build", which is what every run before
+# this parameter did: `sources` reservoir-samples the three SFT splits and
+# `corpus` prepares them. Together that is ~50 minutes on the CRITICAL PATH --
+# train-gold cannot start until it finishes -- and it is deterministic. The
+# CE_COEF sweep proved it: the three arms that completed (9dab9130, 8c8ebd63,
+# c20ed3c0) wrote byte-identical sources/train.jsonl, corpus/train.jsonl and
+# corpus/eval.jsonl. A four-arm sweep therefore paid for the same file four times.
+#
+# Set this to an existing corpus directory and `sources` and `corpus` do not run
+# at all; the consumers read that directory DIRECTLY as a `uri` input instead of
+# through a `binding`. Direct is the only form that works across builds:
+#
+#   * gbserver's target reuse is scoped to ONE build id (docs/builds/target-reuse.md
+#     is explicit that cross-build reuse is intentionally unsupported), so it only
+#     ever helps a retry -- and RUN_NAME is in the corpus out_dir, so a per-arm
+#     RUN_NAME changes the definition hash and defeats even that;
+#   * pinning BUILD_SUBDIR instead would make the second build re-register a URI
+#     the first already owns. That is the b5f030cd mode: gbserver refuses the
+#     registration, the target still reports SUCCESS with an EMPTY output list,
+#     and every consumer waits forever for a binding that will never resolve;
+#   * a `binding` names another target's output IN THIS BUILD, so it cannot name a
+#     corpus that a different build produced.
+#
+#   --param CORPUS_DIR=/proj/granite-build/g4os/distill/<run>/<build-id>/corpus
+#
+# The directory must hold train.jsonl, eval.jsonl and corpus_manifest.json.
+#
+# The corpus is DEFINED by the retagged tokenizer and by the prep policies, so a
+# pin taken from a run with a different teacher, a different max_length or a
+# different think/documents policy would train on a corpus this build does not
+# describe -- and nothing downstream would say so. That is the one new silent
+# failure mode pinning introduces, so corpus-pin-check reads the manifest and
+# fails before any allocation is held. It is CPU-only and takes seconds.
+CORPUS_DIR: ""
+
 # ─── The SFT arm ──────────────────────────────────────────────────────
 # Off by default: the shortest path through the pipeline is the one to prove
 # first. Turn it on with --param INCLUDE_SFT=true and a plain-SFT pass runs
@@ -96,7 +132,7 @@ KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox-gb"
 # disable the check; it is set here because a run whose objective differs from
 # df8512e0's is worth nothing if the code that implemented the difference is
 # unrecorded. The step fails in seconds on a mismatch or a dirty tree.
-KD_EXPECT_REF: "26c31a07b6a0695506e2649490752c42f4c4bfa4"
+KD_EXPECT_REF: "09deff2bf1892ec572b3df2fe7a77bc639b2e1f8"
 DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # The five ported steps read their own code from a separate pinned checkout,
 # declared by each step's code_config (code_dir plus expect_ref) rather than
@@ -250,19 +286,47 @@ DOCUMENTS_POLICY: "keep"
 # 7,640 the loss moved 2.7% while the student lost 42% of its entropy. An
 # epoch-bounded run therefore spends three quarters of a 13-hour allocation in the
 # region where there is nothing left to learn and sharpening is the only direction
-# left. 2,000 keeps a wide margin past the point of diminishing returns — four times
-# the step-509 knee — while costing ~3.5 h on 2x8 H100 rather than 13h20.
-GOLD_MAX_STEPS: 2000
+# left.
+#
+# 300, NOT 2,000, AND THE CONTROL ARM IS WHY. Build bb779f1f ran the unanchored
+# objective for the full 2,000 steps with the guard off, and its per-step entropy puts
+# the entire collapse inside the first ~250:
+#
+#     steps    1-20   0.7136 nats   (baseline)
+#     steps   21-50   0.6925         -3.0%
+#     steps   51-80   0.5778        -19.0%
+#     steps  81-120   0.5013        -29.7%
+#     steps 181-250   0.4701        -34.1%
+#     steps 1981-2000 0.4605        -35.5%   <- 2,000 steps to gain a further 1.4%
+#
+# The transfer metrics agree: JSD 0.0828 -> 0.0705 by step 500 and flat after, forward
+# KL -31% by 500 and flat after, reverse KL never improving at all. So steps 300-2,000
+# were 85% of the allocation buying 1.4% more entropy loss and no divergence movement.
+# 300 covers the steep region (roughly steps 40-120) and the shoulder, at ~30 min on
+# 2x8 H100 instead of ~3.5 h -- which is what makes a CE_COEF sweep affordable.
+#
+# This deliberately reverses distill-stage1-v2's original reasoning ("four times the
+# step-509 knee"). That was written before any arm had been measured; the step-509
+# figure came from df8512e0, whose knee was late because its corpus was larger. The
+# control's own curve is the better authority and it says the knee here is nearer 80.
+GOLD_MAX_STEPS: 300
 GOLD_NUM_TRAIN_EPOCHS: 1.0
 # Which checkpoints get exported, transfer-evaluated and generation-checked. Drives a
-# Jinja loop in build.yaml, so this list IS the target graph: four rungs means four
-# export targets and four eval-transfer targets.
+# Jinja loop in build.yaml, so this list IS the target graph: seven rungs means seven
+# export targets, seven eval-transfer targets and seven eval-bfcl targets.
+#
+# WEIGHTED TOWARDS THE DESCENT, because that is the whole object of study. The control
+# loses 19% of its entropy by step 80 and 30% by 120, and the guard trips at 49
+# (unanchored, replayed) to 77 (CE_COEF 0.05) -- so 25/50/75/100 bracket the trip from
+# both sides and 150/200/300 follow the shoulder out. The old 500/1000/1500/2000 put
+# every rung on the plateau, which is why two builds produced no capability reading
+# anywhere in the region where all the movement happens.
 #
 # Every entry must be a multiple of GOLD_SAVE_STEPS, or the export names a
 # checkpoint-N directory the trainer never wrote and the target fails after training
 # has been paid for. The recipe test asserts that, and that the last rung equals
 # GOLD_MAX_STEPS.
-CKPT_LADDER: "500,1000,1500,2000"
+CKPT_LADDER: "25,50,75,100,150,200,300"
 # Every 250 steps, and KEEP THEM ALL. This pair is what made df8512e0
 # unsalvageable: save_steps 250 with save_total_limit 3 retained checkpoint-7750,
 # -8000 and -8150 out of 8,150 — the last 750 steps of a run whose good stopping point
@@ -271,14 +335,18 @@ CKPT_LADDER: "500,1000,1500,2000"
 # not be bisected and the run had to be repeated in full.
 #
 # It is exactly backwards for an exploratory run: the checkpoints worth keeping are
-# the EARLY ones. 8 rungs at 4.7 G each is ~38 G against 21 T free on /proj/data-eng —
-# a rounding error next to a 3.5-hour 16-GPU allocation. The limit is 16 rather than 8
-# so a guard-stopped or resumed run cannot start evicting.
+# the EARLY ones. 12 checkpoints at 4.7 G each is ~56 G against 21 T free on
+# /proj/data-eng — a rounding error next to a 16-GPU allocation. The limit is 16
+# rather than 12 so a guard trip's extra save, or a resume, cannot start evicting.
 #
-# save_steps is also finer than CKPT_LADDER on purpose: the ladder decides what gets
-# EVALUATED, this decides what SURVIVES. If the guard fires between two rungs, the
-# 250-step grid is what makes the stopping point recoverable.
-GOLD_SAVE_STEPS: 250
+# 25 rather than 250: at GOLD_MAX_STEPS 300 a 250-step grid would write exactly one
+# scheduled checkpoint. 25 resolves the descent the run exists to measure, and it is
+# what lets CKPT_LADDER put four rungs inside the first 100 steps.
+#
+# save_steps is still finer than CKPT_LADDER on purpose: the ladder decides what gets
+# EVALUATED, this decides what SURVIVES. If the guard trips between two rungs, the
+# 25-step grid is what makes the stopping point recoverable.
+GOLD_SAVE_STEPS: 25
 GOLD_SAVE_TOTAL_LIMIT: 16
 # Effective batch = per_device x grad_accum x nodes x gpus = 2 x 3 x 2 x 8 = 96.
 #
@@ -349,8 +417,11 @@ LOG_STUDENT_ENTROPY: true
 #
 # 15% because df8512e0 lost 42% in total and the decline was monotonic, so a 15%
 # threshold fires early in the descent rather than confirming the arrival. The stop is
-# graceful — checkpoint saved, exit 0, export and eval still run — so a tripped guard
-# is a result with a curve attached, not a failed build.
+# graceful — checkpoint saved, exit 0 — but "export and eval still run" was only ever
+# true if the checkpoints they name exist, and with a FIXED ladder a stop mid-run means
+# they do not. Build d1acf1c0 tripped at step 77 of 2,000 and took all four export
+# targets down with it: checkpoint-500 through checkpoint-2000 were never written. That
+# is what ENTROPY_GUARD_ACTION below is for.
 #
 # ARMED HERE, AND OFF IN THE CONTROL ARM (--param ENTROPY_GUARD_DROP_FRAC=0). The
 # control is expected to collapse; stopping it early would cut the comparison short.
@@ -361,6 +432,19 @@ ENTROPY_GUARD_DROP_FRAC: 0.15
 ENTROPY_GUARD_BASELINE_STEPS: 20
 # Three consecutive logs, so one unlucky batch cannot end a multi-hour job.
 ENTROPY_GUARD_PATIENCE: 3
+# WARN, NOT STOP, and the reason is what this recipe is FOR. The ladder at CKPT_LADDER
+# exists to measure how the collapse develops, so the trip step is the least useful
+# place to stop: d1acf1c0 stopped at 77 and answered nothing, while the control arm
+# (bb779f1f) ran to 2,000 and showed the collapse is complete by step ~500 — entropy
+# 0.714 -> 0.46, JSD and forward KL flat after 500, reverse KL never improving, BFCL
+# simple 0.0. That reading required the whole curve. MAX_STEPS already bounds the waste
+# the guard was written to prevent (~2.3h, against the 13h20 of df8512e0), so here the
+# trip is worth a loud line in the log and a checkpoint, not an early exit. Both modes
+# print the trip step and checkpoint it; only "stop" ends the run.
+#
+# Set this to "stop" for an unbounded or production run, where burning the horizon on a
+# student that has already narrowed is the thing to avoid.
+ENTROPY_GUARD_ACTION: "warn"
 
 # granite's logits_scaling=10 overflows the fused bf16 JSD kernel and yields NaN
 # loss, so false is the setting known to produce a finite loss here. The cost is

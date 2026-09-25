@@ -34,8 +34,10 @@ question it exists to answer is where the sequences come from -- not what the ob
 is, which stage 1 v2 already changed.
 """
 
+import json
 import pathlib
 import re
+import subprocess
 
 import pytest
 import yaml
@@ -84,7 +86,9 @@ def test_every_marker_has_a_parameter():
 
 def test_every_parameter_is_referenced():
     contents = (_RECIPE / "build.yaml").read_text(encoding="utf-8")
-    referenced = set(_PLAIN_MARKER.findall(contents)) | {"CKPT_LADDER"}
+    # Both are reached through an expression -- CKPT_LADDER via .split(...), CORPUS_DIR
+    # via .rstrip('/') -- which the plain marker pattern does not match.
+    referenced = set(_PLAIN_MARKER.findall(contents)) | {"CKPT_LADDER", "CORPUS_DIR"}
     assert set(_params()) - referenced - {"INCLUDE_SFT"} == set()
 
 
@@ -233,6 +237,7 @@ class TestItIsStage1V2PlusOnPolicy:
             "ENTROPY_GUARD_DROP_FRAC",
             "ENTROPY_GUARD_BASELINE_STEPS",
             "ENTROPY_GUARD_PATIENCE",
+            "ENTROPY_GUARD_ACTION",
             "BETA",
             "TEMPERATURE",
             "GOLD_MAX_STEPS",
@@ -245,10 +250,23 @@ class TestItIsStage1V2PlusOnPolicy:
             "KD_CODE_DIR",
             "KD_EXPECT_REF",
             "NCCL_DEBUG",
+            "CORPUS_DIR",
         ],
     )
     def test_it_matches_the_off_policy_arm(self, key):
         assert _params()[key] == _params(_OFFPOLICY)[key], key
+
+    def test_a_stopping_guard_and_a_fixed_ladder_cannot_both_be_asked_for(self, on):
+        """Build d1acf1c0 hit this in the off-policy arm -- guard tripped at step 77 of
+        2,000, and all four fixed export rungs named checkpoints the trainer never
+        wrote. This recipe carries the same ladder, so it carries the same invariant."""
+        gold = _config(on, "train-gold")["gold_config"]
+        if float(gold["entropy_guard_drop_frac"]) <= 0:
+            return
+        assert gold["entropy_guard_action"] == "warn", (
+            "the guard may stop at an arbitrary step while CKPT_LADDER "
+            f"({_params()['CKPT_LADDER']}) demands specific ones"
+        )
 
     def test_the_anchor_is_still_on(self, on):
         """It matters more here, not less: on-policy training on a student's own
@@ -269,6 +287,69 @@ class TestItIsStage1V2PlusOnPolicy:
         assert product == 96
 
 
+
+# ─── The generation smoke test ─────────────────────────────────────────────────
+
+
+class TestGenSmoke:
+    """The shared VALUES are covered by parity with the off-policy arm above. What is
+    NOT shared is the rendered text, and this target is where it broke: gen-smoke
+    assembles one argument per rung through a Jinja loop, and this file previously had
+    no gen-smoke coverage at all, which is how build bb779f1f's failure shipped in two
+    recipes at once."""
+
+    def test_the_interpreter_actually_receives_every_rung(self, tmp_path):
+        """Executes the assembly instead of parsing it. `bash -n` cannot see this
+        failure: the <% %> block tags are not trimmed, so each leaves a blank line
+        where it stood, a blank line after a `\\` ENDS the command, and bash then runs
+        the next rung as a program name -- exit 127 with
+        `500:/proj/.../export-500: No such file or directory`."""
+        rendered = _render(tmp_path, INCLUDE_SFT=False, WORKDIR_ROOT=str(tmp_path))
+        cmd = _config(rendered, "gen-smoke")["command_config"]["command"]
+
+        argv_log = tmp_path / "argv.json"
+        stdin_log = tmp_path / "stdin.txt"
+        stub = tmp_path / "python-stub"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            f"open({str(stdin_log)!r}, 'w').write(sys.stdin.read())\n"
+            f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+        # Only the interpreter is swapped. Every argument, the array, the loop and the
+        # heredoc are the recipe's own rendered text.
+        script = cmd.replace("/stage/.venv/bin/python", str(stub))
+        result = subprocess.run(["bash"], input=script, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+        argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        rungs = _params()["CKPT_LADDER"].split(",")
+        # The stub sees the `-` that real python consumes as "read the program from
+        # stdin"; the recipe's own arguments start after it.
+        assert argv[0] == "-", f"interpreter got {argv}"
+        argv = argv[1:]
+        assert len(argv) == 3 + len(rungs), f"interpreter got {argv}"
+        for rung, got in zip(rungs, argv[3:]):
+            step, _, path = got.partition(":")
+            assert step == rung, f"expected rung {rung}, got {got}"
+            assert path.endswith(f"/export-{rung}"), got
+
+        assert "def looped_fraction" in stdin_log.read_text(encoding="utf-8")
+
+    def test_no_rung_is_appended_through_a_line_continuation(self):
+        """The shape that broke, guarded at the source."""
+        lines = (_RECIPE / "build.yaml").read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines[:-1]):
+            if line.rstrip().endswith("\\") and lines[i + 1].lstrip().startswith("<%"):
+                raise AssertionError(
+                    f"{_RECIPE.name}/build.yaml:{i + 1}: continuation followed by a "
+                    f"block tag renders to a blank line and ends the command:\n"
+                    f"  {line}\n  {lines[i + 1]}"
+                )
+
 def test_the_student_default_cannot_silently_train_the_wrong_model():
     """On-policy continues from a good off-policy checkpoint. A plausible-looking
     default — the base retagged student, say — would run, report a loss, and answer a
@@ -277,3 +358,90 @@ def test_the_student_default_cannot_silently_train_the_wrong_model():
     assert not student.startswith("/"), student
     assert "SET-ME" in student.upper()
     assert student != _params(_OFFPOLICY)["STUDENT_MODEL"]
+
+
+# ─── Reusing an existing corpus ────────────────────────────────────────────────
+
+
+_PIN = "/proj/granite-build/g4os/distill/distill-350m-s1v2-ce040/c20ed3c0/corpus"
+_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
+
+
+def _corpus_inputs(rendered):
+    out = {}
+    for name, target in _targets(rendered).items():
+        spec = (target.get("inputs") or {}).get("corpus")
+        if spec is not None:
+            out[name] = spec
+    return out
+
+
+@pytest.fixture(name="pinned")
+def fixture_pinned(tmp_path):
+    return _render(tmp_path, INCLUDE_SFT=False, CORPUS_DIR=_PIN)
+
+
+class TestTheCorpusPin:
+    """The off-policy arm's tests cover what the pin MEANS. What this file has to
+    cover is that this recipe carries the same wiring -- it has its own copy of all
+    four consumers, and an on-policy arm that rebuilt the corpus while the off-policy
+    arm reused one would not be comparable to it."""
+
+    def test_the_corpus_is_built_in_the_build_by_default(self, on):
+        assert "sources" in _targets(on)
+        assert "corpus" in _targets(on)
+        for name, spec in _corpus_inputs(on).items():
+            assert spec.get("binding") == "corpus.corpus", name
+
+    def test_a_pin_removes_the_targets_that_would_rebuild_it(self, pinned):
+        assert "sources" not in _targets(pinned)
+        assert "corpus" not in _targets(pinned)
+        assert "corpus-pin-check" in _targets(pinned)
+
+    def test_a_pin_is_read_directly_and_gated_on_the_check(self, pinned):
+        consumers = _corpus_inputs(pinned)
+        assert consumers
+        for name, spec in consumers.items():
+            assert "binding" not in spec, name
+            assert spec["uri"] == f"env://{_PIN}/train.jsonl", name
+            bindings = {
+                s.get("binding") for s in _targets(pinned)[name]["inputs"].values()
+            }
+            assert "corpus-pin-check.pin_check" in bindings, name
+
+    def test_a_pin_is_never_re_registered_as_an_output(self, pinned):
+        for name, target in _targets(pinned).items():
+            for out_name, spec in (target.get("outputs") or {}).items():
+                assert _PIN not in str(spec.get("uri", "")), f"{name}.{out_name}"
+
+    def test_the_transfer_evals_read_the_pinned_eval_split(self, pinned):
+        evals = [n for n in _targets(pinned) if n.startswith("eval-transfer-")]
+        assert evals
+        for name in evals:
+            assert _config(pinned, name)["eval_config"]["corpus"] == (
+                f"{_PIN}/eval.jsonl"
+            )
+
+    def test_the_server_is_not_gated_on_the_corpus(self, pinned):
+        """vllm-server serves the student and never reads the corpus. If pinning had
+        given it a corpus input it would also have acquired the gate's ordering edge,
+        and the server would wait on a check it has nothing to do with."""
+        assert "corpus" not in (_targets(pinned)["vllm-server"].get("inputs") or {})
+
+    def test_the_pin_check_is_byte_identical_to_the_off_policy_arm(self, pinned, tmp_path):
+        """Rather than duplicate the off-policy arm's six behavioural tests of the
+        script, assert the script is the same script. Those tests then cover this
+        recipe too, and a fix applied to one arm cannot silently miss the other."""
+        other = yaml.safe_load(
+            apply_parameters(
+                (_OFFPOLICY / "build.yaml").read_text(encoding="utf-8"),
+                [],
+                _params(_OFFPOLICY, INCLUDE_SFT=False, CORPUS_DIR=_PIN),
+                str(tmp_path),
+            )
+        )
+        mine = _config(pinned, "corpus-pin-check")["command_config"]["command"]
+        theirs = other["granite.build"]["targets"]["corpus-pin-check"]["steps"][0][
+            "config"
+        ]["command_config"]["command"]
+        assert _HEREDOC.search(mine).group(1) == _HEREDOC.search(theirs).group(1)

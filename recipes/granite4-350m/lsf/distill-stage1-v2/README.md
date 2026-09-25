@@ -3,8 +3,9 @@
 Off-policy GOLD distillation of the granite-4.0-350m SFT checkpoint towards a
 granite-4.1-3b teacher. `lmbda 0.0`, `beta 0.5`, 2 nodes x 8 H100, effective batch 96,
 8192 context — and, unlike [`distill-stage1`](../distill-stage1/README.md), a CE anchor
-on the objective, entropy logged every step, a guard that stops on collapse, 2,000 steps
-instead of an epoch, and every checkpoint kept.
+on the objective, entropy logged every step, a guard that REPORTS collapse without
+stopping the run, 300 steps instead of an epoch, a checkpoint ladder weighted towards
+the descent, capability measured at every rung, and every checkpoint kept.
 
 **Run [`distill-probe`](../distill-probe/README.md) and
 [`distill-smoke`](../distill-smoke/README.md) first.** Both are minutes; this is hours.
@@ -49,9 +50,9 @@ are what this recipe implements.
 | `CE_COEF` | — | 0.05 | `loss = JSD + 0.05 * CE(corpus tokens)`; drifting from real text now costs something |
 | `LOG_STUDENT_ENTROPY` | — | true | the metric the train loss was blind to |
 | `ENTROPY_GUARD_DROP_FRAC` | — | 0.15 | stops gracefully at a 15% entropy drop; would have fired in hour 1 |
-| `GOLD_MAX_STEPS` | 0 (epoch) | 2000 | sized to the ~12% of headroom that existed |
+| `GOLD_MAX_STEPS` | 0 (epoch) | 300 | the control's entropy is 96% collapsed by step 250 |
 | `GOLD_SAVE_STEPS` / `_TOTAL_LIMIT` | 1000 / 3 | 250 / 16 | keep the whole curve, not its last 750 steps |
-| `CKPT_LADDER` | — | 500,1000,1500,2000 | export + transfer-eval + generation check per rung |
+| `CKPT_LADDER` | — | 25,50,75,100,150,200,300 | export + transfer-eval + BFCL + generation check per rung |
 | `KD_CODE_DIR` | shared checkout | `kd-sandbox-gb`, pinned | the shared tree is dirty; see below |
 | `NCCL_DEBUG` | `""` | `INFO` | build `8f02b739` hung with no trace and had to be relaunched |
 
@@ -70,13 +71,25 @@ v2's loss would stop being comparable to `df8512e0`'s. Worth doing; worth doing 
 Run it twice.
 
 ```bash
-# anchored — as shipped
+# anchored — as shipped (CE_COEF 0.05)
 gb build start -f recipes/granite4-350m/lsf/distill-stage1-v2/build.yaml --space <space>
 
-# control — same horizon, same ladder, pure divergence
-gb build start -f recipes/granite4-350m/lsf/distill-stage1-v2/build.yaml --space <space> \
-  --param CE_COEF=0 --param ENTROPY_GUARD_DROP_FRAC=0 \
-  --param RUN_NAME=distill-350m-stage1-v2-ctrl
+# a CE_COEF sweep. One arm per value, launched in parallel; RUN_NAME MUST differ per
+# arm or the second build collides on an artifact URI the first already registered and
+# reports SUCCESS with an empty output list (the b5f030cd mode). CE_COEF=0 is the zero
+# point of the sweep, and it keeps the guard armed in warn mode like every other arm so
+# the trip step is recorded rather than suppressed.
+#
+# CORPUS_DIR pins an existing corpus so the sweep builds it once instead of once per
+# arm: `sources` + `corpus` are ~50 min on the critical path and are deterministic.
+# Leave it unset on the first arm, then point the rest at what that arm produced.
+CORPUS=/proj/granite-build/g4os/distill/distill-350m-s1v2-ce040/c20ed3c0-.../corpus
+for C in 0 0.05 0.15 0.40; do
+  gb build start -f recipes/granite4-350m/lsf/distill-stage1-v2/build.yaml --space <space> \
+    --param CE_COEF=$C \
+    --param CORPUS_DIR=$CORPUS \
+    --param RUN_NAME=distill-350m-s1v2-ce$(echo $C | tr -d .)
+done
 ```
 
 The control exists because without it a better result is ambiguous between *the anchor
@@ -90,6 +103,26 @@ Two details are load-bearing:
   consumers wait forever — the `b5f030cd` failure mode.
 - **The control's guard is OFF.** It is expected to collapse. Stopping it early would cut
   the comparison short, and the two arms are only readable at matched steps.
+- **The anchored arm's guard WARNS, it does not stop** (`ENTROPY_GUARD_ACTION: warn`).
+  Build `d1acf1c0` is why: the guard tripped at step 77 of 2,000 and stopped, so
+  `checkpoint-500` through `checkpoint-2000` were never written and all four `export-<N>`
+  targets failed with `requested checkpoint does not exist`. A guard that may stop at an
+  arbitrary step and a ladder that names fixed ones cannot both have their way, and on a
+  run bounded by `GOLD_MAX_STEPS` the horizon already bounds the waste the guard exists to
+  prevent. The trip is still printed and still checkpointed —
+  `grep entropy-guard` finds the step; it is the most interesting checkpoint in the run.
+  `test_a_stopping_guard_and_a_fixed_ladder_cannot_both_be_asked_for` holds the line.
+- **The horizon is 300 and the rungs are early.** `bb779f1f` measured the unanchored
+  curve over 2,000 steps: entropy −19% by step 80, −29.7% by 120, −34.1% by 250, and
+  −35.5% at 2,000 — the last 1,750 steps bought 1.4%. JSD and forward KL were flat after
+  500 and reverse KL never moved at all. The old `500,1000,1500,2000` ladder therefore put
+  every rung on the plateau, which is why two builds produced no capability reading
+  anywhere in the region that moves. At 300 steps an arm costs ~30 min of 2x8 H100, which
+  is what makes a `CE_COEF` sweep affordable.
+- **`CE_COEF=0` is an ARM OF THE SWEEP, not a separate control build.** The old control
+  (`bb779f1f`) is not reusable as the zero point here: its rungs are at 500–2,000, it has
+  no BFCL below step 2,000 and no BFCL baseline at all, so it cannot be compared with an
+  anchored arm at steps 25–300. Run it again at this config, as one value of `CE_COEF`.
 
 `CE_COEF=0` with the guard off renders a config with none of the five new keys in it, so
 the control arm runs `df8512e0`'s exact objective — that is a property of the renderer,
@@ -158,18 +191,50 @@ required before any of those rows is compared to the recorded after-SFT row: the
 measured the checkpoint preferring the pinned tokenizer by 10.9% NLL/byte, and this
 export pins `tokenizer_class` while the recorded row does not.
 
+## Reusing a corpus across arms
+
+`sources` + `corpus` sit on the critical path — train-gold cannot start until they
+finish — and they are deterministic. The CE_COEF sweep measured it: the three arms that
+completed (`9dab9130`, `8c8ebd63`, `c20ed3c0`) wrote byte-identical `sources/train.jsonl`,
+`corpus/train.jsonl` and `corpus/eval.jsonl`, so a four-arm sweep derived the same 3 GB
+file four times for ~50 minutes each.
+
+`--param CORPUS_DIR=<dir>` skips both targets and reads that directory directly. It has
+to be a **direct `uri` input** rather than a binding or a fixed `BUILD_SUBDIR`:
+
+- gbserver's target reuse is scoped to one build id, and `docs/builds/target-reuse.md` is
+  explicit that cross-build reuse is intentionally unsupported. `RUN_NAME` is in the
+  corpus `out_dir` too, so a per-arm `RUN_NAME` defeats even a retry's reuse.
+- Pinning `BUILD_SUBDIR` would make the second build re-register a URI the first already
+  owns — the `b5f030cd` mode, where the registration is refused, the target still reports
+  SUCCESS with an empty output list, and every consumer waits forever.
+- A `binding` names another target's output *in this build*, so it cannot name a corpus a
+  different build produced.
+
+The corpus is **defined by** the retagged tokenizer and the prep policies: its rows were
+rendered through that chat template, its masks built with that tokenizer, and 5,908 rows
+dropped for exceeding *that* `max_length`. A pin from a run that differed in any of those
+would train on a corpus this build does not describe, and every downstream metric would
+still look normal. So `corpus-pin-check` reads `corpus_manifest.json` and compares
+`tokenizer_identity`, `max_length`, `think_policy`, `documents_policy`,
+`completion_boundary` and `eval_fraction` against this build — plus a byte comparison of
+`tokenizer.json` and `chat_template.jinja` when the manifest's `tokenizer_path` still
+exists. It reports every mismatch at once, and it is CPU-only and gated ahead of the
+allocation, so a bad pin costs seconds rather than a run.
+
 ## Cost
 
 | target | shape | time |
 |---|---|---|
-| `sources` | 1 CPU node | ~5 min at 800k rows |
+| `sources` | 1 CPU node | ~5 min at 800k rows; skipped when `CORPUS_DIR` is set |
 | `align` | 1 CPU node | ~10 min |
-| `corpus` | 1 CPU node, single-process | 30–45 min at 800k rows |
-| `train-gold` | 2 x 8 H100 | ~3.5 h for 2,000 steps (~4 s/it), less if the guard fires |
-| `export-<N>` x4 | 1 CPU node each | minutes, concurrent |
+| `corpus` | 1 CPU node, single-process | 30–45 min at 800k rows; skipped when `CORPUS_DIR` is set |
+| `corpus-pin-check` | 1 CPU node | seconds; only when `CORPUS_DIR` is set |
+| `train-gold` | 2 x 8 H100 | ~30 min for 300 steps (~4 s/it); a guard trip no longer shortens it |
+| `export-<N>` x7 | 1 CPU node each | minutes, concurrent |
 | `eval-transfer-<N>` x5 | 1 H100 each | minutes each |
 | `gen-smoke` | 1 H100 | ~2 min for all four rungs |
-| `eval-bfcl` | 1 H100, `simple` only | ~10 min; a plumbing check, not a measurement |
+| `eval-bfcl-<N>` x8 | 1 H100 each, `simple` only | ~10 min each, concurrent; baseline + every rung |
 
 ~56 GPU-h per arm against `df8512e0`'s ~213, and both arms together still cost less than
 the run they replace.

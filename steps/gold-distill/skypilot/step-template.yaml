@@ -110,6 +110,13 @@ config:
     entropy_guard_drop_frac: 0.0
     entropy_guard_baseline_steps: 20
     entropy_guard_patience: 3
+    # What a trip DOES. "stop" ends the run there; "warn" reports it, checkpoints it
+    # and continues to max_steps. Build d1acf1c0 is the argument for having the choice:
+    # the guard stopped it at step 77 of 2000, correctly by its own rule, and in doing
+    # so destroyed the checkpoint curve the run existed to measure and left its four
+    # fixed export rungs naming steps that never happened. Where max_steps already
+    # bounds the waste, the trip is worth a reading rather than a stop.
+    entropy_guard_action: "stop"
     # Required for completion masking; the nothink chat template has no
     # {% generation %} tag, so this is what locates the span.
     #
@@ -330,6 +337,7 @@ environment_configs:
               --entropy-guard-drop-frac {{ config.gold_config.entropy_guard_drop_frac | default(0.0) }} \
               --entropy-guard-baseline-steps {{ config.gold_config.entropy_guard_baseline_steps | default(20) }} \
               --entropy-guard-patience {{ config.gold_config.entropy_guard_patience | default(3) }} \
+              --entropy-guard-action "{{ config.gold_config.entropy_guard_action | default('stop') }}" \
               --lmbda-schedule "{{ config.gold_config.lmbda_schedule | default('constant') }}" \
               --lmbda-init {{ config.gold_config.lmbda_init | default(0.0) }} \
               --min-completion-length {{ config.gold_config.min_completion_length | default(0) }} \
