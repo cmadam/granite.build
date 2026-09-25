@@ -4,7 +4,11 @@ PORTED, not authored here. Upstream source of truth:
   path   steps/distill-hf-export/test/test_export_hf_model.py
   commit 70c1550a171aa8e09a9ad9047a5bf763c39e8579
 
-Three divergences, all about path resolution rather than behaviour:
+Four divergences. The first is behavioural, the rest are about path resolution:
+  - the `normalise_tokenizer_json` tests (and `_ckpt`'s `tokenizer_json` argument) cover a
+    divergence this repo carries: clearing the trainer's live truncation state out of the
+    published tokenizer.json. See the DIVERGENCE note in src/export_hf_model.py. Drop
+    these when the fix lands upstream.
   - upstream's sys.path.insert is removed; conftest.py resolves both the step's own src/
     and the upstream package (from GB_DISTILL_CODE_DIR). Upstream's version inserted only
     parents[1]/src while export_hf_model imports the shared package at MODULE scope, so
@@ -39,6 +43,7 @@ from export_hf_model import (  # noqa: E402
     export,
     normalise_chat_template,
     normalise_tokenizer_config,
+    normalise_tokenizer_json,
     select_checkpoint,
 )
 
@@ -60,6 +65,7 @@ def _ckpt(
     step: int,
     *,
     tokenizer_config=None,
+    tokenizer_json=None,
     chat_template=None,
     extra=(),
     weights=True,
@@ -69,7 +75,9 @@ def _ckpt(
     (d / "config.json").write_text("{}")
     if weights:
         (d / "model.safetensors").write_text("w")
-    (d / "tokenizer.json").write_text("{}")
+    (d / "tokenizer.json").write_text(
+        "{}" if tokenizer_json is None else json.dumps(tokenizer_json)
+    )
     (d / "tokenizer_config.json").write_text(
         json.dumps(
             tokenizer_config
@@ -201,9 +209,9 @@ def test_normalise_rewrites_a_transformers_5_only_tokenizer_class():
         {"tokenizer_class": "TokenizersBackend"}, padding_side="keep"
     )
     assert out["tokenizer_class"] == "PreTrainedTokenizerFast"
-    assert any("tokenizer_class" in c for c in changes), (
-        "the rewrite must be recorded in the manifest, like every other normalisation"
-    )
+    assert any(
+        "tokenizer_class" in c for c in changes
+    ), "the rewrite must be recorded in the manifest, like every other normalisation"
 
 
 def test_normalise_leaves_any_other_tokenizer_class_alone():
@@ -257,6 +265,74 @@ def test_normalise_adds_padding_side_when_absent():
     assert len(changes) == 1
 
 
+# ------------------------------------------------- normalise tokenizer.json
+
+
+# A trained tokenizer.json carries `truncation` and `padding` as explicit nulls. The
+# trainer's in-process tokenizer had truncation switched on, and `save_pretrained`
+# serialises that RUNTIME state into the file, so the published model ships a budget
+# nobody asked for. Observed on build df8512e0: max_length 466 in the exported
+# tokenizer.json where align's was null.
+_TRAINER_TRUNCATION = {
+    "direction": "Right",
+    "max_length": 466,
+    "strategy": "LongestFirst",
+    "stride": 0,
+}
+
+
+def test_normalise_tokenizer_json_clears_stale_truncation():
+    out, changes = normalise_tokenizer_json({"truncation": dict(_TRAINER_TRUNCATION)})
+    assert out["truncation"] is None
+    assert len(changes) == 1
+    assert "466" in changes[0], "the manifest must name the budget it removed"
+
+
+def test_normalise_tokenizer_json_clears_stale_padding():
+    padding = {"strategy": {"Fixed": 8}, "direction": "Right", "pad_id": 0}
+    out, changes = normalise_tokenizer_json({"padding": padding})
+    assert out["padding"] is None
+    assert len(changes) == 1
+
+
+def test_normalise_tokenizer_json_reports_no_change_when_already_clean():
+    raw = {"truncation": None, "padding": None, "model": {"vocab": {}}}
+    out, changes = normalise_tokenizer_json(raw)
+    assert changes == [], "a no-op must not be reported as a normalisation"
+    assert out == raw
+
+
+def test_normalise_tokenizer_json_leaves_post_processor_alone():
+    """The trainer also writes an identity TemplateProcessing where align had null.
+
+    It adds no special tokens, so it changes nothing -- and a post_processor decides
+    which specials get inserted at encode time. Rewriting one would be exactly the
+    silent substitution this step refuses everywhere else.
+    """
+    pp = {"type": "TemplateProcessing", "single": [], "pair": [], "special_tokens": {}}
+    out, changes = normalise_tokenizer_json({"post_processor": pp})
+    assert out["post_processor"] == pp
+    assert changes == []
+
+
+def test_normalise_tokenizer_json_does_not_mutate_its_input():
+    raw = {"truncation": dict(_TRAINER_TRUNCATION)}
+    normalise_tokenizer_json(raw)
+    assert raw["truncation"] == _TRAINER_TRUNCATION
+
+
+def test_normalise_tokenizer_json_preserves_the_vocabulary():
+    raw = {
+        "truncation": dict(_TRAINER_TRUNCATION),
+        "model": {"vocab": {"a": 0, "b": 1}, "merges": ["a b"]},
+        "pre_tokenizer": {"type": "Sequence"},
+        "added_tokens": [{"id": 0, "content": "a"}],
+    }
+    out, _ = normalise_tokenizer_json(raw)
+    for key in ("model", "pre_tokenizer", "added_tokens"):
+        assert out[key] == raw[key], f"{key} must survive untouched"
+
+
 # ------------------------------------------------------------------ export
 
 
@@ -277,6 +353,39 @@ def test_export_normalises_the_tokenizer_config_on_disk(tmp_path):
     cfg = json.loads((dest / "tokenizer_config.json").read_text())
     assert cfg["padding_side"] == "right"
     assert "is_local" not in cfg and "local_files_only" not in cfg
+
+
+def test_export_clears_runtime_truncation_and_records_it(tmp_path):
+    src = _ckpt(
+        tmp_path / "run",
+        25,
+        tokenizer_json={
+            "truncation": dict(_TRAINER_TRUNCATION),
+            "model": {"vocab": {}},
+        },
+    )
+    dest = tmp_path / "out"
+    manifest = export(src, dest)
+    published = json.loads((dest / "tokenizer.json").read_text())
+    assert published["truncation"] is None
+    assert published["model"] == {"vocab": {}}
+    assert any(
+        "tokenizer.json" in c and "truncation" in c for c in manifest["normalisations"]
+    )
+
+
+def test_export_keeps_a_clean_tokenizer_json_byte_identical(tmp_path):
+    """7 MB of vocabulary: rewriting it when nothing needs changing would reformat the
+    whole file and make `diff -r` against the checkpoint report a change this step did
+    not make. Same discipline as the chat template."""
+    body = json.dumps({"truncation": None, "model": {"vocab": {"a": 0}}})
+    src = _ckpt(tmp_path / "run", 25, tokenizer_json=json.loads(body))
+    dest = tmp_path / "out"
+    manifest = export(src, dest)
+    assert (dest / "tokenizer.json").read_bytes() == (
+        src / "tokenizer.json"
+    ).read_bytes()
+    assert not any("tokenizer.json" in c for c in manifest["normalisations"])
 
 
 def test_export_refuses_unknown_entries_by_default(tmp_path):
