@@ -1,31 +1,33 @@
 #!/usr/bin/env python3
 #
 # PORTED, not authored here. Upstream source of truth:
-#   repo   github.ibm.com/Herbert-Woisetschlaeger/gb-steps-collection-post-training
+#   repo   github.com/laminair/gb-steps-distillation
 #   path   steps/distill-corpus-prep/src/prep_corpus.py
-#   commit 70c1550a171aa8e09a9ad9047a5bf763c39e8579
+#   commit see code_config.expect_ref in step-template.yaml (not repeated here, because
+#          two places to write a ref is one place for it to be stale)
 #
 # Verbatim apart from `black`/`isort` reflow, which CI requires repo-wide. Keep it that
 # way so re-syncing upstream stays a three-way merge; behaviour changes belong upstream.
 #
-# RE-SYNCED past that commit for three flags and nothing else: --explode-assistant-turns,
-# --explode-max-per-conv and --max-completion-length, with the four helpers they need
-# (_length_summary, prompt_budget_of, explode_assistant_turns, prompt_token_count) and the
-# per-record emit refactored out of build()'s loop, since one input record can now become
-# several rows. Every one is default-OFF: `train.jsonl` and the row sidecar come out
-# byte-identical to what this file produced before the re-sync, and the manifest gains five
-# keys that read `false`/`null`/`0`.
+# --explode-assistant-turns, --explode-max-per-conv and --max-completion-length (with the
+# four helpers they need -- _length_summary, prompt_budget_of, explode_assistant_turns,
+# prompt_token_count -- and the per-record emit refactored out of build()'s loop, since one
+# input record can now become several rows) were already present when this file was first
+# vendored into gb-steps-distillation; there is no later re-sync to track for them, and no
+# earlier upstream commit in THIS repo's history to name. (They trace back further, to the
+# private source checkout's own commit 8a9ae32 -- "Build the unified 100-step round, and give
+# ULD a teacher that renders every turn" -- but that checkout is not what code_config clones
+# from, so its history is not this file's provenance chain.) Every one of the three flags is
+# default-OFF: `train.jsonl` and the row sidecar come out byte-identical to a run with none of
+# them set, and the manifest gains five keys that read `false`/`null`/`0`.
 #
-# ONE VISIBLE CHANGE, and it is deliberate: the two new policies are in expectation(), so an
-# out_dir already built by the older copy of this file now REFUSES on its marker ("DIFFERENT
+# ONE THING WORTH KNOWING ANYWAY: the two new policies are in expectation(), so an out_dir
+# built by a copy of this file that predates them REFUSES on its marker ("DIFFERENT
 # expectation") instead of reporting SKIP. That is the correct answer -- a fingerprint that
 # omitted the flags would let a build with --explode-assistant-turns walk past an un-exploded
-# corpus and call it done -- but it means a resumed recipe whose corpus predates this change
-# needs its marker removed once. Delete `out_dir/.step-done.json` (the path main() prints on
-# an AlreadyDone) to adopt an existing corpus, or rebuild it.
-#
-# The commit these came from is the one `code_config.expect_ref` names in step-template.yaml;
-# it is not repeated here, because two places to write a ref is one place for it to be stale.
+# corpus and call it done -- but it means adopting such an out_dir needs its marker removed
+# once. Delete `out_dir/.step-done.json` (the path main() prints on an AlreadyDone) to adopt
+# an existing corpus, or rebuild it.
 #
 # It imports gb_steps_post_training.distillation at module scope, which is delivered at
 # RUN time from the checkout named by code_config (see step-template.yaml). That is why
