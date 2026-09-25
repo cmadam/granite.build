@@ -430,6 +430,7 @@ class TestCeAnchorAndCollapseGuard:
         "entropy_guard_drop_frac",
         "entropy_guard_baseline_steps",
         "entropy_guard_patience",
+        "entropy_guard_action",
     }
 
     def test_none_of_them_are_emitted_by_default(self, tmp_path):
@@ -473,7 +474,38 @@ class TestCeAnchorAndCollapseGuard:
         assert config["entropy_guard_drop_frac"] == pytest.approx(0.15)
         assert config["entropy_guard_baseline_steps"] == 30
         assert config["entropy_guard_patience"] == 2
+        # Defaulted, but still emitted: the trainer needs to be told, and "stop" is the
+        # behaviour every recipe pinned before the knob existed.
+        assert config["entropy_guard_action"] == "stop"
         assert config["log_student_entropy"] is True
+
+    def test_warn_mode_reaches_the_trainer(self, tmp_path):
+        """Build d1acf1c0's failure in one key. The guard tripped at step 77 of 2,000
+        and stopped, which took every rung of a fixed 500/1000/1500/2000 export ladder
+        with it. warn keeps the run going so the rungs exist; the trip is still printed
+        and still checkpointed."""
+        config = _render(
+            tmp_path,
+            extra=[
+                "--log-student-entropy", "true",
+                "--entropy-guard-drop-frac", "0.15",
+                "--entropy-guard-action", "warn",
+            ],
+        )
+        assert config["entropy_guard_action"] == "warn"
+
+    def test_an_unknown_action_is_refused_here(self, tmp_path):
+        """Not left to the trainer's __post_init__: a bad value there surfaces after
+        accelerate has launched, the teacher has loaded and the allocation is held."""
+        _render(
+            tmp_path,
+            extra=[
+                "--log-student-entropy", "true",
+                "--entropy-guard-drop-frac", "0.15",
+                "--entropy-guard-action", "continue",
+            ],
+            expect_rc=2,
+        )
 
     def test_a_guard_without_its_metric_is_refused(self, tmp_path):
         """The silent failure this check exists for: the guard reads what

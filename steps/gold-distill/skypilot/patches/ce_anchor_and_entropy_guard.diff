@@ -1,10 +1,13 @@
-gold: anchor the divergence with CE, and log the entropy that collapses
+gold: anchor the divergence with CE, log the entropy that collapses, and let the
+guard warn without stopping
 
 Applies to: kd-sandbox
             gold/custom_gold_config.py
             gold/custom_gold_trainer.py
 Base commit: 20b416c9710ff9d4f60f086432fdb2188c3c5e77  (see WHICH BASE, below)
-Result:      26c31a07b6a0695506e2649490752c42f4c4bfa4  (this step's gold_config.kd_expect_ref)
+Result:      09deff2bf1892ec572b3df2fe7a77bc639b2e1f8  (this step's gold_config.kd_expect_ref)
+             26c31a07b6a0695506e2649490752c42f4c4bfa4 is the same patch before
+             entropy_guard_action existed; recipes pinned to it still render.
 
 WHY THIS PATCH EXISTS, AND WHY IT IS NOT IN THIS REPO'S OWN SOURCE
 
@@ -35,7 +38,9 @@ WHAT IT ADDS, ALL DEFAULTED OFF
   log_student_entropy           mean student entropy and reverse KL per logging_steps.
   entropy_guard_drop_frac       stop when entropy falls this far below its own baseline.
   entropy_guard_baseline_steps  steps averaged before the guard arms.
-  entropy_guard_patience        consecutive logs below the floor before stopping.
+  entropy_guard_patience        consecutive logs below the floor before tripping.
+  entropy_guard_action          "stop" (default) ends the run at the trip step; "warn"
+                                reports it, checkpoints it and runs on to max_steps.
 
 A config that sets none of them computes exactly the loss it computed before, which is what
 lets the granite4-gold recipes keep their pin untouched.
@@ -63,10 +68,38 @@ THE GUARD STOPS, IT DOES NOT RAISE. It is evaluated in log(), on the already all
 mean, so every rank sees the identical number and reaches the same verdict without a second
 collective. Raising from compute_loss instead would have to be agreed by every rank inside
 the accelerate/DeepSpeed step, and a disagreement there is a hung collective rather than a
-stop. It sets should_training_stop AND should_save, which Trainer checks after log() in the
-same _maybe_log_save_evaluate call, so the run leaves a checkpoint at the step the guard
-fired and exits 0: the downstream export and eval targets still run, and the stop reads as a
-finding rather than a failed build.
+stop. It sets should_save -- and, in "stop" mode, should_training_stop -- which Trainer
+checks after log() in the same _maybe_log_save_evaluate call, so there is a checkpoint at
+the step the guard fired and the process exits 0: the downstream export and eval targets
+still run, and the stop reads as a finding rather than a failed build.
+
+STOPPING IS NOT ALWAYS WHAT IS WANTED, WHICH IS WHY entropy_guard_action EXISTS. Build
+d1acf1c0 tripped at step 77 of a 2000-step run and stopped there, correctly by its own
+rule. But that recipe's purpose is a ladder of exports at 500/1000/1500/2000 measuring how
+the collapse develops, so the stop destroyed the data being collected and left all four
+export targets naming checkpoints that never existed -- four failed targets, a failed
+build, and the run's question unanswered. On a run already bounded by max_steps the horizon
+bounds the waste the guard was written to prevent, so there the trip is worth a reading
+rather than a stop. "warn" prints the trip step, saves a checkpoint at it, and continues.
+Both modes latch after firing once; without the latch "warn" would re-report and re-save on
+every subsequent log.
+
+THE CE ANCHOR'S LOG WAS OFF BY gradient_accumulation_steps, fixed here. _ce_anchor_sum
+gains one term per microbatch while _ce_anchor_step_eq gains 1/ga, so ce_sum/ce_eq is a
+per-optimizer-step SUM while `loss` carries the per-microbatch MEAN. That number exists to
+be compared against the divergence in `loss`, so the factor made the one comparison it is
+for wrong: on d1acf1c0 (ce_coef 0.05, ga 3) it logged 1.922 where the CE actually added to
+the loss was 0.643. The log therefore makes the anchor look THREE TIMES HEAVIER than it
+is -- ce_coef * 1.922 = 0.096 against a divergence of 0.0825 reads as an anchor already
+outweighing the divergence, when the term truly added was 0.032, well under half of it.
+Sizing ce_coef from that reading picks a value three times too small, which is the likely
+history of 0.05. Confirmed two ways: the derivation above, and measured against build
+bb779f1f, whose ce_coef 0 loss is the pure divergence on the identical first batch.
+
+NOTE THAT THE OBJECTIVE WAS NEVER WRONG. compute_loss adds the correctly normalised
+per-microbatch ce_anchor; the accumulators this fixes feed only the log. d1acf1c0 trained
+against exactly the anchor its ce_coef asked for, so no run is invalidated by this -- only
+the number a human would have read when choosing that ce_coef.
 
 SCOPE: only the same-tokenizer branch of compute_loss. The ULD/cross-tokenizer branch and
 the liger fused path are untouched -- neither is used by the recipes this is for, and the
@@ -97,28 +130,29 @@ HOW TO APPLY
   #   4ffb888d15c4124c403cdcd432d6c61bf4d4191f199d84218917271f5c948268  gold.py
   git apply /path/to/this/file
   git commit -am "gold: anchor the divergence with CE, and log the entropy that collapses"
+  #   ...then the second commit, for entropy_guard_action and the ce_anchor_loss scale.
 
 A COMMIT SHA IS NOT REPRODUCIBLE FROM A DIFF. Re-committing this patch produces a different
 hash from the `Result` above, because the hash covers author, date and message as well as
 the tree. So the two delivery routes are not interchangeable for the pin:
 
   * bundle (what was actually used) -- `git clone -b epic61/ce-anchor-and-entropy-guard
-    kd-sandbox-gb.bundle <dest>` lands commit 26c31a0 exactly, and the kd_expect_ref in
+    kd-sandbox-gb.bundle <dest>` lands commit 09deff2 exactly, and the kd_expect_ref in
     step-template.yaml matches as shipped. BlueVela's login nodes cannot reach
     github.ibm.com over SSH, which is why the bundle exists at all.
   * git apply + commit -- lands the same TREE under a different SHA. Then
     `git rev-parse HEAD` is the value to write into gold_config.kd_expect_ref, and the
     step will refuse the run until it does. Compare trees, not commits, to confirm you
     got the same code:
-        git diff --stat 26c31a0 HEAD     # empty means the trees agree
+        git diff --stat 09deff2 HEAD     # empty means the trees agree
 
 Offer this upstream. When it lands in kd-sandbox, drop the clone and move kd_code_dir back.
 
 diff --git a/gold/custom_gold_config.py b/gold/custom_gold_config.py
-index ce11aac..64a4017 100644
+index ce11aac..99e8cc5 100644
 --- a/gold/custom_gold_config.py
 +++ b/gold/custom_gold_config.py
-@@ -145,6 +145,46 @@ class CustomGOLDConfig(GOLDConfig):
+@@ -145,6 +145,57 @@ class CustomGOLDConfig(GOLDConfig):
          metadata={"help": "Frozen reference (seed) model for the ref_kl_coef anchor. REQUIRED when ref_kl_coef>0 "
                    "(set it to the seed / initial-policy checkpoint; there is no auto-default from model_args)."},
      )
@@ -145,12 +179,13 @@ index ce11aac..64a4017 100644
 +    )
 +    entropy_guard_drop_frac: float = field(
 +        default=0.0,
-+        metadata={"help": "Stop training when mean student entropy falls this fraction "
-+                  "below its early-training baseline (e.g. 0.15 = a 15% drop). 0.0 = off. "
-+                  "Requires log_student_entropy. Stops gracefully via TrainerControl -- "
-+                  "the last checkpoint is saved and the process exits 0 -- so downstream "
-+                  "export and eval targets still run and the stop is a finding, not a "
-+                  "failed build."},
++        metadata={"help": "Trip the collapse guard when mean student entropy falls this "
++                  "fraction below its early-training baseline (e.g. 0.15 = a 15% drop). "
++                  "0.0 = off. Requires log_student_entropy. entropy_guard_action decides "
++                  "whether tripping stops the run or only reports it; a stop is graceful "
++                  "via TrainerControl -- the checkpoint is saved and the process exits 0 "
++                  "-- so downstream export and eval targets still run and the stop is a "
++                  "finding, not a failed build."},
 +    )
 +    entropy_guard_baseline_steps: int = field(
 +        default=20,
@@ -162,10 +197,20 @@ index ce11aac..64a4017 100644
 +        metadata={"help": "Consecutive logs below the floor before the guard stops the "
 +                  "run, so one noisy batch cannot end a multi-hour job."},
 +    )
++    entropy_guard_action: str = field(
++        default="stop",
++        metadata={"help": "What the guard does when it trips. \"stop\" (default) ends the "
++                  "run at that step. \"warn\" reports it, saves a checkpoint there and "
++                  "lets training continue to max_steps -- for a bounded run whose PURPOSE "
++                  "is to measure the collapse curve, where stopping at the trip step "
++                  "destroys the very data being collected and leaves any fixed downstream "
++                  "checkpoint ladder naming steps that never happened. Either way the trip "
++                  "step is printed and a checkpoint exists at it."},
++    )
      uld_hybrid_sampled_opd_weight: float = field(
          default=0.0,
          metadata={"help": "Weight for sampled OPD (REINFORCE-style) loss in hybrid ULD mode. "
-@@ -313,6 +353,36 @@ class CustomGOLDConfig(GOLDConfig):
+@@ -313,6 +364,41 @@ class CustomGOLDConfig(GOLDConfig):
          if not (0.0 <= self.clip_alpha < 1.0):
              raise ValueError("clip_alpha must be in range [0.0, 1.0).")
  
@@ -198,15 +243,20 @@ index ce11aac..64a4017 100644
 +            raise ValueError("entropy_guard_baseline_steps must be >= 1.")
 +        if self.entropy_guard_patience < 1:
 +            raise ValueError("entropy_guard_patience must be >= 1.")
++        if self.entropy_guard_action not in ("stop", "warn"):
++            raise ValueError(
++                f"entropy_guard_action must be \"stop\" or \"warn\", got "
++                f"{self.entropy_guard_action!r}."
++            )
 +
          # Validate hidden loss parameters
          if self.use_hidden_loss and self.hidden_loss_gamma < 0:
              raise ValueError("hidden_loss_gamma must be >= 0.")
 diff --git a/gold/custom_gold_trainer.py b/gold/custom_gold_trainer.py
-index 81eb24c..f754b02 100755
+index 81eb24c..8aec28a 100755
 --- a/gold/custom_gold_trainer.py
 +++ b/gold/custom_gold_trainer.py
-@@ -1580,6 +1580,20 @@ class CustomGOLDTrainer(GOLDTrainer):
+@@ -1580,6 +1580,21 @@ class CustomGOLDTrainer(GOLDTrainer):
          self._sampled_opd_sum = 0.0
          self._sampled_opd_step_eq = 0.0
  
@@ -223,11 +273,12 @@ index 81eb24c..f754b02 100755
 +        self._entropy_baseline_acc = 0.0
 +        self._entropy_baseline_n = 0
 +        self._entropy_below_floor = 0
++        self._entropy_guard_tripped = False
 +
          if self.args.opd_importance_sampling:
              self._is_stats_accum = {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0, "masked_fraction": 0.0}
              self._is_stats_count = 0
-@@ -3483,6 +3497,35 @@ class CustomGOLDTrainer(GOLDTrainer):
+@@ -3483,6 +3498,35 @@ class CustomGOLDTrainer(GOLDTrainer):
                          tokenizer=self.processing_class,
                      )
  
@@ -263,7 +314,7 @@ index 81eb24c..f754b02 100755
                  # Hidden state matching loss (auxiliary)
                  if self.args.use_hidden_loss:
                      hidden_loss = self.compute_hidden_loss(
-@@ -3580,6 +3623,105 @@ class CustomGOLDTrainer(GOLDTrainer):
+@@ -3580,6 +3624,121 @@ class CustomGOLDTrainer(GOLDTrainer):
  
          return (loss, outputs_student) if return_outputs else loss
  
@@ -313,8 +364,13 @@ index 81eb24c..f754b02 100755
 +        self._rkld_sum += float(rkld_acc)
 +        self._diag_tokens += int(keep.numel())
 +
-+    def _maybe_stop_on_entropy_collapse(self, entropy: float) -> None:
-+        """Stop the run when entropy has fallen entropy_guard_drop_frac below baseline.
++    def _maybe_act_on_entropy_collapse(self, entropy: float) -> None:
++        """Act when entropy has fallen entropy_guard_drop_frac below baseline.
++
++        entropy_guard_action decides what "act" means: "stop" ends the run at the trip
++        step, "warn" reports it and lets training continue. Both save a checkpoint
++        there, and both fire exactly once -- the latch matters for "warn", which would
++        otherwise re-report and re-save on every subsequent log.
 +
 +        Called from log() with the ALREADY ALL-REDUCED mean, so every rank evaluates the
 +        identical number and reaches the same verdict without a second collective. That is
@@ -322,11 +378,11 @@ index 81eb24c..f754b02 100755
 +        be agreed by every rank inside the accelerate/DeepSpeed step, and a disagreement is
 +        a hung collective rather than a clean stop.
 +
-+        should_save is set alongside should_training_stop because Trainer checks it after
-+        log() in the same _maybe_log_save_evaluate call, so the run that is about to end
-+        leaves a checkpoint at the step where the guard fired.
++        should_save is set because Trainer checks it after log() in the same
++        _maybe_log_save_evaluate call, so there is a checkpoint at the step the guard
++        fired -- the run's most interesting one, whether or not it is also the last.
 +        """
-+        if self.args.entropy_guard_drop_frac <= 0:
++        if self.args.entropy_guard_drop_frac <= 0 or self._entropy_guard_tripped:
 +            return
 +        control = getattr(self, "control", None)
 +        if control is None:
@@ -354,22 +410,33 @@ index 81eb24c..f754b02 100755
 +            self._entropy_below_floor = 0
 +
 +        if self._entropy_below_floor >= max(1, int(self.args.entropy_guard_patience)):
++            self._entropy_guard_tripped = True
++            stopping = self.args.entropy_guard_action == "stop"
++            verdict = "STOPPING" if stopping else "TRIPPED"
++            tail = (
++                "saving and stopping."
++                if stopping
++                else "saving a checkpoint here and CONTINUING, because "
++                     'entropy_guard_action is "warn". This step is the finding; the rest '
++                     "of the run is the curve past it."
++            )
 +            print(
-+                f"[entropy-guard] STOPPING at step {self.state.global_step}: student "
++                f"[entropy-guard] {verdict} at step {self.state.global_step}: student "
 +                f"entropy {entropy:.5f} nats is below the floor {floor:.5f} "
 +                f"(baseline {self._entropy_baseline:.5f}) for "
 +                f"{self._entropy_below_floor} consecutive logs. An effective branching "
 +                f"factor of {pow(2.718281828459045, entropy):.2f} tokens is the signature "
-+                f"of a student narrowing rather than learning; saving and stopping.",
++                f"of a student narrowing rather than learning; {tail}",
 +                flush=True,
 +            )
-+            control.should_training_stop = True
 +            control.should_save = True
++            if stopping:
++                control.should_training_stop = True
 +
      def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
          mode = "train" if self.model.training else "eval"
  
-@@ -3740,6 +3882,46 @@ class CustomGOLDTrainer(GOLDTrainer):
+@@ -3740,6 +3899,54 @@ class CustomGOLDTrainer(GOLDTrainer):
          ):
              self.uld_loss_fn._flush_reward_html(self.state.global_step)
  
@@ -400,12 +467,20 @@ index 81eb24c..f754b02 100755
 +            if ce_eq > 0:
 +                # The unweighted CE, so the ce_coef * CE contribution can be compared
 +                # against the divergence in `loss` without recovering it from the product.
-+                logs["ce_anchor_loss"] = round(ce_sum / ce_eq, 4)
++                #
++                # Divided by gradient_accumulation_steps because _ce_anchor_sum gains one
++                # term per MICROBATCH while _ce_anchor_step_eq gains 1/ga: their quotient
++                # is the per-optimizer-step SUM, whereas `loss` carries the per-microbatch
++                # MEAN. Without this the log reads ga times high and the comparison it
++                # exists for is wrong by that factor -- on build d1acf1c0 (ce_coef 0.05,
++                # ga 3) it said 1.922 where the CE actually added to the loss was 0.643.
++                ga = max(1, int(self.args.gradient_accumulation_steps))
++                logs["ce_anchor_loss"] = round(ce_sum / ce_eq / ga, 4)
 +            if diag_tokens > 0:
 +                entropy = entropy_sum / diag_tokens
 +                logs["student_entropy"] = round(entropy, 5)
 +                logs["rkld"] = round(rkld_sum / diag_tokens, 5)
-+                self._maybe_stop_on_entropy_collapse(entropy)
++                self._maybe_act_on_entropy_collapse(entropy)
 +
 +            self._ce_anchor_sum = 0.0
 +            self._ce_anchor_step_eq = 0.0

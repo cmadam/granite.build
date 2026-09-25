@@ -79,6 +79,8 @@ granite.build:
     target_reuse_enabled: true
   targets:
 
+<% if not CORPUS_DIR | string | trim %>
+    # Skipped entirely when CORPUS_DIR is set -- see parameters.yaml.
     # ─── sources ────────────────────────────────────────────────────────────
     # Build ONE corpus file from the three SFT splits, because three things are
     # true at once and no single one of them is optional:
@@ -243,6 +245,7 @@ granite.build:
                 print(f"SOURCES wrote {len(picked)} rows -> {out}", flush=True)
                 print(f"GB_ARTIFACT_ID:corpus_source GB_ARTIFACT_PATH:{out}", flush=True)
                 PYSRC
+<% endif %>
 
     # ─── align ──────────────────────────────────────────────────────────────
     # Re-embeds the base student onto the teacher's tokenizer and emits the
@@ -309,6 +312,8 @@ granite.build:
               verify: true
               dry_run: false
 
+<% if not CORPUS_DIR | string | trim %>
+    # Skipped entirely when CORPUS_DIR is set; corpus-pin-check runs instead.
     # ─── corpus ─────────────────────────────────────────────────────────────
     corpus:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
@@ -386,6 +391,177 @@ granite.build:
               # template.
               documents_policy: "$${DOCUMENTS_POLICY}"
               seed: $${SEED}
+<% else %>
+    # ─── corpus-pin-check (only when CORPUS_DIR is set) ─────────────────────
+    # The corpus is DEFINED by the retagged tokenizer and by the prep policies: the
+    # rows were rendered through that chat template, the assistant masks were built
+    # with that tokenizer, and 5,908 rows were dropped for exceeding THAT max_length.
+    # A pin taken from a run that differed in any of those trains on a corpus this
+    # build does not describe, and every metric downstream would still look normal.
+    #
+    # So this target exists to turn that into a loud failure, and to do it BEFORE the
+    # 2-node H100 allocation is held. It is CPU-only and reads one JSON file, so the
+    # cost of having it is seconds; the cost of not having it is a run.
+    #
+    # Every consumer of the pinned corpus binds this target's output, which is what
+    # makes the check an ordering edge rather than a suggestion.
+    corpus-pin-check:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        # Declared so the pinned corpus appears in this build's lineage at all: with
+        # `sources` and `corpus` gone, this is the only place it is named as an input.
+        pinned_corpus:
+          uri: "env://$${CORPUS_DIR.rstrip('/')}/train.jsonl"
+          type: dataset
+        # The tokenizer the manifest has to agree with, and the ordering edge that
+        # guarantees align has run before the comparison is made.
+        tokenizer:
+          binding: align.retagged_student
+      outputs:
+        pin_check:
+          uri: "env://{{ binding.path }}"
+          type: fileset
+      steps:
+        - step_uri: space://steps/command
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${CPU_ONLY_CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${CPU_ONLY_MEMORY}
+            command_config:
+              # LITERAL block scalar, and the arguments are passed positionally rather
+              # than interpolated into the python: the same discipline the other
+              # command steps in this file use, for the same reason (build 77aef958
+              # for the block scalar, bb779f1f for what a stray blank line does to a
+              # backslash-continued argument list -- there are none here).
+              command: |
+                set -euo pipefail
+                OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus-pin"
+                mkdir -p "$OUT_DIR"
+                /stage/.venv/bin/python - \
+                  "$${CORPUS_DIR.rstrip('/')}" \
+                  "$${TEACHER_MODEL}" \
+                  "$${MAX_LENGTH}" \
+                  "$${THINK_POLICY}" \
+                  "$${DOCUMENTS_POLICY}" \
+                  "$${EVAL_FRACTION}" \
+                  "{{ bindings.tokenizer.binding.path }}" \
+                  "$OUT_DIR/corpus_pin.json" \
+                  <<'PYSRC'
+                import hashlib, json, sys
+                from pathlib import Path
+
+                corpus = Path(sys.argv[1])
+                teacher = sys.argv[2]
+                max_length = int(sys.argv[3])
+                think_policy = sys.argv[4]
+                documents_policy = sys.argv[5]
+                eval_fraction = float(sys.argv[6])
+                tokenizer_dir = Path(sys.argv[7])
+                out = Path(sys.argv[8])
+
+                problems = []
+
+                manifest_path = corpus / "corpus_manifest.json"
+                if not manifest_path.is_file():
+                    raise SystemExit(f"FATAL: no corpus_manifest.json under {corpus}")
+                manifest = json.loads(manifest_path.read_text())
+
+                # The splits, before anything else: a pin whose files were cleaned up
+                # is the most likely way this target fires, and the cheapest to say.
+                for name in ("train.jsonl", "eval.jsonl"):
+                    if not (corpus / name).is_file():
+                        problems.append(f"{name} is missing from {corpus}")
+
+                # What the corpus was built AGAINST.
+                want_identity = Path(teacher.rstrip("/")).name
+                got_identity = manifest.get("tokenizer_identity")
+                if got_identity != want_identity:
+                    problems.append(
+                        f"tokenizer_identity {got_identity!r} != this build's teacher "
+                        f"{want_identity!r}"
+                    )
+
+                # What the corpus was built WITH. completion_boundary is not a
+                # parameter -- the recipe hard-codes last_message because the eval
+                # measures divergence over the final assistant turn -- so it is
+                # compared against that literal rather than against a parameter.
+                policies = manifest.get("policies") or {}
+                for key, want in (
+                    ("max_length", max_length),
+                    ("think_policy", think_policy),
+                    ("documents_policy", documents_policy),
+                    ("completion_boundary", "last_message"),
+                ):
+                    got = policies.get(key)
+                    if got != want:
+                        problems.append(f"policies.{key} {got!r} != {want!r}")
+
+                if float(manifest.get("eval_fraction", -1)) != eval_fraction:
+                    problems.append(
+                        f"eval_fraction {manifest.get('eval_fraction')!r} != "
+                        f"{eval_fraction!r}"
+                    )
+
+                # Strongest available check, when it is available: the manifest records
+                # the tokenizer directory it used, so if that directory still exists we
+                # compare bytes rather than trusting a name. It is allowed to be gone --
+                # a pin should outlive the build that produced it -- and the report says
+                # which mode ran, so a reader never has to guess how strict this was.
+                pinned_tok = Path(str(manifest.get("tokenizer_path") or ""))
+                mode = "identity-only (pinned tokenizer_path no longer on disk)"
+                if pinned_tok.is_dir():
+                    mode = "byte-compared against the pinned tokenizer_path"
+                    for name in ("tokenizer.json", "chat_template.jinja"):
+                        here, there = tokenizer_dir / name, pinned_tok / name
+                        if not there.is_file():
+                            problems.append(f"{name} missing from {pinned_tok}")
+                        elif not here.is_file():
+                            problems.append(f"{name} missing from {tokenizer_dir}")
+                        else:
+                            hh = hashlib.sha256(here.read_bytes()).hexdigest()
+                            th = hashlib.sha256(there.read_bytes()).hexdigest()
+                            if hh != th:
+                                problems.append(
+                                    f"{name} differs: this build {hh[:16]} vs pinned "
+                                    f"{th[:16]}"
+                                )
+
+                # Every problem, not the first: whoever is re-pointing a sweep at a
+                # corpus wants the whole list in one read, not one per relaunch.
+                if problems:
+                    print(f"CORPUS-PIN REJECTED {corpus}", flush=True)
+                    for p in problems:
+                        print(f"  - {p}", flush=True)
+                    raise SystemExit(
+                        f"FATAL [corpus-pin-check]: {len(problems)} mismatch(es) "
+                        f"between this build and the pinned corpus manifest"
+                    )
+
+                report = {
+                    "corpus_dir": str(corpus),
+                    "accepted": True,
+                    "tokenizer_check": mode,
+                    "tokenizer_identity": got_identity,
+                    "policies": policies,
+                    "eval_fraction": manifest.get("eval_fraction"),
+                    "seed": manifest.get("seed"),
+                    "counts": manifest.get("counts"),
+                    "splits": manifest.get("splits"),
+                }
+                out.write_text(json.dumps(report, indent=2))
+                print(f"CORPUS-PIN ACCEPTED {corpus} ({mode})", flush=True)
+                print(f"GB_ARTIFACT_ID:pin_check GB_ARTIFACT_PATH:{out}", flush=True)
+                PYSRC
+
+<% endif %>
 
 <% if INCLUDE_SFT | string | lower in ("true", "yes", "1", "on") %>
     # ─── train-sft (switched on) ────────────────────────────────────────────
@@ -399,8 +575,20 @@ granite.build:
       inputs:
         student:
           binding: align.retagged_student
+<% if CORPUS_DIR | string | trim %>
+        # Pinned: read DIRECTLY, because `corpus` was not rendered and a binding
+        # naming it would block this target on a producer that does not exist.
+        corpus:
+          uri: "env://$${CORPUS_DIR.rstrip('/')}/train.jsonl"
+          type: dataset
+        # The ordering edge the binding used to provide, now carrying the manifest
+        # comparison with it: nothing reads a pinned corpus before it is checked.
+        corpus_pin:
+          binding: corpus-pin-check.pin_check
+<% else %>
         corpus:
           binding: corpus.corpus
+<% endif %>
       outputs:
         checkpoint:
           uri: "env://{{ binding.path }}"
@@ -538,8 +726,20 @@ granite.build:
         student:
           binding: align.retagged_student
 <% endif %>
+<% if CORPUS_DIR | string | trim %>
+        # Pinned: read DIRECTLY, because `corpus` was not rendered and a binding
+        # naming it would block this target on a producer that does not exist.
+        corpus:
+          uri: "env://$${CORPUS_DIR.rstrip('/')}/train.jsonl"
+          type: dataset
+        # The ordering edge the binding used to provide, now carrying the manifest
+        # comparison with it: nothing reads a pinned corpus before it is checked.
+        corpus_pin:
+          binding: corpus-pin-check.pin_check
+<% else %>
         corpus:
           binding: corpus.corpus
+<% endif %>
         teacher_model:
           uri: "env://$${TEACHER_MODEL}"
           type: model
@@ -621,6 +821,7 @@ granite.build:
               entropy_guard_drop_frac: $${ENTROPY_GUARD_DROP_FRAC}
               entropy_guard_baseline_steps: $${ENTROPY_GUARD_BASELINE_STEPS}
               entropy_guard_patience: $${ENTROPY_GUARD_PATIENCE}
+              entropy_guard_action: "$${ENTROPY_GUARD_ACTION}"
 
               response_template: "$${RESPONSE_TEMPLATE}"
               nccl_debug: "$${NCCL_DEBUG}"
@@ -725,12 +926,25 @@ granite.build:
       inputs:
         student:
           binding: align.retagged_student
-        # Bound for the ORDERING EDGE, not for the path: eval.jsonl is not a
-        # declared artifact, so the corpus below is composed from the same root
-        # the corpus target was given. The binding is what still guarantees this
+        # For the ORDERING EDGE, not for the path: eval.jsonl is not a declared
+        # artifact, so the corpus below is composed from the same root the corpus
+        # came from -- CORPUS_DIR when pinned, this build's own subdir otherwise.
+        # The upstream edge is what still guarantees this
         # target cannot start before the split exists.
+<% if CORPUS_DIR | string | trim %>
+        # Pinned: read DIRECTLY, because `corpus` was not rendered and a binding
+        # naming it would block this target on a producer that does not exist.
+        corpus:
+          uri: "env://$${CORPUS_DIR.rstrip('/')}/train.jsonl"
+          type: dataset
+        # The ordering edge the binding used to provide, now carrying the manifest
+        # comparison with it: nothing reads a pinned corpus before it is checked.
+        corpus_pin:
+          binding: corpus-pin-check.pin_check
+<% else %>
         corpus:
           binding: corpus.corpus
+<% endif %>
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -754,7 +968,11 @@ granite.build:
             eval_config:
               student_model: "{{ bindings.student.binding.path }}"
               teacher_model: "$${TEACHER_MODEL}"
+<% if CORPUS_DIR | string | trim %>
+              corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
+<% else %>
               corpus: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus/eval.jsonl"
+<% endif %>
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-transfer-baseline"
               metrics: "$${EVAL_METRICS}"
               max_samples: $${EVAL_MAX_SAMPLES}
@@ -788,8 +1006,20 @@ granite.build:
       inputs:
         student:
           binding: export-$${N}.hf_model
+<% if CORPUS_DIR | string | trim %>
+        # Pinned: read DIRECTLY, because `corpus` was not rendered and a binding
+        # naming it would block this target on a producer that does not exist.
+        corpus:
+          uri: "env://$${CORPUS_DIR.rstrip('/')}/train.jsonl"
+          type: dataset
+        # The ordering edge the binding used to provide, now carrying the manifest
+        # comparison with it: nothing reads a pinned corpus before it is checked.
+        corpus_pin:
+          binding: corpus-pin-check.pin_check
+<% else %>
         corpus:
           binding: corpus.corpus
+<% endif %>
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -812,7 +1042,11 @@ granite.build:
             eval_config:
               student_model: "{{ bindings.student.binding.path }}"
               teacher_model: "$${TEACHER_MODEL}"
+<% if CORPUS_DIR | string | trim %>
+              corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
+<% else %>
               corpus: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus/eval.jsonl"
+<% endif %>
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-transfer-$${N}"
               metrics: "$${EVAL_METRICS}"
               max_samples: $${EVAL_MAX_SAMPLES}
@@ -872,16 +1106,27 @@ granite.build:
               # LITERAL block scalar. A folded one (>-) joins lines with spaces and
               # turns the heredoc below into a one-line syntax error -- build
               # 77aef958. The recipe test runs bash -n and compile() on this.
+              #
+              # The rungs go into an array, one append per iteration, and NOT into a
+              # backslash-continued argument list. Jinja block tags are not trimmed
+              # here, so every one of them leaves a blank line where it stood, and a
+              # blank line after a `\` ends the command -- bash then runs the next rung
+              # as a program name. That is build bb779f1f: `line 26: 500:/proj/.../export-500:
+              # No such file or directory`, python reached with no heredoc and no rungs,
+              # and `bash -n` green throughout, because `500:/path` is a valid command.
+              # Blank lines BETWEEN array appends are inert, which is the whole point.
               command: |
                 set -euo pipefail
                 OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/gen-smoke"
                 mkdir -p "$OUT_DIR"
+                RUNGS=()
+<% for N in CKPT_LADDER.split(",") %>
+                RUNGS+=("$${N}:$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/export-$${N}")
+<% endfor %>
                 /stage/.venv/bin/python - \
                   "$OUT_DIR/repetition.json" "$${GEN_SMOKE_MAX_REPETITION}" \
                   "$${GEN_SMOKE_NEW_TOKENS}" \
-<% for N in CKPT_LADDER.split(",") %>
-                  "$${N}:$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/export-$${N}" \
-<% endfor %>
+                  "${RUNGS[@]}" \
                   <<'PYSRC'
                 import json, sys
                 from pathlib import Path
@@ -1049,21 +1294,33 @@ granite.build:
                     sys.exit(1)
                 PYSRC
 
-    # ─── eval-bfcl ──────────────────────────────────────────────────────────
+    # ─── eval-bfcl-baseline, then eval-bfcl-<N> per rung ────────────────────
     # Capability, against ground truth. A DIFFERENT question from eval-transfer,
     # and neither substitutes for the other: a student can move toward the
     # teacher's distribution while losing tool-calling accuracy, and the transfer
     # metric cannot see that. Wired directly rather than wrapped by distill-eval,
     # so its own artifacts stay its own — and it runs in its own image, so no
     # image_id override here.
-    eval-bfcl:
+    #
+    # ONE PER RUNG, PLUS A BASELINE, and the two failed builds are the argument.
+    # bb779f1f bound this to the last rung only, as a plumbing check. What came back
+    # was accuracy 0.000 (0/400) at step 2,000 — with no baseline to compare it
+    # against and no reading at any earlier step, so it could not say whether the
+    # capability was lost by step 25 or step 1,999, nor whether the starting student
+    # could do the task at all. Every divergence metric in that build improved while
+    # this one sat at zero, which is precisely the failure eval-transfer cannot see.
+    # A ladder of divergence readings next to a single capability reading measures
+    # the wrong thing carefully.
+    #
+    # ~10 min each on 1 H100 at BFCL_TEST_CATEGORIES simple, and they are independent,
+    # so the eight of them cost about what one did in wall-clock.
+    eval-bfcl-baseline:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-        # The LAST rung. This is a plumbing check at BFCL_TEST_CATEGORIES simple,
-        # not a measurement, so it does not need the ladder — the real BFCL number
-        # comes from full-eval on whichever checkpoint the readings select.
+        # The aligned student, untrained. A capability number with no baseline is a
+        # number without a direction — the same reason eval-transfer-baseline exists.
         model:
-          binding: export-$${CKPT_LADDER.split(",")[-1]}.hf_model
+          binding: align.retagged_student
       outputs:
         # A single result FILE, chosen by the step from what the BFCL harness
         # produced.
@@ -1078,7 +1335,7 @@ granite.build:
             bfcl_config:
               model_path: "{{ bindings.model.binding.path }}"
               model_id: "$${BFCL_MODEL_ID}"
-              experiment: "$${RUN_NAME}"
+              experiment: "$${RUN_NAME}-baseline"
               eval_name: "$${BFCL_EVAL_NAME}"
               test_categories: "$${BFCL_TEST_CATEGORIES}"
               num_gpus_generate: $${BFCL_NUM_GPUS}
@@ -1086,7 +1343,7 @@ granite.build:
               gpu_memory_utilization: "$${BFCL_GPU_MEMORY_UTILIZATION}"
               # The step appends experiment and eval_name to this, so the results
               # land under the run directory with everything else.
-              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-bfcl"
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-bfcl-baseline"
             launcher_config:
               resources:
                 accelerators: "H100:$${BFCL_NUM_GPUS}"
@@ -1117,3 +1374,64 @@ granite.build:
               # A LIST, even with one entry.
               cluster_names:
                 - "{{ bindings.vllm_cluster.binding.state }}"
+
+<% for N in CKPT_LADDER.split(",") %>
+    eval-bfcl-$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        model:
+          binding: export-$${N}.hf_model
+      outputs:
+        # A single result FILE, chosen by the step from what the BFCL harness
+        # produced.
+        bfcl_results:
+          uri: "env://{{ binding.path }}"
+          type: dataset
+      steps:
+        - step_uri: space://steps/bfcl-eval
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            bfcl_config:
+              model_path: "{{ bindings.model.binding.path }}"
+              model_id: "$${BFCL_MODEL_ID}"
+              experiment: "$${RUN_NAME}-ck$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              test_categories: "$${BFCL_TEST_CATEGORIES}"
+              num_gpus_generate: $${BFCL_NUM_GPUS}
+              num_gpus_evaluate: $${BFCL_NUM_GPUS}
+              gpu_memory_utilization: "$${BFCL_GPU_MEMORY_UTILIZATION}"
+              # The step appends experiment and eval_name to this, so the results
+              # land under the run directory with everything else.
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-bfcl-$${N}"
+            launcher_config:
+              resources:
+                accelerators: "H100:$${BFCL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${GPU_MEMORY}
+
+    # ─── teardown ───────────────────────────────────────────────────────────
+    # Not optional. LSF SERVICE clusters never auto-stop, so without this the
+    # server's GPUs stay held after training finishes.
+    #
+    # Gated on the trainer's checkpoint, which means a CRASHED trainer never triggers
+    # it — gbserver's schema has no on-failure semantics. That is what
+    # VLLM_MAX_LIFETIME_SECONDS above is the backstop for.
+    teardown:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        # `trained` is the ordering primitive and nothing else: the trainer emits
+        # checkpoint as its final log line, so this target runs after training ends.
+        trained:
+          binding: train-gold.checkpoint
+        vllm_cluster:
+          binding: vllm-server.cluster_name
+      steps:
+        - step_uri: space://steps/skypilot-teardown
+          config:
+            teardown_config:
+              # A LIST, even with one entry.
+              cluster_names:
+                - "{{ bindings.vllm_cluster.binding.state }}"
+<% endfor %>

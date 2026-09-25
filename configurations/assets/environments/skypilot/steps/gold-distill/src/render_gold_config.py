@@ -115,6 +115,11 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         raise ValueError("entropy_guard_baseline_steps must be >= 1")
     if args.entropy_guard_patience < 1:
         raise ValueError("entropy_guard_patience must be >= 1")
+    if args.entropy_guard_action not in ("stop", "warn"):
+        raise ValueError(
+            "entropy_guard_action must be 'stop' or 'warn'; got "
+            f"{args.entropy_guard_action!r}"
+        )
 
     # The lmbda ramp and the generation floor are on-policy-only. At lmbda 0 the student
     # never generates, so both would be silently inert rather than wrong — which is the
@@ -201,6 +206,7 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
                 "entropy_guard_drop_frac": float(args.entropy_guard_drop_frac),
                 "entropy_guard_baseline_steps": args.entropy_guard_baseline_steps,
                 "entropy_guard_patience": args.entropy_guard_patience,
+                "entropy_guard_action": args.entropy_guard_action,
             }
             if args.entropy_guard_drop_frac > 0
             else {}
@@ -327,6 +333,13 @@ def _parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--entropy-guard-baseline-steps", type=int, default=20)
     p.add_argument("--entropy-guard-patience", type=int, default=3)
+    p.add_argument(
+        "--entropy-guard-action",
+        default="stop",
+        help="What a tripped guard does: stop the run at that step, or warn and carry "
+             "on to max_steps. Use warn when the run's purpose is the collapse curve "
+             "itself and a fixed export ladder needs every rung to exist.",
+    )
     p.add_argument(
         "--lmbda-schedule",
         default="constant",

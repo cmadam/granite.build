@@ -40,6 +40,7 @@ directory the trainer never wrote, and the export target fails AFTER the trainin
 been paid for.
 """
 
+import json
 import pathlib
 import re
 import subprocess
@@ -67,13 +68,14 @@ _HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 # The loop variable is bound by the <% for %> block, not by parameters.yaml.
 _LOOP_VARS = {"N"}
 
-_LADDER = ["500", "1000", "1500", "2000"]
+_LADDER = ["25", "50", "75", "100", "150", "200", "300"]
 _TARGETS = (
     ["sources", "align", "corpus", "train-gold"]
     + [f"export-{n}" for n in _LADDER]
     + ["eval-transfer-baseline"]
     + [f"eval-transfer-{n}" for n in _LADDER]
-    + ["gen-smoke", "eval-bfcl"]
+    + ["gen-smoke", "eval-bfcl-baseline"]
+    + [f"eval-bfcl-{n}" for n in _LADDER]
 )
 
 
@@ -115,9 +117,10 @@ def test_every_marker_has_a_parameter():
 def test_every_parameter_is_referenced():
     contents = (_RECIPE / "build.yaml").read_text(encoding="utf-8")
     referenced = set(_PLAIN_MARKER.findall(contents))
-    # CKPT_LADDER is also reached through an expression (.split(...)), which the plain
-    # marker pattern does not match, so allow it explicitly.
-    referenced |= {"CKPT_LADDER"}
+    # CKPT_LADDER (.split(...)) and CORPUS_DIR (.rstrip('/'), so a copied path with a
+    # trailing slash cannot reach an artifact URI) are reached through an expression,
+    # which the plain marker pattern does not match, so allow them explicitly.
+    referenced |= {"CKPT_LADDER", "CORPUS_DIR"}
     assert set(_params()) - referenced - {"INCLUDE_SFT"} == set()
 
 
@@ -176,6 +179,46 @@ class TestTheAnchoredObjective:
         assert 0 < float(gold["entropy_guard_drop_frac"]) < 0.42
         assert int(gold["entropy_guard_baseline_steps"]) >= 1
         assert int(gold["entropy_guard_patience"]) >= 1
+
+    def test_a_stopping_guard_and_a_fixed_ladder_cannot_both_be_asked_for(self, off):
+        """THE failure of build d1acf1c0, as an invariant.
+
+        The guard tripped at step 77 of 2,000 and stopped the run, exactly as armed. But
+        every rung of this recipe's ladder is a literal step number, and the trainer had
+        written none of them: all four export targets failed with `requested checkpoint
+        does not exist`, the build failed, and the run's question went unanswered after
+        the training was paid for. The two features are individually right and jointly
+        contradictory -- a guard that may stop at an arbitrary step, and consumers that
+        demand specific steps -- so one of them has to give, and for a run whose PURPOSE
+        is the collapse curve it is the stop.
+
+        Either the guard only warns, or no rung is allowed to outlive a possible stop.
+        This recipe takes the first branch; the assertion admits both so that a future
+        recipe choosing the second is not forced to lie."""
+        gold = _config(off, "train-gold")["gold_config"]
+        if float(gold["entropy_guard_drop_frac"]) <= 0:
+            return  # guard disarmed: the ladder is bounded by max_steps alone
+        rungs = [int(n) for n in _params()["CKPT_LADDER"].split(",")]
+        if gold["entropy_guard_action"] == "stop":
+            raise AssertionError(
+                "the guard may stop at any step past "
+                f"{gold['entropy_guard_baseline_steps']}, but the ladder demands "
+                f"checkpoints at {rungs}. Set ENTROPY_GUARD_ACTION=warn, or stop naming "
+                "fixed rungs."
+            )
+        assert gold["entropy_guard_action"] == "warn"
+
+    def test_the_guard_still_reports_and_checkpoints_when_it_only_warns(self, off):
+        """warn must not become off. The trip step is the single most interesting
+        checkpoint in the run, and the reading is the whole reason the guard is armed
+        in an arm that is expected to collapse."""
+        gold = _config(off, "train-gold")["gold_config"]
+        assert float(gold["entropy_guard_drop_frac"]) > 0
+        assert gold["log_student_entropy"] is True
+        # A trip adds one checkpoint beyond the scheduled ones, so the no-eviction
+        # budget has to cover it.
+        produced = int(gold["max_steps"]) // int(gold["save_steps"]) + 1
+        assert int(gold["save_total_limit"]) >= produced
 
     def test_the_guard_cannot_be_armed_without_its_metric(self, off):
         """Belt and braces: the renderer refuses this combination too, but a recipe
@@ -296,10 +339,20 @@ class TestTheHorizonAndTheLadder:
         gold = _config(off, "train-gold")["gold_config"]
         assert int(gold["max_steps"]) > 0
 
-    def test_the_horizon_is_in_the_low_thousands(self, off):
-        """Long enough to be well past the step-509 knee, short enough that the run
-        is not mostly spent where nothing is left to learn."""
-        assert 500 <= int(_config(off, "train-gold")["gold_config"]["max_steps"]) <= 4000
+    def test_the_horizon_covers_the_descent_and_not_much_more(self, off):
+        """Bounded by the control's OWN measured curve, not by df8512e0's step-509 knee.
+
+        Build bb779f1f ran the unanchored objective 2,000 steps with the guard off:
+        entropy -19% by step 80, -29.7% by 120, -34.1% by 250, and -35.5% at 2,000. The
+        last 1,750 steps bought 1.4%. JSD and forward KL were flat after 500 and reverse
+        KL never moved. So the horizon has to clear the shoulder (~250) and has no reason
+        to run far past it -- and a short horizon is what makes a CE_COEF sweep
+        affordable, which is the experiment this recipe is now for.
+
+        The upper bound is the load-bearing half. Nothing stops someone restoring 2,000
+        'to be safe', and that silently triples the cost of every arm."""
+        max_steps = int(_config(off, "train-gold")["gold_config"]["max_steps"])
+        assert 250 <= max_steps <= 600, max_steps
 
     def test_every_rung_is_a_checkpoint_that_will_exist(self, off):
         """The failure this prevents: a rung that is not a multiple of save_steps names
@@ -382,6 +435,68 @@ class TestGenSmoke:
         )
         assert result.returncode == 0, result.stderr
 
+    def test_the_interpreter_actually_receives_every_rung(self, tmp_path):
+        """Executes the assembly instead of parsing it. `bash -n` cannot see this
+        failure and neither can compile(): the <% %> block tags are not trimmed, so
+        each leaves a blank line where it stood, a blank line after a `\\` ENDS the
+        command, and bash then runs the next rung as a program name -- exit 127 with
+        `500:/proj/.../export-500: No such file or directory`, which is build
+        bb779f1f's gen-smoke. The interpreter is reached with no rungs and no heredoc
+        while every static check stays green, so the only test that can catch it is
+        one that looks at what the interpreter was handed."""
+        rendered = _render(tmp_path, INCLUDE_SFT=False, WORKDIR_ROOT=str(tmp_path))
+        cmd = _config(rendered, "gen-smoke")["command_config"]["command"]
+
+        argv_log = tmp_path / "argv.json"
+        stdin_log = tmp_path / "stdin.txt"
+        stub = tmp_path / "python-stub"
+        stub.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            f"open({str(stdin_log)!r}, 'w').write(sys.stdin.read())\n"
+            f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+
+        # Only the interpreter is swapped. Every argument, the array, the loop and the
+        # heredoc are the recipe's own rendered text.
+        script = cmd.replace("/stage/.venv/bin/python", str(stub))
+        result = subprocess.run(["bash"], input=script, text=True, capture_output=True)
+        assert result.returncode == 0, result.stderr
+
+        argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        rungs = _params()["CKPT_LADDER"].split(",")
+        # The stub sees the `-` that real python consumes as "read the program from
+        # stdin"; the recipe's own arguments start after it.
+        assert argv[0] == "-", f"interpreter got {argv}"
+        argv = argv[1:]
+        assert len(argv) == 3 + len(rungs), f"interpreter got {argv}"
+        assert argv[0].endswith("/repetition.json")
+        assert argv[1] == str(_params()["GEN_SMOKE_MAX_REPETITION"])
+        assert argv[2] == str(_params()["GEN_SMOKE_NEW_TOKENS"])
+        for rung, got in zip(rungs, argv[3:]):
+            step, _, path = got.partition(":")
+            assert step == rung, f"expected rung {rung}, got {got}"
+            assert path.endswith(f"/export-{rung}"), got
+
+        # The heredoc has to land on the interpreter's stdin, not be orphaned by a
+        # broken continuation.
+        assert "def looped_fraction" in stdin_log.read_text(encoding="utf-8")
+
+    def test_no_rung_is_appended_through_a_line_continuation(self):
+        """The shape that broke, guarded at the source. A `\\`-continued line
+        followed by a <% %> tag renders to a continuation followed by a blank line,
+        which terminates the command."""
+        lines = (_RECIPE / "build.yaml").read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines[:-1]):
+            if line.rstrip().endswith("\\") and lines[i + 1].lstrip().startswith("<%"):
+                raise AssertionError(
+                    f"{_RECIPE.name}/build.yaml:{i + 1}: continuation followed by a "
+                    f"block tag renders to a blank line and ends the command:\n"
+                    f"  {line}\n  {lines[i + 1]}"
+                )
+
     def test_the_embedded_python_compiles(self, cmd):
         bodies = _HEREDOC.findall(cmd)
         assert bodies, "no Python heredoc found; has the target changed shape?"
@@ -450,10 +565,44 @@ class TestGenSmoke:
         for degenerate_input in ("", "one line", "\n\n  \n"):
             assert measure(degenerate_input)[0] == 0.0
 
-    def test_the_bfcl_plumbing_check_reads_the_last_rung(self, off):
-        rungs = _params()["CKPT_LADDER"].split(",")
-        binding = _targets(off)["eval-bfcl"]["inputs"]["model"]["binding"]
-        assert binding == f"export-{rungs[-1]}.hf_model"
+    def test_capability_is_measured_at_every_rung_and_at_the_baseline(self, off):
+        """bb779f1f measured capability ONCE, at step 2,000, and got 0.000 (0/400) with
+        no baseline and no earlier reading -- so it could not say whether the capability
+        went at step 25 or step 1,999, nor whether the starting student had it. Every
+        divergence metric in that build improved while this one sat at zero, which is
+        exactly what eval-transfer cannot see. A ladder of divergence readings beside a
+        single capability reading measures the wrong thing carefully."""
+        targets = _targets(off)
+        assert (
+            targets["eval-bfcl-baseline"]["inputs"]["model"]["binding"]
+            == "align.retagged_student"
+        )
+        for rung in _params()["CKPT_LADDER"].split(","):
+            binding = targets[f"eval-bfcl-{rung}"]["inputs"]["model"]["binding"]
+            assert binding == f"export-{rung}.hf_model"
+
+    def test_no_two_bfcl_targets_share_an_output_directory(self, off):
+        """Each writes under output_dir/experiment/eval_name, so a shared pair would
+        have two targets registering one artifact URI -- the b5f030cd mode, where the
+        second reports SUCCESS with an empty output list and consumers wait forever."""
+        seen = {}
+        names = ["eval-bfcl-baseline"] + [
+            f"eval-bfcl-{n}" for n in _params()["CKPT_LADDER"].split(",")
+        ]
+        for name in names:
+            cfg = _config(off, name)["bfcl_config"]
+            key = (cfg["output_dir"], cfg["experiment"])
+            assert key not in seen, f"{name} collides with {seen[key]}: {key}"
+            seen[key] = name
+
+    def test_the_descent_is_where_the_rungs_are(self, off):
+        """The old ladder was 500/1000/1500/2000 -- every rung on the plateau, which is
+        how two builds produced no reading anywhere in the region that moves. The
+        control loses 19% of its entropy by step 80; at least half the rungs belong at
+        or below that shoulder."""
+        rungs = [int(n) for n in _params()["CKPT_LADDER"].split(",")]
+        early = [n for n in rungs if n <= 120]
+        assert len(early) >= len(rungs) / 2, f"only {early} of {rungs} are in the descent"
 
 
 # ─── Diagnosability ────────────────────────────────────────────────────────────
@@ -479,3 +628,254 @@ def test_the_stale_smoke_comments_did_not_come_along(off):
     assert "Nothing it produces is a publishable measurement" not in text
     assert "no cross-node collectives" not in text
     assert "One node, two GPUs for GOLD" not in text
+
+
+# ─── Reusing an existing corpus ────────────────────────────────────────────────
+
+
+_PIN = "/proj/granite-build/g4os/distill/distill-350m-s1v2-ce040/c20ed3c0/corpus"
+
+
+def _corpus_inputs(rendered):
+    """Every input named `corpus`, by target. These are the four consumers whose
+    wiring has to change together: miss one and it either waits on a target that
+    was not rendered, or reads a corpus nobody checked."""
+    out = {}
+    for name, target in _targets(rendered).items():
+        spec = (target.get("inputs") or {}).get("corpus")
+        if spec is not None:
+            out[name] = spec
+    return out
+
+
+@pytest.fixture(name="pinned")
+def fixture_pinned(tmp_path):
+    return _render(tmp_path, INCLUDE_SFT=False, CORPUS_DIR=_PIN)
+
+
+class TestTheCorpusPin:
+    """`sources` + `corpus` are ~50 minutes on the critical path before train-gold can
+    start, and they are deterministic: the three arms of the CE_COEF sweep that
+    completed (9dab9130, 8c8ebd63, c20ed3c0) produced byte-identical
+    sources/train.jsonl, corpus/train.jsonl and corpus/eval.jsonl. So a sweep pays for
+    the same file once per arm.
+
+    Pinning has to be done as a DIRECT input, not by fixing BUILD_SUBDIR. gbserver's
+    target reuse is scoped to one build id (docs/builds/target-reuse.md), and a shared
+    output URI is the b5f030cd mode: the second build's registration is refused, the
+    target still reports SUCCESS with an empty output list, and every consumer waits
+    forever on a binding that will never resolve."""
+
+    def test_the_corpus_is_built_in_the_build_by_default(self, off):
+        """The default must not change. Every run before this parameter existed built
+        its own corpus, and an unpinned build still has to."""
+        assert "sources" in _targets(off)
+        assert "corpus" in _targets(off)
+        assert _corpus_inputs(off)
+        for name, spec in _corpus_inputs(off).items():
+            assert spec.get("binding") == "corpus.corpus", name
+            assert "uri" not in spec, name
+
+    def test_a_pin_removes_the_targets_that_would_rebuild_it(self, pinned):
+        assert "sources" not in _targets(pinned)
+        assert "corpus" not in _targets(pinned)
+
+    def test_a_pin_is_read_directly_and_not_through_a_binding(self, pinned):
+        """The load-bearing assertion. A `binding` names another target's output in
+        THIS build; with `corpus` not rendered, any surviving binding is a consumer
+        blocked on a producer that does not exist."""
+        consumers = _corpus_inputs(pinned)
+        assert consumers, "no target reads the corpus at all"
+        for name, spec in consumers.items():
+            assert "binding" not in spec, name
+            assert spec["uri"] == f"env://{_PIN}/train.jsonl", name
+
+    def test_a_pin_is_never_re_registered_as_an_output(self, pinned):
+        """b5f030cd. Reading a URI another build produced is ordinary; declaring it as
+        your own output is what gbserver refuses."""
+        for name, target in _targets(pinned).items():
+            for out_name, spec in (target.get("outputs") or {}).items():
+                assert _PIN not in str(spec.get("uri", "")), f"{name}.{out_name}"
+
+    def test_the_transfer_evals_read_the_pinned_eval_split(self, pinned):
+        """These two compose the eval.jsonl path by hand rather than through the
+        binding, so they are the sites a parameter switch is most likely to miss."""
+        evals = [n for n in _targets(pinned) if n.startswith("eval-transfer-")]
+        assert evals
+        for name in evals:
+            cfg = _config(pinned, name)["eval_config"]
+            assert cfg["corpus"] == f"{_PIN}/eval.jsonl", name
+
+    def test_an_unpinned_build_still_reads_its_own_eval_split(self, off):
+        for name in [n for n in _targets(off) if n.startswith("eval-transfer-")]:
+            cfg = _config(off, name)["eval_config"]
+            assert cfg["corpus"].endswith("/corpus/eval.jsonl"), name
+            assert _PIN not in cfg["corpus"], name
+
+    def test_a_pin_is_checked_before_any_allocation_is_held(self, pinned, off):
+        """The corpus is DEFINED by the retagged tokenizer and by the prep policies.
+        A pin taken from a run with a different teacher or a different max_length
+        trains on a corpus this build does not describe, and nothing downstream would
+        say so -- which is the one new silent failure mode pinning introduces."""
+        assert "corpus-pin-check" in _targets(pinned)
+        assert "corpus-pin-check" not in _targets(off)
+        gate = _targets(pinned)["corpus-pin-check"]
+        assert (gate["inputs"]["tokenizer"]["binding"]) == "align.retagged_student"
+        res = _config(pinned, "corpus-pin-check")["launcher_config"]["resources"]
+        assert "accelerators" not in res, "the gate must not hold a GPU"
+        for name in _corpus_inputs(pinned):
+            bindings = {
+                s.get("binding") for s in _targets(pinned)[name]["inputs"].values()
+            }
+            assert "corpus-pin-check.pin_check" in bindings, name
+
+
+    @pytest.mark.parametrize("include_sft", [False, True])
+    @pytest.mark.parametrize("pin", ["", _PIN])
+    def test_both_switches_render_together(self, tmp_path, include_sft, pin):
+        """Two independent conditionals now gate the same graph, and INCLUDE_SFT's
+        train-sft is itself a corpus consumer. The combinations are cheap to render
+        and the failure mode -- one arm of one switch leaving unbalanced YAML -- is
+        only visible when both are exercised."""
+        rendered = _render(tmp_path, INCLUDE_SFT=include_sft, CORPUS_DIR=pin)
+        targets = _targets(rendered)
+        assert ("train-sft" in targets) is include_sft
+        assert ("sources" in targets) is not bool(pin)
+        assert ("corpus-pin-check" in targets) is bool(pin)
+        for spec in _corpus_inputs(rendered).values():
+            assert bool(spec.get("uri")) is bool(pin)
+
+    def test_a_trailing_slash_does_not_reach_the_uri(self, tmp_path):
+        """`ls -d .../*/` prints a trailing slash, which is how the path gets copied in
+        practice. Unnormalised it renders `env://<dir>//train.jsonl` -- which resolves on
+        POSIX but records an artifact URI that does not match the canonical one."""
+        contents = (_RECIPE / "build.yaml").read_text(encoding="utf-8")
+        plain, slashed = (
+            apply_parameters(contents, [], _params(INCLUDE_SFT=False, CORPUS_DIR=d), str(tmp_path))
+            for d in (_PIN, _PIN + "/")
+        )
+        assert plain == slashed
+
+
+class TestThePinCheckScript:
+    @pytest.fixture(name="cmd")
+    def fixture_cmd(self, pinned):
+        return _config(pinned, "corpus-pin-check")["command_config"]["command"]
+
+    @pytest.fixture(name="src")
+    def fixture_src(self, cmd):
+        found = _HEREDOC.search(cmd)
+        assert found, "no PYSRC heredoc survived"
+        return textwrap.dedent(found.group(1))
+
+    def test_the_shell_parses(self, cmd):
+        proc = subprocess.run(
+            ["bash", "-n"], input=cmd, text=True, capture_output=True, check=False
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_the_embedded_python_compiles(self, src):
+        compile(src, "corpus-pin-check", "exec")
+
+    def test_it_checks_everything_that_defines_the_corpus(self, src):
+        for key in (
+            "tokenizer_identity",
+            "max_length",
+            "think_policy",
+            "completion_boundary",
+            "documents_policy",
+            "eval_fraction",
+        ):
+            assert key in src, key
+
+    def _run(self, src, tmp_path, manifest, **kw):
+        corpus = tmp_path / "corpus"
+        corpus.mkdir(exist_ok=True)
+        (corpus / "corpus_manifest.json").write_text(json.dumps(manifest))
+        (corpus / "train.jsonl").write_text("{}\n")
+        (corpus / "eval.jsonl").write_text("{}\n")
+        tok = tmp_path / "retagged_student"
+        tok.mkdir(exist_ok=True)
+        script = tmp_path / "pin_check.py"
+        script.write_text(src)
+        argv = [
+            str(corpus),
+            kw.get("teacher", "/models/granite-4.1-3b-pinned"),
+            str(kw.get("max_length", 8192)),
+            kw.get("think_policy", "keep"),
+            kw.get("documents_policy", "keep"),
+            str(kw.get("eval_fraction", 0.005)),
+            str(tok),
+            str(tmp_path / "out.json"),
+        ]
+        return subprocess.run(
+            ["python3", str(script), *argv],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    @staticmethod
+    def _manifest(**over):
+        m = {
+            "tokenizer_identity": "granite-4.1-3b-pinned",
+            "tokenizer_path": "/gone/align/retagged_student",
+            "seed": 42,
+            "eval_fraction": 0.005,
+            "policies": {
+                "max_length": 8192,
+                "think_policy": "keep",
+                "completion_boundary": "last_message",
+                "documents_policy": "keep",
+            },
+        }
+        m.update(over)
+        return m
+
+    def test_a_matching_manifest_is_accepted(self, src, tmp_path):
+        proc = self._run(src, tmp_path, self._manifest())
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (tmp_path / "out.json").is_file()
+
+    def test_a_different_max_length_is_rejected(self, src, tmp_path):
+        m = self._manifest()
+        m["policies"]["max_length"] = 4096
+        proc = self._run(src, tmp_path, m)
+        assert proc.returncode != 0
+        assert "max_length" in proc.stdout + proc.stderr
+
+    def test_a_corpus_prepared_for_a_different_teacher_is_rejected(self, src, tmp_path):
+        proc = self._run(
+            src, tmp_path, self._manifest(tokenizer_identity="granite-4.0-1b-something")
+        )
+        assert proc.returncode != 0
+        assert "tokenizer_identity" in proc.stdout + proc.stderr
+
+    def test_a_missing_split_is_rejected(self, src, tmp_path):
+        corpus = tmp_path / "corpus"
+        corpus.mkdir()
+        (corpus / "corpus_manifest.json").write_text(json.dumps(self._manifest()))
+        (corpus / "train.jsonl").write_text("{}\n")
+        tok = tmp_path / "retagged_student"
+        tok.mkdir()
+        script = tmp_path / "pin_check.py"
+        script.write_text(src)
+        proc = subprocess.run(
+            [
+                "python3", str(script), str(corpus),
+                "/models/granite-4.1-3b-pinned", "8192", "keep", "keep", "0.005",
+                str(tok), str(tmp_path / "out.json"),
+            ],
+            text=True, capture_output=True, check=False,
+        )
+        assert proc.returncode != 0
+        assert "eval.jsonl" in proc.stdout + proc.stderr
+
+    def test_every_mismatch_is_reported_not_just_the_first(self, src, tmp_path):
+        m = self._manifest(tokenizer_identity="wrong", eval_fraction=0.5)
+        m["policies"]["max_length"] = 4096
+        proc = self._run(src, tmp_path, m)
+        blob = proc.stdout + proc.stderr
+        assert proc.returncode != 0
+        for key in ("tokenizer_identity", "eval_fraction", "max_length"):
+            assert key in blob, key

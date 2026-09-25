@@ -90,14 +90,23 @@ Read the constant arm first regardless. A ramp confounds *on-policy helped* with
 ## What is held fixed
 
 Everything from [`distill-stage1-v2`](../distill-stage1-v2/README.md): `CE_COEF 0.05`,
-the entropy guard at 15%, `beta 0.5`, 2,000 steps, the 500/1000/1500/2000 ladder, the
-corpus and its sampling, the geometry (effective batch 96 — the server has its own
+the entropy guard at 15% in warn mode, `beta 0.5`, 300 steps, the
+25/50/75/100/150/200/300 ladder, the corpus and its sampling and the `CORPUS_DIR` pin, the
+geometry (effective batch 96 — the server has its own
 allocation, so `GOLD_NUM_NODES` still counts trainers), the LR schedule, the pinned
 trainer. A test asserts each of those against the off-policy recipe's own value.
 
 One variable. Stage 1 v2 changed the objective; this changes where the sequences come
 from. An on-policy arm that also moved `beta` or the horizon would not be comparable to
 the off-policy arm it is meant to be judged against.
+
+`CORPUS_DIR` is part of that parity, and not only for symmetry: a corpus is ~50 minutes
+on the critical path, and an on-policy arm that rebuilt it while the off-policy arm reused
+a pin would be comparing two arms that had at least the opportunity to differ. Pointing
+both at one directory removes that. `corpus-pin-check` guards it exactly as it does in the
+off-policy arm — the script is the same script, and a test asserts the two are
+byte-identical. See
+[`distill-stage1-v2`](../distill-stage1-v2/README.md#reusing-a-corpus-across-arms).
 
 The corpus is still the SFT mixture, which is the one deliberate difference from what the
 recipe index calls stage 2 — that describes on-policy on the IFRL and IdentityRL *prompt*
