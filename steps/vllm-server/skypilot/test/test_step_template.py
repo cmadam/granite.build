@@ -110,8 +110,18 @@ class TestReadinessGate:
 
     def test_it_holds_the_allocation_afterwards(self, run_script):
         """A service that returns ends its own step, and the trainer would lose
-        the server mid-run."""
-        assert run_script.rstrip().endswith('wait "$SERVER_PID"')
+        the server mid-run. Both arms of the lifetime-cap branch hold it: the
+        uncapped default ends on a bare wait, the capped one waits beside its
+        watchdog."""
+        tail = run_script[run_script.index("MAX_LIFETIME=") :]
+        capped, uncapped = tail.split("\nelse\n")
+        assert 'wait "$SERVER_PID"' in capped
+        assert uncapped.strip() == 'wait "$SERVER_PID"\nfi'
+
+    def test_the_lifetime_cap_defaults_off(self, step):
+        """Every recipe that does not set it runs for hours and is torn down by
+        its teardown target; a default cap would kill those servers mid-run."""
+        assert step["config"]["vllm_config"]["max_lifetime_seconds"] == 0
 
 
 class TestMarkers:
