@@ -223,12 +223,13 @@ class TestArtifactContract:
 
 class TestDeepspeedConfig:
     def test_the_default_is_relative_to_the_checkout(self, step):
-        """Upstream defaults it to /opt/distill-sft/deepspeed/, which is what its
-        image build COPYs configs/distillation/deepspeed/ to — and that path does not exist
-        in the image this step runs in."""
+        """gb-steps-distillation ships exactly one deepspeed config, under
+        distill-gold-train's own directory — confirmed missing on a real run
+        (build 30e46247) when this pointed at the pre-port configs/distillation/
+        deepspeed/ path, an in-image /opt copy that does not exist in this image."""
         ds = step["config"]["sft_config"]["deepspeed_config"]
         assert not ds.startswith("/")
-        assert ds.startswith("configs/distillation/deepspeed/")
+        assert ds.startswith("steps/distill-gold-train/configs/deepspeed/")
 
     def test_it_resolves_against_the_delivered_checkout(self, run_script):
         assert 'DS_CONFIG="$CODE_DIR/$DS_CONFIG"' in run_script
