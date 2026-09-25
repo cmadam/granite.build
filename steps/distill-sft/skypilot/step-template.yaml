@@ -140,15 +140,18 @@ config:
     # directory, so this is enforced as preflight validation instead of trusted.
     resume: auto
     # Relative resolves against the delivered checkout, where upstream keeps it —
-    # configs/distillation/deepspeed/ is what the image build COPYs to
-    # /opt/distill-sft/deepspeed/, and that /opt path does not exist in the image
-    # this step actually runs in. Seven variants ship (zero2, zero3, zero3_offload,
-    # zero3_tuned, …), which is why this stays a knob.
+    # gb-steps-distillation ships exactly one deepspeed config, under
+    # distill-gold-train's own directory (steps/distill-gold-train/configs/
+    # deepspeed/) rather than a shared top-level configs/ -- distill-sft has
+    # no config of its own and reuses that one. configs/distillation/deepspeed/
+    # was the pre-port path (an in-image /opt copy that does not exist in this
+    # image), and stayed here as a stale default through the port -- confirmed
+    # missing on a real run (build 30e46247: "deepspeed config not found").
     #
     # It is an ACCELERATE config, not a bare DeepSpeed one, and it is load-bearing: its own
     # header records a predecessor whose `offload_param  offload_param_device: none` parsed
     # as ONE key, so the setting was silently dead. A typo in this file does not fail loudly.
-    deepspeed_config: "configs/distillation/deepspeed/accelerate_deepspeed_zero3.yaml"
+    deepspeed_config: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 
     # ── Memory. Off by default because both are model-specific and the second is narrower
     # than its name suggests.
@@ -387,8 +390,8 @@ environment_configs:
             if [ ! -f "$DS_CONFIG" ]; then
               echo "distill: FATAL: deepspeed config not found at $DS_CONFIG" >&2
               echo "         sft_config.deepspeed_config is resolved against the delivered" >&2
-              echo "         checkout when relative. Upstream keeps these under" >&2
-              echo "         configs/distillation/deepspeed/." >&2
+              echo "         checkout when relative. gb-steps-distillation keeps its one" >&2
+              echo "         deepspeed config under steps/distill-gold-train/configs/deepspeed/." >&2
               exit 1
             fi
 
