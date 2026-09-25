@@ -1,5 +1,5 @@
 granite.build:
-  name: gold-distill-smoke
+  name: distill-gold-smoke
   # Smoke build for the distill-gold step on BlueVela (SkyPilot / LSF).
   #
   # Exercises the plumbing — 2-node allocation, per-node rank, config rendering

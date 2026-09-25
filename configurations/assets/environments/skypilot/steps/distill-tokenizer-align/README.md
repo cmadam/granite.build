@@ -58,44 +58,41 @@ output *and* no error — a silent failure that costs a full training run.
 ## Source delivery
 
 This step ships **no image and no Python of its own** beyond `src/run-align.sh`. The work is done
-by `gb_steps_post_training.distillation`, which is delivered at run time from a checkout on the
-shared filesystem — the same arrangement `distill-gold` uses for the kd-sandbox trainer.
-
-**No credential reaches the container.** That is deliberate: every other step in this repo either
-clones nothing or clones a public repo unauthenticated, and granite.build's own private-repo
-access clones server-side on the gbserver host.
+by `gb_steps_post_training.distillation`, which is delivered at run time from the public repo
+[`github.com/laminair/gb-steps-distillation`](https://github.com/laminair/gb-steps-distillation),
+pinned to one commit — the same arrangement every other ported distillation step uses.
 
 ```yaml
 code_config:
-  code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
-  expect_ref: "09bfcb1662529644bd09f620c24293aa43f3b807"
+  code_dir: ""
+  expect_ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+  repo: "https://github.com/laminair/gb-steps-distillation.git"
+  ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
 ```
 
-`expect_ref` is checked against the checkout's actual `HEAD` and the step **fails loudly** on a
-mismatch, because a silently-moved shared checkout is how two runs that report the same pin end
-up having trained on different code. Uncommitted changes are not fatal but are warned about and
-recorded as `distill_code_dirty` step metadata.
+**The default is an unauthenticated HTTPS clone** of `repo` at `ref`, into `workdir` under the
+step's working directory. No `/proj` checkout and no BlueVela-specific path, so it resolves the same
+on any environment that can reach github.com. **No credential reaches the container:**
+`token_secret` is empty on purpose, because the repo is public.
 
-### Refreshing the checkout
+On this path the clone is checked out at `ref`, and that is what pins the code: `ref` is a full
+commit rather than a branch, so two runs a week apart run the same code. `expect_ref` carries the
+same commit so the two cannot be read differently, but it is only *checked* on the pre-staged path
+below.
 
-The cluster account has its own GHE key, so this needs no secret:
+### Bumping the pin
 
-```bash
-D=/proj/granite-build/g4os/gb-steps-collection-post-training
-git -C "$D" fetch --all
-git -C "$D" checkout <new-sha>
-```
+Set `ref` and `expect_ref` to the same new commit of `gb-steps-distillation` — in the recipe, or in
+the step default. The default is asserted byte-identical across the ported steps by
+`test/test_source_contract.py`, so a default bump has to land in all of them together.
 
-Then bump `expect_ref` in the recipe (or the step default) to the same SHA.
+### Using a pre-staged checkout instead
 
-### The clone fallback
-
-For a host with no `/proj`, set `repo` + `ref` and leave `code_dir` empty; the step clones at run
-time. That path needs a credential, named by `token_secret` (a secret NAME, never a value —
-gbserver merges the space's secrets into the task environment). It is **empty by default** and the
-repo is private, so the step refuses with a message naming the missing secret rather than hanging
-on a credential prompt. A read-only **deploy key** via gitstore's `GIT_SSH_KEY` convention would be
-the tightest option if this ever has to be automated.
+Set `code_dir` to an existing checkout and the clone is skipped. There, `expect_ref` is checked
+against the checkout's actual `HEAD` and the step **fails loudly** on a mismatch, because a
+silently-moved shared checkout is how two runs that report the same pin end up on different code.
+Uncommitted changes are not fatal but are warned about and recorded as `distill_code_dirty` step
+metadata.
 
 ## Config
 
