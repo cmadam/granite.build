@@ -42,7 +42,7 @@ from gbcli.utils.buildutil import apply_parameters
 _RECIPE = (
     pathlib.Path(__file__).resolve().parents[3]
     / "recipes"
-    / "granite4-gold"
+    / "granite4-gold-distillation"
     / "lsf"
     / "gold-smoke"
 )
@@ -69,7 +69,7 @@ def _target(rendered):
 _FIXTURE = (
     pathlib.Path(__file__).resolve().parents[3]
     / "steps"
-    / "gold-distill"
+    / "distill-gold"
     / "skypilot"
     / "test-data"
     / "lsf"
@@ -156,7 +156,7 @@ def test_dataset_is_think_filtered(rendered):
 def test_fixture_declares_the_same_three_paths(rendered):
     """The step fixture's inputs and this recipe's parameters must agree.
 
-    steps/gold-distill/skypilot/test-data/lsf/build.yaml states in a comment that
+    steps/distill-gold/skypilot/test-data/lsf/build.yaml states in a comment that
     its inputs are "the same three the gold-smoke recipe declares". It cannot use
     $${VAR} — the build-test harness passes no parameters file — so the paths are
     literal there and nothing but this test keeps the claim honest. Without it the

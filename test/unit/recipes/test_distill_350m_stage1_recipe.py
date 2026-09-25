@@ -323,11 +323,11 @@ class TestInheritedInvariants:
 class TestThePinnedUpstreamCheckout:
     """Every distillation step reads its Python from a checkout THIS project controls.
 
-    It used to be the shared clone, and that broke mid-build: the shared tree is
-    advanced by its upstream author, and when it moved from 70c1550 to e8b3d9c between
-    one target and the next (build 1820703f), `align` passed and `corpus` exited 1 on
-    its pin. So the pin now names `...-gb`, which is 70c1550 plus one additive commit
-    touching only `retag_student.py`.
+    It used to be a shared, continuously-advancing tree, and that broke mid-build: the
+    shared tree is advanced by its upstream author, and every time it moved, all six
+    ported steps' pins stopped matching and the affected step exited 1. So the pin now
+    names a small public repo (gb-steps-distillation) that only advances when this
+    project deliberately bumps it.
 
     That lives in the STEP templates, identically across all six -- the source contract
     asserts those blocks are identical to each other, not that they hold any particular
@@ -344,18 +344,3 @@ class TestThePinnedUpstreamCheckout:
             assert "code_config" not in _config(
                 off, name
             ), f"{name} overrides code_config; the pin belongs in the step template"
-
-    def test_the_patch_is_committed_next_to_the_step(self):
-        """A pin naming a checkout nobody can reconstruct is not reproducible. The diff
-        and its rationale ship with the step."""
-        patch = (
-            pathlib.Path(__file__).resolve().parents[3]
-            / "steps/distill-tokenizer-align/skypilot/patches"
-            / "retag_student_identity_vocab.diff"
-        )
-        assert patch.is_file(), f"missing {patch}"
-        text = patch.read_text()
-        assert (
-            "70c1550a171aa8e09a9ad9047a5bf763c39e8579" in text
-        ), "base commit unstated"
-        assert "--- a/src/gb_steps_post_training" in text, "not a usable diff"

@@ -25,7 +25,7 @@ nothing to precompute. The step's name invites exactly that misreading.
 
 ## Why no recipe wires it
 
-Its only consumer is `distill-sft-baseline`'s `precomputed_logits_dir`, and **setting that key
+Its only consumer is `distill-sft`'s `precomputed_logits_dir`, and **setting that key
 turns that step from the SFT control into a forward-KL distillation arm.** A recipe wiring both is
 no longer running a control, so it has to say so in its own README. Upstream ships it unwired for
 the same reason, and this port keeps that.
@@ -57,10 +57,12 @@ Source delivery (`code_config`) is identical in every ported distillation step �
 | `precompute_config.corpus_path` | `""` | `distill-corpus-prep`'s `corpus`. **The same corpus the arm will train on** — the index is keyed to it. |
 | `precompute_config.teacher_model_path` | `""` | The teacher, loaded once. |
 | `precompute_config.teacher_tokenizer_path` | `""` | Kept **separate** from the model path on purpose, as in the trainer: the tokenizer defining the index's token ids need not be the model directory's own. |
+| `precompute_config.check_weight_residency` | `true` | Refuses to launch when GPFS has migrated the teacher's weights to tape — this step reads the teacher and nothing else, so that is the whole step waiting on a recall. Metadata only (`mmlsattr`), never reads a shard, and refuses **only** on an authoritative `OFFLINE`: no `mmlsattr` warns and proceeds, and a hub id rather than a path is skipped. `teacher_tokenizer_path` is not checked — a tokenizer overlay has no shards. |
+| `precompute_config.allow_offline_weights` | `false` | Proceed through the refusal, loudly. For when the recall is already under way. |
 | `precompute_config.output_dir` | `teacher-logits` | Relative resolves against `$GB_BUILD_WORKDIR`. |
 | `precompute_config.top_k` | `256` | The whole size/fidelity trade. Raising it multiplies the artifact. |
 | `precompute_config.max_length` | `8192` | Deliberately above the trainer's 4096: a logit file can serve a **longer** training budget than the one it was made for, never a shorter one. |
-| `precompute_config.response_template` | `'<|im_start|>assistant\n'` | The trailing newline is **data**, carried as a two-character escape because gbserver's Jinja fill strips a real one. See distill-sft-baseline's USAGE for the full account. |
+| `precompute_config.response_template` | `'<|im_start|>assistant\n'` | The trailing newline is **data**, carried as a two-character escape because gbserver's Jinja fill strips a real one. See distill-sft's USAGE for the full account. |
 | `precompute_config.max_skip_fraction` | `0.05` | See above. |
 | `precompute_config.allow_tokenizer_mismatch` | `false` | Keep it false. |
 | `workload.gpus_per_node` / `nodes` | `8` / `1` | `gpus_per_node` is asserted against the visible GPUs; `nodes > 1` is refused. |

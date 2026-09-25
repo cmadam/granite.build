@@ -43,7 +43,7 @@ from gbcli.utils.buildutil import apply_parameters
 _RECIPE = (
     pathlib.Path(__file__).resolve().parents[3]
     / "recipes"
-    / "granite4-gold"
+    / "granite4-gold-distillation"
     / "lsf"
     / "distill-pipeline-smoke"
 )
@@ -271,8 +271,16 @@ def test_the_gpu_targets_are_not_serialised_by_hand(off):
     not in a hand-built chain that also costs the baseline its independence.
     """
     targets = _targets(off)
-    assert set(targets["eval-transfer-baseline"]["inputs"]) == {"student", "corpus"}
-    assert set(targets["eval-transfer"]["inputs"]) == {"student", "corpus"}
+    assert set(targets["eval-transfer-baseline"]["inputs"]) == {
+        "student",
+        "corpus",
+        "teacher_model",
+    }
+    assert set(targets["eval-transfer"]["inputs"]) == {
+        "student",
+        "corpus",
+        "teacher_model",
+    }
     assert set(targets["eval-bfcl"]["inputs"]) == {"model"}
 
 

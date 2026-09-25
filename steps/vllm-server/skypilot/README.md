@@ -5,7 +5,7 @@ as the asset's `README.md`. This file is about the step's construction.
 
 ## Why the server is backgrounded rather than `exec`ed
 
-`gold-distill`'s in-allocation server branch `exec`s `run_vllm_serve.py`, which is right
+`distill-gold`'s in-allocation server branch `exec`s `run_vllm_serve.py`, which is right
 there: the process *is* the node's job. Here it cannot be, because the step has to do
 something **after** the server becomes ready — publish the URL — and an `exec`ed process
 never returns to do it.
@@ -48,7 +48,7 @@ than sitting in a pending state for its whole life.
 
 ## Adding a config key
 
-Two places, one fewer than `gold-distill` (there is no renderer here): the
+Two places, one fewer than `distill-gold` (there is no renderer here): the
 `config.vllm_config` block in `step-template.yaml`, and its use in the `run:` script.
 Add a test when the failure mode is worse than a wrong number — an unpublished binding
 or a server that answers on an address the consumer cannot reach both present as a

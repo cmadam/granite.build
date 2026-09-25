@@ -2,7 +2,7 @@
 # distill-smoke — the granite4-350m distillation pipeline, end to end, at smoke
 # scale, on BlueVela (SkyPilot / LSF).
 #
-# This is recipes/granite4-gold/lsf/distill-pipeline-smoke retargeted from the
+# This is recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke retargeted from the
 # 4.1-3b/4.2-30b reference pair to OUR pair: the granite-4.0-350m SFT checkpoint as
 # student, granite-4.1-3b as teacher. It exists to clear three things that the
 # reference pair never exercised, for minutes rather than for a four-hour stage-1
@@ -407,7 +407,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill-sft-baseline
+        - step_uri: space://steps/distill-sft
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -491,7 +491,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/gold-distill
+        - step_uri: space://steps/distill-gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -513,7 +513,6 @@ granite.build:
                 zone: "$${QUEUE}"
             gold_config:
               run_name: "$${RUN_NAME}"
-              kd_code_dir: "$${KD_CODE_DIR}"
               ds_config: "$${DS_CONFIG}"
               model_name_or_path: "{{ bindings.student.binding.path }}"
               # A path, never a hub id: this teacher is not publicly fetchable.

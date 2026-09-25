@@ -42,7 +42,12 @@ import yaml
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
 
-_LSF = pathlib.Path(__file__).resolve().parents[3] / "recipes" / "granite4-gold" / "lsf"
+_LSF = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "recipes"
+    / "granite4-gold-distillation"
+    / "lsf"
+)
 
 _RECIPES = ("gold-sweep-100", "gold-sweep-smoke")
 
@@ -210,8 +215,8 @@ def test_response_template_transports_its_newline_as_an_escape(recipe, tmp_path)
     token off while reporting success.
 
     So the newline crosses the wire as a literal backslash-n, which has no trailing
-    whitespace to strip, and gold-distill's renderer decodes it exactly once at the
-    far end (test_gold_distill.py covers that decode).
+    whitespace to strip, and distill-gold's renderer decodes it exactly once at the
+    far end (test_distill_gold.py covers that decode).
 
     Getting the escape itself through two templating layers is the trap.
     Double-quoted in parameters.yaml, YAML would decode \\n to a real newline here.
@@ -360,7 +365,6 @@ def test_smoke_and_real_arm_share_every_behavioural_parameter(tmp_path):
     NCCL_DEBUG/NCCL_TIMEOUT_MS (a smoke run wants a fast, loud failure).
     """
     behavioural = (
-        "KD_CODE_DIR",
         "DS_CONFIG",
         "IMAGE_ID",
         "TEACHER_MODEL",

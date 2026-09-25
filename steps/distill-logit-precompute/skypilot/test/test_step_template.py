@@ -3,7 +3,7 @@
 Scope note: the source-delivery half of this template is spliced VERBATIM from
 distill-tokenizer-align, and that step's test_source_contract.py asserts every ported
 step's copy is byte-identical to it. So this file asserts only what is specific to THIS
-step — including the four launcher facts the distill-sft-baseline port paid an allocation
+step — including the four launcher facts the distill-sft port paid an allocation
 each to learn, since this script has the same shape.
 """
 
@@ -75,7 +75,7 @@ class TestRunScriptIsValidShell:
 
 
 class TestLauncherFactsLearnedElsewhere:
-    """The four things distill-sft-baseline cost an allocation each to discover.
+    """The four things distill-sft cost an allocation each to discover.
 
     run-precompute.sh has the same shape as run-sft.sh — same discovery helper, same
     unguarded CHECKOUT_ROOT, same bare `accelerate`, same kernel preflight — so these are
@@ -87,7 +87,10 @@ class TestLauncherFactsLearnedElsewhere:
             'export PRECOMPUTE_SRC="$CODE_DIR/src/gb_steps_post_training/distillation"'
             in run_script
         )
-        assert 'export LIB_DIR="$CODE_DIR/scripts/bluevela/lib"' in run_script
+        assert (
+            'export LIB_DIR="$CODE_DIR/steps/distill-logit-precompute/src/lib"'
+            in run_script
+        )
         assert "export CHECKOUT_ROOT=" not in run_script
 
     def test_the_script_still_overwrites_checkout_root(self, pc_sh):
@@ -113,7 +116,7 @@ class TestLauncherFactsLearnedElsewhere:
 
 
 class TestResponseTemplateNewline:
-    """Same transport as distill-sft-baseline: the trailing newline is data."""
+    """Same transport as distill-sft: the trailing newline is data."""
 
     def test_the_default_carries_an_escape_not_a_real_newline(self, step):
         rt = step["config"]["precompute_config"]["response_template"]
@@ -132,7 +135,7 @@ class TestResponseTemplateNewline:
             f"RT_RAW='{rt}'\n"
             'GOOD="$(printf \'%b.\' "$RT_RAW")"; GOOD="${GOOD%.}"\n'
             'NAIVE="$(printf \'%b\' "$RT_RAW")"\n'
-            'printf "%s|%s|" "$(printf %s "$GOOD" | wc -c)" "$(printf %s "$NAIVE" | wc -c)"\n'
+            'printf "%s|%s|" "$(($(printf %s "$GOOD" | wc -c)))" "$(($(printf %s "$NAIVE" | wc -c)))"\n'
         )
         out = subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, check=True
@@ -174,11 +177,20 @@ class TestArtifactContract:
 
 class TestFlagSurface:
     BOOLEAN_KEYS = ("ignore_documents", "allow_tokenizer_mismatch")
+    # Consumed by the run block's own Jinja guard and deliberately never reaching
+    # run-precompute.sh: the residency preflight runs BEFORE the teacher is loaded, in the
+    # template, so a `--check-weight-residency` flag on run-precompute.sh would be one
+    # nothing reads -- and test_script_parses_every_flag_the_template_passes below would
+    # then fail on it, correctly. Named after distill-gold's set of the same name. That both
+    # keys are actually wired, switchable and overridable is asserted in distill-gold's
+    # test_weight_residency_contract.py, which owns them across the three steps that carry
+    # the preflight.
+    STEP_ONLY = ("check_weight_residency", "allow_offline_weights")
 
     def test_every_config_key_reaches_the_script(self, step, run_script):
         for block in ("precompute_config", "workload"):
             for key in step["config"][block]:
-                if key in self.BOOLEAN_KEYS:
+                if key in self.BOOLEAN_KEYS or key in self.STEP_ONLY:
                     continue
                 assert (
                     "--" + key.replace("_", "-")
@@ -191,15 +203,39 @@ class TestFlagSurface:
             assert f"--no-{key.replace('_', '-')}" in run_script
             assert f"{flag} {{{{" not in run_script
 
+    @staticmethod
+    def _preflight_flags():
+        """Flags of the residency preflight, read out of its own argparse.
+
+        The preflight is a different program invoked on its own line, so its flags are not
+        run-precompute.sh's business. Deriving them here rather than writing a literal means
+        the exemption cannot outlive the flag it excuses: drop --allow-offline from the module
+        and this test starts demanding run-precompute.sh parse it again.
+        """
+        module = _HERE / "src" / "check_weight_residency.py"
+        if not module.exists():
+            return set()
+        return set(
+            re.findall(
+                r'ap\.add_argument\(\s*"(--[a-z][a-z0-9-]*)"', module.read_text()
+            )
+        )
+
     def test_script_parses_every_flag_the_template_passes(self, run_script, pc_sh):
         handled = set(re.findall(r"^\s*(--[a-z-]+)\)", pc_sh, re.M))
+        elsewhere = {
+            "--quiet",
+            "--porcelain",
+            "--all",
+            "--verify-only",
+        } | self._preflight_flags()
         body = "\n".join(
             line
             for line in _as_shell(run_script).splitlines()
             if not line.lstrip().startswith("#")
         )
         for flag in set(re.findall(r"(?<![-\w])(--[a-z][a-z0-9-]*)", body)):
-            if flag in ("--quiet", "--porcelain", "--all", "--verify-only"):
+            if flag in elsewhere:
                 continue
             assert flag in handled, f"run-precompute.sh does not parse {flag}"
 

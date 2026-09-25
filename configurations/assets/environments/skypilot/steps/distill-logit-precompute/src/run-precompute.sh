@@ -12,7 +12,7 @@
 # second time — upstream's template did, which would register two NEWARTIFACT events for
 # one id.
 #
-# Two things the launcher must hand it, both learned on distill-sft-baseline: PRECOMPUTE_SRC
+# Two things the launcher must hand it, both learned on distill-sft: PRECOMPUTE_SRC
 # and LIB_DIR (exporting CHECKOUT_ROOT is discarded, because this file computes it
 # unconditionally from STEP_HOME), and /stage/.venv/bin on PATH for the bare `accelerate`.
 #
@@ -23,7 +23,7 @@
 # WHAT THIS STEP IS FOR. It runs the teacher ONCE over the corpus and stores its top-K logits per
 # assistant token, so the off-policy KD arm can train without a 30B teacher resident beside the
 # student and without recomputing the same forward pass every epoch. Its consumer is
-# distill-sft-baseline's --precomputed-logits-dir, which turns that step from the SFT CONTROL into
+# distill-sft's --precomputed-logits-dir, which turns that step from the SFT CONTROL into
 # a forward-KL distillation arm -- so a recipe that sets both is no longer running a control.
 #
 # WHAT IT IS NOT. It is not a route to on-policy GOLD. On-policy means the STUDENT generates and
@@ -37,7 +37,7 @@
 # finish when the pass exits 0 -- it finishes when the artifact has been VERIFIED against the
 # corpus, and on the SKIP path it re-verifies rather than trusting a marker.
 #
-# This is a deliberate near-twin of distill-sft-baseline/src/run-sft.sh: same part location, same
+# This is a deliberate near-twin of distill-sft/src/run-sft.sh: same part location, same
 # kernel preflight, same allocation assertion, same nodes>1 refusal. Where they differ the
 # difference is named. Two differences are worth reading before the code:
 #   - the module is launched with `accelerate launch -m`, not by cd-ing to its directory and

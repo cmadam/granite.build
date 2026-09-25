@@ -40,5 +40,5 @@ tests:
 # post-condition fails the build, so reaching SUCCESS is itself the proof.
 simulate_step_failure: false
 # Budget for LSF queue time on a shared cluster. No cold enroot import is expected:
-# this step reuses the image gold-distill and vllm-server already pull.
+# this step reuses the image distill-gold and vllm-server already pull.
 timeout_minutes: 60

@@ -40,7 +40,7 @@ must stay off.
   "Missing end of comment tag" and nothing naming the real cause. Use `printf %s "$V" | wc -c`.
 - **`[ -n "$X" ] && echo …` as the last statement of an if-body aborts the run.** The launcher
   prefixes `set -eu`, and that compound returns 1 when `X` is empty.
-  `steps/gold-distill/skypilot/step-template.yaml:219` still carries this latent bug; a test here
+  `steps/distill-gold/skypilot/step-template.yaml:219` still carries this latent bug; a test here
   asserts this step does not.
 
 ## Publishing

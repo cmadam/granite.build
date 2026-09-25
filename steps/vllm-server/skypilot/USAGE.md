@@ -11,14 +11,14 @@ a `mem://` binding, so a training target in a *separate* allocation can reach it
 
 | | |
 |---|---|
-| deps | the image (`/stage/.venv`), the same one `gold-distill` uses |
-| server code | `run_vllm_serve.py` from the `kd_code_dir` `/proj` checkout |
+| deps | the image (`/stage/.venv`), the same one `distill-gold` uses |
+| server code | `gb_steps_post_training.distillation.run_vllm_serve`, from `code_config`'s clone |
 | bsub, enroot, node topology | SkyPilot's LSF provisioner |
 | readiness, address publication, teardown hook | this step |
 
 ## Why it is a separate target
 
-`gold-distill` can already serve vLLM by carving the last N nodes out of its own
+`distill-gold` can already serve vLLM by carving the last N nodes out of its own
 allocation, which is what the reference launcher does. Three things that shape needs
 are things a single step cannot do: the server's address is only known at run time,
 the trainer must wait on `/health` before starting, and nothing tears the server down
@@ -56,7 +56,7 @@ targets:
     inputs:
       vllm: {binding: vllm-server.vllm_url}
     steps:
-      - step_uri: space://steps/gold-distill
+      - step_uri: space://steps/distill-gold
         config:
           gold_config:
             vllm_server_url: "{{ bindings.vllm.binding.state }}"
@@ -70,7 +70,6 @@ value through filesystem-path normalisation and mangles `http://host:8001` into
 
 | key | default | notes |
 |---|---|---|
-| `kd_code_dir` | `/proj/granite-build/g4os/kd-sandbox` | supplies `gold/run_vllm_serve.py` |
 | `model_path` | — | **required.** For on-policy GOLD the **student**, not the teacher |
 | `port` | `8001` | the reference launcher's `VLLM_API_PORT` |
 | `max_model_len` | `16384` | must be ≥ the trainer's `max_length` |
@@ -83,7 +82,7 @@ value through filesystem-path normalisation and mangles `http://host:8001` into
 ## Outputs
 
 - **`vllm_url`** — `http://<addr>:<port>`, published **only once `/health` answers**.
-  The address is an IP resolved from `/etc/hosts` then `getent`, the way `gold-distill`
+  The address is an IP resolved from `/etc/hosts` then `getent`, the way `distill-gold`
   resolves `MASTER_ADDR`, because the consumer is in a different allocation and a bare
   short hostname need not resolve there.
 - **`cluster_name`** — the SkyPilot cluster (`gb-<id>`), for the teardown target.
@@ -116,5 +115,5 @@ Contract-tested (`make test`), never run. The open question is not in this step 
 the trainer pushes updated student weights to the server over **NCCL**, not HTTP — the
 reference launcher's `VLLM_NCCL_COORDINATOR_PORT` — so a separate target means a NCCL
 process group spanning two LSF allocations. If that cannot be made to work, the fallback
-is `gold-distill`'s existing in-allocation role split, and this step is the wrong answer
+is `distill-gold`'s existing in-allocation role split, and this step is the wrong answer
 rather than a broken one.

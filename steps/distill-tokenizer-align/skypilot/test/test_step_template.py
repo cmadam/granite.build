@@ -83,7 +83,7 @@ class TestRunScriptIsValidShell:
     def test_metadata_emission_cannot_abort_the_run(self, run_script):
         """``[ -n "$X" ] && echo`` as the last statement of an if-body returns 1
         when X is empty, and the launcher prefixes ``set -eu``, so that aborts the
-        run. gold-distill's template still carries this latent bug; this one must
+        run. distill-gold's template still carries this latent bug; this one must
         not, so every metadata echo is written as a full if/then/fi.
         """
         assert not re.search(
@@ -113,14 +113,18 @@ class TestSourceDeliveryContract:
     def test_code_config_has_exactly_the_contract_keys(self, step):
         assert set(step["config"]["code_config"]) == self.EXPECTED_KEYS
 
-    def test_filesystem_path_is_the_default(self, step):
+    def test_unauthenticated_clone_is_the_default(self, step):
         """No credential reaches the container by default. Every other step in this
-        repo either clones nothing or clones a public repo unauthenticated."""
+        repo either clones nothing or clones a public repo unauthenticated -- and this
+        one clones gb-steps-distillation, a public repo, so it needs no secret either.
+        """
         code = step["config"]["code_config"]
-        assert code["code_dir"].startswith("/"), "the default must be a real path"
-        assert code["repo"] == "", "the clone branch must be opt-in"
-        assert code["ref"] == ""
-        assert code["token_secret"] == "", "the default path must need no secret"
+        assert code["code_dir"] == "", "no filesystem checkout is pinned by default"
+        assert code["repo"].startswith("https://"), "the default must clone a real repo"
+        assert (
+            code["ref"] != ""
+        ), "the clone must pin a commit, not a moving branch head"
+        assert code["token_secret"] == "", "a public repo needs no secret"
 
     def test_the_pin_is_a_full_sha(self, step):
         """A branch name here makes two runs a week apart different runs while
@@ -176,7 +180,7 @@ class TestSourceDeliveryContract:
     def test_no_setup_phase(self, launcher):
         """``task.setup`` is unexercised on the LSF cloud in this repo: the only
         shipped step with one is byoc, whose build tests are slurm/aws. Source
-        delivery happens in ``run``, which gold-distill has proven on LSF."""
+        delivery happens in ``run``, which distill-gold has proven on LSF."""
         assert "setup" not in launcher
 
 

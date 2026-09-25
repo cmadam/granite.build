@@ -27,8 +27,16 @@ environment_configs:
         monitors:
         - skypilot_monitor
         config:
-          resources:
-            cpus: 1+
+          # No cpus default: on the LSF cloud `cpus: "1+"` raises ValueError
+          # (sky/clouds/lsf.py does float("1+") without stripping the "+"), so
+          # hardcoding it here made this step LSF-incompatible — measured via
+          # a real hf:// pull on an LSF/bsub environment, which failed before
+          # ever reaching the remote node ("could not convert string to
+          # float: '1+'"). Leaving resources empty keeps the step
+          # cloud-agnostic; each cloud picks sane defaults for a lightweight
+          # download step, and a build.yaml can still supply cpus/memory via
+          # config.launcher_config.resources if it needs to.
+          resources: {}
           setup: |
             pip install --no-cache-dir 'huggingface_hub[cli]'
           run: |

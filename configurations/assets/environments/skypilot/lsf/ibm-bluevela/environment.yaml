@@ -57,6 +57,14 @@ config:
           enroot_mounts:
             - "/dev/shm /dev/shm"
             - "/dev/infiniband /dev/infiniband"
+            # GPFS's own tools, read-only, for the weight-residency preflight
+            # (steps/distill-*/src/check_weight_residency.py). Without them the
+            # container has no mmlsattr and the preflight falls back to block-count
+            # arithmetic, which can condemn a file but never clear one and misses a
+            # partial recall. The script puts the lib/ beside the tool on
+            # LD_LIBRARY_PATH itself; this mount alone fails to load libgpfs.so.
+            # Measured on p3-r20-n3, 2026-09-25 (LSF job 1918919).
+            - "/usr/lpp/mmfs /usr/lpp/mmfs none x-create=dir,rbind,ro"
           bsub_options:
             G: grp_granite_dot_build
             M: 64G
@@ -94,6 +102,20 @@ assetstores:
       - mode: default
         config:
           cache_path: /tmp/hf_cache
+    push:
+      - mode: default
+        config: {}
+  # s3:// / cos:// — lets a recipe source a teacher/student model, dataset or
+  # chat template from S3-compatible object storage instead of only /proj or
+  # the Hub, via cosrclone (same mechanism the AWS and RunPod environments
+  # already use). Credentials are the store's own defaults
+  # (COS_ACCESS_KEY_ID / COS_SECRET_ACCESS_KEY, see
+  # configurations/assets/assetstores/s3/store.yaml) resolved from the space's
+  # secret manager, so nothing IBM-internal is required to use it.
+  - store_uri: space://assetstores/s3/
+    pull:
+      - mode: default
+        config: {}
     push:
       - mode: default
         config: {}

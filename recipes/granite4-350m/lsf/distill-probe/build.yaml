@@ -71,7 +71,7 @@ granite.build:
               # flash_attention_2 is stated because render_sft_config.py selects it
               # for granitemoehybrid and sft.py's verify_optimization_stack aborts
               # every rank on a mismatch — so the SFT-control arm depends on this
-              # kernel resolving even though gold-distill never asks for it. Probing
+              # kernel resolving even though distill-gold never asks for it. Probing
               # it here is what makes that asymmetry visible before it costs a run.
               #
               # The eager fallback runs on failure rather than instead: knowing the
@@ -99,7 +99,7 @@ granite.build:
                 # diagnosis from "does not load", and they have different fixes.
                 # FA2 is probed because render_sft_config.py selects it for
                 # granitemoehybrid and sft.py aborts every rank on a mismatch, so the
-                # SFT-control arm depends on a kernel gold-distill never asks for.
+                # SFT-control arm depends on a kernel distill-gold never asks for.
                 ok = []
                 for attn in ("flash_attention_2", "eager"):
                     try:

@@ -39,7 +39,7 @@ from gbcli.utils.buildutil import apply_parameters
 _RECIPE = (
     pathlib.Path(__file__).resolve().parents[3]
     / "recipes"
-    / "granite4-gold"
+    / "granite4-gold-distillation"
     / "lsf"
     / "gold-onpolicy-smoke"
 )
@@ -98,7 +98,7 @@ def test_no_single_dollar_substitution_markers():
 def test_three_targets_in_the_expected_roles(targets):
     assert set(targets) == {"vllm-server", "train", "teardown"}
     assert targets["vllm-server"]["steps"][0]["step_uri"] == "space://steps/vllm-server"
-    assert targets["train"]["steps"][0]["step_uri"] == "space://steps/gold-distill"
+    assert targets["train"]["steps"][0]["step_uri"] == "space://steps/distill-gold"
     assert (
         targets["teardown"]["steps"][0]["step_uri"] == "space://steps/skypilot-teardown"
     )
@@ -236,12 +236,17 @@ def test_all_trainer_nodes_train(targets):
 
 def test_both_targets_share_one_trainer_checkout_and_image(targets, params):
     """A server built from different code than the trainer expects is a protocol
-    mismatch surfacing as a connection or tensor-shape error mid-run."""
+    mismatch surfacing as a connection or tensor-shape error mid-run.
+
+    Neither target's build.yaml overrides code_config, so both resolve to their
+    step-template's default -- the same pinned public-repo clone -- and this
+    recipe-level render cannot see that default to compare it directly. What it CAN
+    see, and what this asserts, is the one thing the recipe itself controls: both
+    targets run the same image.
+    """
     server_step = targets["vllm-server"]["steps"][0]["config"]
     train_step = targets["train"]["steps"][0]["config"]
 
-    assert server_step["vllm_config"]["kd_code_dir"] == params["KD_CODE_DIR"]
-    assert train_step["gold_config"]["kd_code_dir"] == params["KD_CODE_DIR"]
     assert (
         server_step["launcher_config"]["image_id"]
         == train_step["launcher_config"]["image_id"]
@@ -283,8 +288,8 @@ def test_response_template_transports_its_newline_as_an_escape(targets):
     A real newline here does not survive: gbserver's config fill runs every string
     through Jinja and strips one trailing newline, so the step would receive a
     template with no line boundary and mask loss from the wrong token, silently.
-    gold-distill's renderer decodes the escape in the container. See
-    ../gold-sweep-100/parameters.yaml for the mechanism and test_gold_distill.py
+    distill-gold's renderer decodes the escape in the container. See
+    ../gold-sweep-100/parameters.yaml for the mechanism and test_distill_gold.py
     for the decode."""
     template = _gold(targets)["response_template"]
 

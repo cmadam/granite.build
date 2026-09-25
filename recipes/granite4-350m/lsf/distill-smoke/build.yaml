@@ -2,7 +2,7 @@
 # distill-smoke — the granite4-350m distillation pipeline, end to end, at smoke
 # scale, on BlueVela (SkyPilot / LSF).
 #
-# This is recipes/granite4-gold/lsf/distill-pipeline-smoke retargeted from the
+# This is recipes/granite4-gold-distillation/lsf/distill-pipeline-smoke retargeted from the
 # 4.1-3b/4.2-30b reference pair to OUR pair: the granite-4.0-350m SFT checkpoint as
 # student, granite-4.1-3b as teacher. It exists to clear three things that the
 # reference pair never exercised, for minutes rather than for a four-hour stage-1
@@ -87,16 +87,23 @@ granite.build:
     align:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-        # Recorded as lineage inputs. env:// means "already on a filesystem this
-        # environment can reach", so the pull is a no-op: these add input
-        # artifacts and no extra step. A path passed only to a step's config
-        # would run fine and record nothing.
+        # Recorded as lineage inputs. TEACHER_MODEL_URI / STUDENT_MODEL_URI /
+        # CHAT_TEMPLATE_URI carry a FULL uri, not a bare path: "env://" for
+        # something already on a filesystem this environment can reach (the
+        # pull is then a no-op), "hf:///org/repo" to pull fresh from the Hub,
+        # or "s3://bucket/key" / "cos://bucket/key" for object storage — see
+        # ibm-bluevela's environment.yaml assetstores block for what's wired
+        # in. Whichever scheme wins, align_config below reads the RESOLVED
+        # binding path, never the URI itself.
         teacher_model:
-          uri: "env://$${TEACHER_MODEL}"
+          uri: "$${TEACHER_MODEL_URI}"
           type: model
         student_model:
-          uri: "env://$${STUDENT_MODEL}"
+          uri: "$${STUDENT_MODEL_URI}"
           type: model
+        chat_template:
+          uri: "$${CHAT_TEMPLATE_URI}"
+          type: dataset
       outputs:
         # All three declared. An undeclared output makes the resolver drop the
         # NEWARTIFACT event and the target completes with no output AND no error.
@@ -124,13 +131,13 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${CPU_ONLY_MEMORY}
             align_config:
-              teacher_model: "$${TEACHER_MODEL}"
-              student_model: "$${STUDENT_MODEL}"
+              teacher_model: "{{ bindings.teacher_model.binding.path }}"
+              student_model: "{{ bindings.student_model.binding.path }}"
               out_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/align"
               # Not optional for this pipeline: without a chat template carrying
               # generation markers, prep cannot build assistant masks and the
-              # trainers fail deep inside sft.py. Relative to the step's code_dir.
-              chat_template: "$${CHAT_TEMPLATE}"
+              # trainers fail deep inside sft.py.
+              chat_template: "{{ bindings.chat_template.binding.path }}"
               # FALSE for this pair, and it is the difference between this recipe
               # running and aborting. The knob gates whether the TEACHER's tokenizer
               # and the retagged student's must carry ChatML turn tokens. granite 4.0
@@ -153,8 +160,9 @@ granite.build:
         # guarantees it exists before this target starts.
         tokenizer:
           binding: align.retagged_student
+        # DATASET_URI: same full-URI convention as align's inputs above.
         source_dataset:
-          uri: "env://$${DATASET}"
+          uri: "$${DATASET_URI}"
           type: dataset
       outputs:
         # The FILE, not out_dir: the trainers dispatch on the .jsonl suffix and
@@ -179,7 +187,7 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${CPU_ONLY_MEMORY}
             corpus_config:
-              dataset: "$${DATASET}"
+              dataset: "{{ bindings.source_dataset.binding.path }}"
               tokenizer: "{{ bindings.tokenizer.binding.path }}"
               # ABSOLUTE, and that is forced rather than chosen: the two eval
               # targets have to name eval.jsonl and cannot compose it from their
@@ -243,7 +251,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill-sft-baseline
+        - step_uri: space://steps/distill-sft
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -316,8 +324,9 @@ granite.build:
 <% endif %>
         corpus:
           binding: corpus.corpus
+        # TEACHER_MODEL_URI: same full-URI convention as align's inputs.
         teacher_model:
-          uri: "env://$${TEACHER_MODEL}"
+          uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
         # GB_BUILD_WORKDIR/checkpoints/<run_name>_node<N>, registered by rank 0.
@@ -327,7 +336,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/gold-distill
+        - step_uri: space://steps/distill-gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -349,11 +358,11 @@ granite.build:
                 zone: "$${QUEUE}"
             gold_config:
               run_name: "$${RUN_NAME}"
-              kd_code_dir: "$${KD_CODE_DIR}"
               ds_config: "$${DS_CONFIG}"
               model_name_or_path: "{{ bindings.student.binding.path }}"
-              # A path, never a hub id: this teacher is not publicly fetchable.
-              teacher_model_name_or_path: "$${TEACHER_MODEL}"
+              # The RESOLVED local path, whatever TEACHER_MODEL_URI's scheme was —
+              # gold.py reads this as a directory either way.
+              teacher_model_name_or_path: "{{ bindings.teacher_model.binding.path }}"
               dataset_name: "{{ bindings.corpus.binding.path }}"
               num_train_epochs: $${GOLD_NUM_TRAIN_EPOCHS}
               # Caps the run by optimizer steps rather than epochs, which is what
@@ -455,6 +464,14 @@ granite.build:
         # target cannot start before the split exists.
         corpus:
           binding: corpus.corpus
+        # TEACHER_MODEL_URI: same full-URI convention as align's inputs. Bound
+        # here (rather than passed as a bare parameter) so a hf:// or s3://
+        # teacher is resolved and cached through granite.build's own asset
+        # stores, instead of a bare hub id reaching the step and triggering an
+        # uncached fetch inside transformers at eval time.
+        teacher_model:
+          uri: "$${TEACHER_MODEL_URI}"
+          type: model
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -477,7 +494,7 @@ granite.build:
                 memory: $${GPU_MEMORY}
             eval_config:
               student_model: "{{ bindings.student.binding.path }}"
-              teacher_model: "$${TEACHER_MODEL}"
+              teacher_model: "{{ bindings.teacher_model.binding.path }}"
               corpus: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus/eval.jsonl"
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-transfer-baseline"
               metrics: "$${EVAL_METRICS}"
@@ -504,6 +521,10 @@ granite.build:
           binding: export.hf_model
         corpus:
           binding: corpus.corpus
+        # TEACHER_MODEL_URI: same full-URI convention as align's inputs.
+        teacher_model:
+          uri: "$${TEACHER_MODEL_URI}"
+          type: model
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -525,7 +546,7 @@ granite.build:
                 memory: $${GPU_MEMORY}
             eval_config:
               student_model: "{{ bindings.student.binding.path }}"
-              teacher_model: "$${TEACHER_MODEL}"
+              teacher_model: "{{ bindings.teacher_model.binding.path }}"
               corpus: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus/eval.jsonl"
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/eval-transfer"
               metrics: "$${EVAL_METRICS}"
