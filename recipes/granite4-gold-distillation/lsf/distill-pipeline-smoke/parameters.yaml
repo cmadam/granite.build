@@ -59,22 +59,30 @@ INCLUDE_SFT: false
 # image.
 # SM90 (H100) build; it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
-# The GOLD trainer's live kd-sandbox checkout on the shared FS, supplying
-# gold/*.py and the DeepSpeed configs. Unpinned state, so rank 0 records
-# kd_sandbox_commit as step metadata.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
-# The five ported steps read their own code from a separate pinned checkout,
-# declared by each step's code_config (code_dir plus expect_ref) rather than
-# here — so a source bump is one edit in the step, not one per recipe.
+# The GOLD trainer (gb_steps_post_training.distillation.gold and friends) is
+# delivered by distill-gold's own code_config, the same pinned public-repo
+# clone every ported step uses — so a source bump is one edit in the step,
+# not one per recipe.
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 
 # ─── The pair, the data, and the chat template ────────────────────────
+# TEACHER_MODEL_URI / STUDENT_MODEL_URI / DATASET_URI carry a FULL uri, not a
+# bare path — the scheme picks how granite.build fetches it (see
+# ibm-bluevela's environment.yaml assetstores block for what's wired in):
+#   env://<absolute path>   already on the shared filesystem (BlueVela's /proj)
+#   hf:///<org>/<repo>      pulled fresh from the Hugging Face Hub
+#   s3://<bucket>/<key>     pulled from S3-compatible object storage
+# The defaults below use env:// against /proj. Override with --param to
+# source any of them from the Hub or your own bucket instead. CHAT_TEMPLATE
+# below is NOT one of these — it stays a bare, code-relative path; see its
+# own comment.
+#
 # A 3B teacher, not the 30B reference one. An overlay is tokenizer files only,
 # and this pipeline's subject is the wiring, so the teacher's size buys nothing
 # here — while a 30B teacher forward would dominate the run time and force a
 # much larger allocation. granite-4.2-3b-nothink carries the same ChatML surface
 # the 30B reference teacher does. Swap it with one override.
-TEACHER_MODEL: "/proj/granite-build/g4os/models/granite-4.2-3b-nothink"
+TEACHER_MODEL_URI: "env:///proj/granite-build/g4os/models/granite-4.2-3b-nothink"
 # DENSE (granite / GraniteForCausalLM), and that is a constraint rather than a
 # preference: the only genuinely un-retagged base model on this cluster,
 # granite-4.0-1b-base-prerelease-castlerock-final, is granitemoehybrid — and a
@@ -86,16 +94,19 @@ TEACHER_MODEL: "/proj/granite-build/g4os/models/granite-4.2-3b-nothink"
 # The retag is therefore close to a no-op on this student, which is fine here:
 # what the rest of the chain needs from align is a dense, tokenizer-matched
 # student carrying a chat template with generation markers.
-STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
+STUDENT_MODEL_URI: "env:///proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
 # A think-filtered conversation JSONL — the same slice the gold smoke recipe
 # trains on, so the schema is known-good. An inline <think>...</think> in an
 # assistant turn breaks GOLD's completion extraction silently, which is what
 # makes the filtering a correctness property and not a preference.
-DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
-# Relative to the ported steps' code_dir. The one template on this cluster known
-# to carry a real {% generation %} block tag, which is what lets prep measure the
-# completion boundary at all: MEASURED, none of the 13 hand-built /proj overlay
-# directories has one.
+DATASET_URI: "env:///proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+# Relative to the ported steps' code_dir, and deliberately a bare parameter
+# rather than a *_URI input binding — nothing to pull, this ships with the
+# code checkout. The one template on this cluster known to carry a real
+# {% generation %} block tag, which is what lets prep measure the completion
+# boundary at all: MEASURED, none of the 13 hand-built /proj overlay
+# directories has one. Pass an absolute path via --param to use a custom
+# template instead.
 CHAT_TEMPLATE: "templates/chatml_granite_42_generation.jinja"
 # The dataset is already think-filtered, so there is nothing to strip and
 # stripping would change the labelled span. keep.

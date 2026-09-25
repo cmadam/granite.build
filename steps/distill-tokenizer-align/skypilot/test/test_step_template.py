@@ -113,14 +113,18 @@ class TestSourceDeliveryContract:
     def test_code_config_has_exactly_the_contract_keys(self, step):
         assert set(step["config"]["code_config"]) == self.EXPECTED_KEYS
 
-    def test_filesystem_path_is_the_default(self, step):
+    def test_unauthenticated_clone_is_the_default(self, step):
         """No credential reaches the container by default. Every other step in this
-        repo either clones nothing or clones a public repo unauthenticated."""
+        repo either clones nothing or clones a public repo unauthenticated -- and this
+        one clones gb-steps-distillation, a public repo, so it needs no secret either.
+        """
         code = step["config"]["code_config"]
-        assert code["code_dir"].startswith("/"), "the default must be a real path"
-        assert code["repo"] == "", "the clone branch must be opt-in"
-        assert code["ref"] == ""
-        assert code["token_secret"] == "", "the default path must need no secret"
+        assert code["code_dir"] == "", "no filesystem checkout is pinned by default"
+        assert code["repo"].startswith("https://"), "the default must clone a real repo"
+        assert (
+            code["ref"] != ""
+        ), "the clone must pin a commit, not a moving branch head"
+        assert code["token_secret"] == "", "a public repo needs no secret"
 
     def test_the_pin_is_a_full_sha(self, step):
         """A branch name here makes two runs a week apart different runs while

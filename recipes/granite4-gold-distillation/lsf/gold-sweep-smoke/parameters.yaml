@@ -19,10 +19,9 @@
 RUN_NAME: "gold-sweep-smoke"
 
 # ─── Trainer code and image ───────────────────────────────────────────
-# Identical to gold-sweep-100: a smoke run against different trainer code or a
+# Identical to gold-sweep-100: a smoke run against a different trainer commit or a
 # different image would not gate anything.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 
 # ─── Model pair and data ──────────────────────────────────────────────

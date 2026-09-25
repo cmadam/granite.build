@@ -132,39 +132,78 @@ class TestThePair:
         mis-segments it. align pins the STUDENT only; the teacher needs its own
         pinned copy, and pointing this at the raw model directory reintroduces the
         exact bug align exists to remove."""
-        teacher = _params()["TEACHER_MODEL"]
+        teacher = _params()["TEACHER_MODEL_URI"]
         assert "granite-4.1-3b" in teacher
         assert teacher.endswith(
             "-pinned"
-        ), "TEACHER_MODEL must be the pinned-tokenizer copy, not the model dir"
+        ), "TEACHER_MODEL_URI must be the pinned-tokenizer copy, not the model dir"
 
     def test_the_student_is_the_sft_checkpoint_not_the_base_model(self, off):
         """The recorded after-SFT eval row is this work's control. Initialising from
         base, or from a different epoch, silently replaces a measured control with an
         unmeasured one."""
-        student = _params()["STUDENT_MODEL"]
+        student = _params()["STUDENT_MODEL_URI"]
         assert student.endswith("/epoch_hf_2"), student
         assert "-base" not in student
 
     def test_the_teacher_and_student_reach_every_step_that_needs_them(self, off):
         """One teacher, named in align, in the trainer and in both evals. A pipeline
         that aligns against one teacher and scores against another reports a
-        divergence from a model it never trained towards."""
-        teacher = _params()["TEACHER_MODEL"]
-        assert _config(off, "align")["align_config"]["teacher_model"] == teacher
+        divergence from a model it never trained towards.
+
+        Every consumer reads the RESOLVED BINDING PATH now, not the raw
+        TEACHER_MODEL_URI parameter — that's the whole point of routing it through
+        an input binding rather than a bare path, so the same assertion holds
+        regardless of which uri scheme TEACHER_MODEL_URI names.
+        """
+        align_teacher = _config(off, "align")["align_config"]["teacher_model"]
+        assert align_teacher == "{{ bindings.teacher_model.binding.path }}"
         gold = _config(off, "train-gold")["gold_config"]
-        assert gold["teacher_model_name_or_path"] == teacher
+        assert (
+            gold["teacher_model_name_or_path"]
+            == "{{ bindings.teacher_model.binding.path }}"
+        )
         for target in ("eval-transfer", "eval-transfer-baseline"):
-            assert _config(off, target)["eval_config"]["teacher_model"] == teacher
+            assert (
+                _config(off, target)["eval_config"]["teacher_model"]
+                == "{{ bindings.teacher_model.binding.path }}"
+            )
 
     def test_lineage_records_the_pair_as_input_artifacts(self, off):
         """Lineage is built from a target's input artifacts, not from step config: a
         path handed only to align_config would run and record nothing."""
         align_inputs = _targets(off)["align"]["inputs"]
-        assert set(align_inputs) == {"teacher_model", "student_model"}
-        for spec in align_inputs.values():
-            assert spec["type"] == "model"
+        assert set(align_inputs) == {
+            "teacher_model",
+            "student_model",
+            "chat_template",
+        }
+        for name, spec in align_inputs.items():
+            assert spec["type"] == ("dataset" if name == "chat_template" else "model")
+            # The URI's SCHEME is a parameter (TEACHER_MODEL_URI / STUDENT_MODEL_URI /
+            # CHAT_TEMPLATE_URI), not hardcoded — this recipe's default happens to be
+            # env://, but the point of the *_URI convention is that hf:// or s3://
+            # work identically. See test_source_uris_can_be_overridden_with_a_different_scheme.
             assert spec["uri"].startswith("env://")
+
+    def test_source_uris_can_be_overridden_with_a_different_scheme(self, tmp_path):
+        """The *_URI parameters carry a full uri, not a bare path, so a recipe user
+        can point align at a Hub model or an S3 object instead of /proj without any
+        change to build.yaml — only --param."""
+        rendered = _render(
+            tmp_path,
+            TEACHER_MODEL_URI="hf:///ibm-granite/granite-4.1-3b",
+            DATASET_URI="s3://my-bucket/corpora/smoke.jsonl",
+        )
+        align_inputs = _targets(rendered)["align"]["inputs"]
+        assert (
+            align_inputs["teacher_model"]["uri"] == "hf:///ibm-granite/granite-4.1-3b"
+        )
+        corpus_inputs = _targets(rendered)["corpus"]["inputs"]
+        assert (
+            corpus_inputs["source_dataset"]["uri"]
+            == "s3://my-bucket/corpora/smoke.jsonl"
+        )
 
 
 # ─── The markup family: the coupled invariant ──────────────────────────────────
@@ -180,17 +219,28 @@ class TestMarkupFamily:
         """THE coupled invariant. require_chatml false with a ChatML template is the
         one combination that fails silently: alignment succeeds and the teacher then
         scores a format it has never seen. The step cannot catch it — the template is
-        a path, and its contents are never compared against the vocabulary."""
+        a path, and its contents are never compared against the vocabulary.
+
+        align_config.chat_template is now the RESOLVED BINDING PATH (see
+        TestThePair.test_the_teacher_and_student_reach_every_step_that_needs_them for
+        why), so the actual template URI is asserted from CHAT_TEMPLATE_URI instead.
+        """
         align = _config(off, "align")["align_config"]
+        template_uri = _params()["CHAT_TEMPLATE_URI"]
         if align["require_chatml"] is False:
-            assert "chatml" not in align["chat_template"].lower()
-            assert "role" in align["chat_template"]
+            assert "chatml" not in template_uri.lower()
+            assert "role" in template_uri
 
     def test_the_chat_template_is_absolute(self, off):
         """run-align.sh only prefixes the steps' code_dir for a RELATIVE value. A
         relative granite-native path would resolve inside the pinned upstream
-        checkout, which does not contain one."""
-        assert _config(off, "align")["align_config"]["chat_template"].startswith("/")
+        checkout, which does not contain one.
+
+        CHAT_TEMPLATE_URI carries the env:// scheme prefix; the path after it must
+        still be absolute for the same reason the old bare CHAT_TEMPLATE had to be.
+        """
+        template_uri = _params()["CHAT_TEMPLATE_URI"]
+        assert template_uri.startswith("env:///")
 
     def test_the_response_template_is_the_granite_role_marker(self, off):
         """A fact about the installed chat template, not a style. The reference
@@ -304,11 +354,11 @@ class TestAgreement:
 class TestThePinnedUpstreamCheckout:
     """Every distillation step reads its Python from a checkout THIS project controls.
 
-    It used to be the shared clone, and that broke mid-build: the shared tree is
-    advanced by its upstream author, and when it moved from 70c1550 to e8b3d9c between
-    one target and the next (build 1820703f), `align` passed and `corpus` exited 1 on
-    its pin. So the pin now names `...-gb`, which is 70c1550 plus one additive commit
-    touching only `retag_student.py`.
+    It used to be a shared, continuously-advancing tree, and that broke mid-build: the
+    shared tree is advanced by its upstream author, and every time it moved, all six
+    ported steps' pins stopped matching and the affected step exited 1. So the pin now
+    names a small public repo (gb-steps-distillation) that only advances when this
+    project deliberately bumps it.
 
     That lives in the STEP templates, identically across all six -- the source contract
     asserts those blocks are identical to each other, not that they hold any particular
@@ -325,18 +375,3 @@ class TestThePinnedUpstreamCheckout:
             assert "code_config" not in _config(
                 off, name
             ), f"{name} overrides code_config; the pin belongs in the step template"
-
-    def test_the_patch_is_committed_next_to_the_step(self):
-        """A pin naming a checkout nobody can reconstruct is not reproducible. The diff
-        and its rationale ship with the step."""
-        patch = (
-            pathlib.Path(__file__).resolve().parents[3]
-            / "steps/distill-tokenizer-align/skypilot/patches"
-            / "retag_student_identity_vocab.diff"
-        )
-        assert patch.is_file(), f"missing {patch}"
-        text = patch.read_text()
-        assert (
-            "70c1550a171aa8e09a9ad9047a5bf763c39e8579" in text
-        ), "base commit unstated"
-        assert "--- a/src/gb_steps_post_training" in text, "not a usable diff"

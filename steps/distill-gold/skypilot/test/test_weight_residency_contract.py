@@ -32,7 +32,7 @@ _MODULE = "check_weight_residency.py"
 # even though the wiring does not.
 _CONFIG_BLOCK = {
     "distill-gold": "gold_config",
-    "distill-sft-baseline": "sft_config",
+    "distill-sft": "sft_config",
     "distill-logit-precompute": "precompute_config",
 }
 _EXPECTED = set(_CONFIG_BLOCK)
@@ -113,8 +113,10 @@ def test_the_only_guard_on_the_invocation_is_the_config_switch(name):
 
 
 def test_distill_gold_checks_before_the_vllm_role_split():
-    """distill-gold's run block `exec`s into run_vllm_serve.py on the server nodes, so
+    """distill-gold's run block `exec`s into run_vllm_serve on the server nodes, so
     anything spliced after that branch never runs there -- and a vLLM node loads the student
     too. This assertion is the reason the invocation sits where it does."""
     text = _templates()[_REFERENCE].read_text()
-    assert text.index(_MODULE) < text.index("run_vllm_serve.py")
+    assert text.index(_MODULE) < text.index(
+        "gb_steps_post_training.distillation.run_vllm_serve"
+    )

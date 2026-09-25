@@ -22,62 +22,39 @@ config:
   # test/test_source_contract.py — one contract, learned once. Change it here and
   # the other steps' tests fail until they are changed to match.
   code_config:
-    # THE DEFAULT: a checkout on the shared filesystem, exactly as distill-gold gets
-    # the kd-sandbox trainer from `kd_code_dir`. One pattern in the branch, not two.
+    # THE DEFAULT: an unauthenticated HTTPS clone of the public source repo at run time.
+    # No /proj checkout, no BlueVela-specific path — this resolves identically on any
+    # environment class that can reach github.com, which is the point: the six ported
+    # distillation steps used to depend on a pre-staged /proj clone that only existed on
+    # BlueVela, so this step (and every other one pinned to it) could not run anywhere
+    # else. It also used to point at a personal-namespace private repo, which meant an
+    # outside reader of this pin could not even inspect the code, let alone run it.
     #
-    # NO CREDENTIAL REACHES THE CONTAINER on this path, and that is the point. Every
-    # other step in this repo either clones nothing or clones a public repo
-    # unauthenticated (byoc: "Public repos only"); granite.build's own private-repo
-    # access clones SERVER-SIDE on the gbserver host. Shipping a git token into a
-    # compute node would be new ground, and the blast radius is not worth it — a
-    # token that can read this repo is necessarily broad, because the repo is owned
-    # by a personal namespace and a fine-grained PAT cannot scope to it at all.
-    #
-    # A checkout THIS PROJECT CONTROLS, and that is the point of the "-gb" suffix.
-    #
-    # It used to be the shared clone at .../gb-steps-collection-post-training, and
-    # that broke: the shared tree is advanced by its upstream author, and every time
-    # it moves, all six ported steps' expect_ref stops matching and the step exits 1.
-    # It happened mid-build (1820703f): the tree went from 70c1550 to e8b3d9c between
-    # one target and the next, align passed and corpus died on the pin. Reverting the
-    # shared tree is a standoff lost on the next fetch, and the failure looks like a
-    # recipe bug rather than a moved dependency.
-    #
-    # This clone is 70c1550 plus ONE additive commit (09bfcb1) touching only
-    # retag_student.py: an identical student/teacher vocabulary is treated as a
-    # vacuous role map rather than a bad ChatML donor. Only distill-tokenizer-align
-    # calls retag_student, so the other five steps read behaviour byte-identical to
-    # the 70c1550 they pinned before. The patch and its full rationale ship at
-    # steps/distill-tokenizer-align/skypilot/patches/.
-    #
-    # Upstream advances are now taken DELIBERATELY: rebase the patch onto the newer
-    # commit, bump this pin in all six steps together, and re-run the smoke tier.
-    # That is a feature -- a dependency that moves under a running build is not one.
-    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training-gb fetch --all
-    #   git -C /proj/granite-build/g4os/gb-steps-collection-post-training-gb rebase <newer>
-    code_dir: "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
+    # THE SOURCE OF TRUTH IS github.com/laminair/gb-steps-distillation, a small public
+    # repo holding exactly the vendored entrypoints and shared package these six steps
+    # import — see its README for what it is and is not. It is NOT the shared,
+    # continuously-advancing tree this pin used to track: that one broke every ported
+    # step's expect_ref out from under it whenever its upstream author moved it, and the
+    # failure looked like a recipe bug rather than a moved dependency. This repo only
+    # advances when this pin is deliberately bumped.
+    code_dir: ""
     # The commit code_dir is EXPECTED to be at. Recorded either way, but when this is
     # set and the checkout is at a different commit the step says so loudly rather
     # than training against whatever happens to be checked out. Empty => no check.
-    expect_ref: "09bfcb1662529644bd09f620c24293aa43f3b807"
-    # OVERRIDE, for a host with no /proj: clone at run time instead. Used ONLY when
-    # code_dir does not resolve. https, because the token path below is https-only.
-    repo: ""
-    # Branch, tag or commit checked out after that clone. A branch head makes two
-    # runs a week apart different runs while reporting the same provenance.
-    ref: ""
-    # Clone destination, RELATIVE to the step's working directory. On BlueVela the
-    # launcher cd's into $GB_BUILD_WORKDIR, which is on /proj — identity-mounted
-    # into the container at the same path, so a relative dir is container-visible.
+    expect_ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+    # code_dir is empty, so this is the path actually taken: an unauthenticated HTTPS
+    # clone. Public repos only — see token_secret below for why no credential is wired
+    # up here on purpose.
+    repo: "https://github.com/laminair/gb-steps-distillation.git"
+    # Branch, tag or commit checked out after that clone. Pinned to the same commit as
+    # expect_ref rather than a branch head, so two runs a week apart are the same run
+    # rather than silently drifting — bump both together.
+    ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+    # Clone destination, RELATIVE to the step's working directory.
     workdir: "distill-code"
     # The NAME of a space secret holding a read-scoped credential — never a value.
-    # Only consulted on the clone path. gbserver merges the space's secrets into the
-    # task environment by name (gbserver/environment/skypilot.py:
-    # `env.update(self.secrets)`), so the run block reads it as $<this name>;
-    # verified on BlueVela. Left EMPTY on purpose: the default path needs no
-    # credential. gitstore's own convention for the ssh variant is `GIT_SSH_KEY`
-    # (gbserver/asset/gitstore.py), and a read-only deploy key there would be the
-    # tightest option if this ever has to be automated.
+    # Only consulted on the clone path. Left EMPTY on purpose: gb-steps-distillation is
+    # public, so the clone needs no credential at all.
     token_secret: ""
     # The interpreter. NOT a bare `python`: this image's venv is not on PATH, and a
     # bare python resolves to the system interpreter, which has no transformers.
@@ -85,7 +62,7 @@ config:
     # Optional bash run after the source resolves and before the workload, from the
     # step's working directory. Empty => skipped. Not needed on this image: it
     # already carries torch 2.8.0, transformers 5.8.0, tokenizers 0.22.1 and
-    # safetensors 0.7.0 (measured, BlueVela job on p6-r17-n3).
+    # safetensors 0.7.0, confirmed by direct measurement on a real GPU node.
     setup_command: ""
 
   # ─── Evaluation ───────────────────────────────────────────────────────────────
@@ -244,8 +221,13 @@ environment_configs:
               TOKEN_VAR="{{ config.code_config.token_secret }}"
               # Indirect expansion, with :- so `set -u` does not abort when the space
               # has no such secret. The dispatcher runs this with `bash <file>`, so
-              # bash-isms are available.
-              TOKEN="${!TOKEN_VAR:-}"
+              # bash-isms are available. Guarded on TOKEN_VAR itself: a public repo
+              # leaves token_secret empty, and "${!:-}" is a bash syntax error
+              # ("invalid variable name"), not an empty expansion.
+              TOKEN=""
+              if [ -n "$TOKEN_VAR" ]; then
+                TOKEN="${!TOKEN_VAR:-}"
+              fi
               echo "distill: source = git clone $REPO (ref=${REF:-<default>}) -> $CODE_DIR"
               rm -rf "$CODE_DIR"
               if [ -n "$TOKEN" ]; then
@@ -271,13 +253,21 @@ environment_configs:
                   echo "         \$$TOKEN_VAR. Check that secret's scope, not this step." >&2
                   exit 1
                 fi
-              else
-                echo "distill: FATAL: code_config.repo is set but this space has no secret" >&2
-                echo "         named '$TOKEN_VAR'. The upstream repo is PRIVATE, so an" >&2
-                echo "         unauthenticated clone cannot succeed. Either create that" >&2
-                echo "         secret, or set code_config.code_dir to a checkout and leave" >&2
-                echo "         code_config.repo empty." >&2
+              elif [ -n "$TOKEN_VAR" ]; then
+                echo "distill: FATAL: code_config.token_secret names '$TOKEN_VAR' but this" >&2
+                echo "         space has no secret by that name. Either create that secret," >&2
+                echo "         or leave code_config.token_secret empty if $REPO is public." >&2
                 exit 1
+              else
+                # No token_secret configured at all: REPO is a public clone, same as an
+                # anonymous `git clone` from a terminal.
+                CLONE_RC=0
+                git clone --quiet "$REPO" "$CODE_DIR" || CLONE_RC=$?
+                if [ "$CLONE_RC" != "0" ]; then
+                  echo "distill: FATAL: unauthenticated clone of $REPO failed (rc=$CLONE_RC)." >&2
+                  echo "         If this repo is private, set code_config.token_secret." >&2
+                  exit 1
+                fi
               fi
               if [ -n "$REF" ]; then
                 git -C "$CODE_DIR" checkout --quiet "$REF"

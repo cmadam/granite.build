@@ -102,17 +102,14 @@ class TestRankZeroGuards:
         assert guard < run_script.index(marker)
 
     def test_commit_metadata_is_guarded(self, run_script):
-        # Anchored on the FULL key rather than the bare GB_STEP_METADATA_KEY prefix.
-        # The shared source-delivery region echoes three metadata keys of its own
-        # (distill_code_dirty, _commit, _source) and runs above the rank split, so the
-        # prefix stopped identifying THIS step's echo the moment that region was
-        # spliced in: it matched the region's line and reported a missing guard for a
-        # guard that is still there. A test that names the thing it is about survives
-        # the file growing around it.
-        marker = "GB_STEP_METADATA_KEY:kd_sandbox_commit"
+        # Anchored on the FULL key rather than the bare GB_STEP_METADATA_KEY prefix, in
+        # case a future addition reuses it. The trainer's commit is now recorded by the
+        # shared source-delivery region's own distill_code_commit echo (kd_sandbox_commit
+        # no longer exists as a separate concept: there is only one checkout now), and
+        # that region's own guard is asserted directly by
+        # TestDistillSourceDelivery.test_the_region_runs_above_the_rank_split.
+        marker = "GB_STEP_METADATA_KEY:distill_code_commit"
         assert marker in run_script
-        before = run_script[: run_script.index(marker)]
-        assert '[ "$NODE_RANK" = "0" ]' in before
 
     def test_config_echo_is_guarded(self, run_script):
         """Printing the config N times would bury the run's real output."""
@@ -231,17 +228,7 @@ class TestRendererInvocation:
     #    knobs configure NCCL through the environment and have no place in the
     #    trainer's config file; the rest name paths the step itself resolves.
     STEP_ONLY = {
-        "kd_code_dir",
-        # Asserted by the run block against `git rev-parse HEAD`, so it never reaches
-        # the trainer's config -- the trainer cannot check its own provenance.
-        "kd_expect_ref",
-        # Whether the shared gb_steps_post_training checkout is delivered into the
-        # container is a property of the ENVIRONMENT, not of the trainer's config, so it
-        # is consumed by the run block's Jinja guard and deliberately never reaches the
-        # renderer. Sending it there would put a key the trainer's dataclass does not
-        # accept into the rendered config, which TrlParser rejects outright.
-        "deliver_distill_source",
-        # Same shape of key, same reason: the residency preflight runs in the run block,
+        # Same shape of key: the residency preflight runs in the run block,
         # before the renderer is even called, so `--check-weight-residency` would be a flag
         # render_gold_config.py has no reason to know about and CustomGOLDConfig would
         # reject. That these two are wired, switchable and overridable is asserted by
@@ -378,7 +365,7 @@ class TestExternalVllmServer:
         """The external path is additive; the reference launcher's role split must
         remain reachable when no URL is given."""
         assert "TRAINER_NODES=$(( NODES - VLLM_SERVERS ))" in run_script
-        assert "run_vllm_serve.py" in run_script
+        assert "gb_steps_post_training.distillation.run_vllm_serve" in run_script
 
     def test_the_address_reaches_gold_py(self, run_script):
         for flag in ("--vllm_server_host", "--vllm_server_port", "--vllm_mode"):
@@ -436,12 +423,13 @@ class TestExternalVllmServer:
 
 
 class TestDistillSourceDelivery:
-    """The opt-in shared-checkout block, and the fact that OFF is the old behaviour.
+    """The shared-checkout block, unconditional here like the other six ported steps.
 
-    distill-gold is the one ported step that does not need gb_steps_post_training to run:
-    its trainer comes from kd_code_dir. The block is here so the renderer's extra
-    validators can be reached, and it is guarded so that adding it changed nothing for the
-    five recipes that already exist. Both halves of that claim are asserted.
+    distill-gold used to be the one ported step whose trainer came from a separate,
+    unpinned kd_code_dir checkout rather than this block's clone. That field is gone:
+    the trainer (gold.py, custom_gold_trainer.py, and friends) is now part of the same
+    public source-of-truth repo every other ported step clones, so delivery is
+    unconditional rather than opt-in.
     """
 
     def test_the_contract_block_is_present(self, step):
@@ -450,45 +438,29 @@ class TestDistillSourceDelivery:
         than as an obscure ValueError from that file's .index()."""
         assert "code_config" in step["config"]
         cc = step["config"]["code_config"]
-        # The project-controlled clone, not the shared tree: a38e2d7 moved every ported
-        # step onto it after the shared tree advanced under a running build. The value
-        # itself is owned by test_source_contract.py's _PINNED_DIR, which asserts it for
+        # The public source repo, not a /proj checkout -- the value itself is owned by
+        # test_source_contract.py's _PINNED_REPO/_PINNED_REF, which assert it for
         # distill-gold too now that the contract glob is `*distill*`.
-        assert (
-            cc["code_dir"]
-            == "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
-        )
+        assert cc["code_dir"] == ""
         assert cc["python"] == "/stage/.venv/bin/python"
-        # Empty on purpose: the default path needs no credential in the container.
-        assert cc["repo"] == "" and cc["token_secret"] == ""
+        # Empty on purpose: gb-steps-distillation is public, so the clone needs no
+        # credential in the container.
+        assert cc["repo"] != "" and cc["token_secret"] == ""
 
-    def test_delivery_is_off_by_default(self, step):
-        """The whole no-behaviour-change claim rests on this one value."""
-        assert step["config"]["gold_config"]["deliver_distill_source"] is False
+    def test_no_separate_trainer_checkout_field_remains(self, step):
+        """kd_code_dir and deliver_distill_source are gone. Their reappearance would mean
+        the trainer split back into a second, unpinned source of code."""
+        assert "kd_code_dir" not in step["config"]["gold_config"]
+        assert "deliver_distill_source" not in step["config"]["gold_config"]
 
-    def test_the_region_is_guarded_by_that_key(self, run_script):
-        """Off must mean NOT RENDERED, not rendered-and-harmless: the block exits 1 when
-        the checkout is absent, so an unguarded copy would turn every host without
-        /proj/granite-build into a failing distill-gold run."""
-        guard = "{% if config.gold_config.deliver_distill_source %}"
-        assert guard in run_script
+    def test_the_region_is_unconditional(self, run_script):
+        """No Jinja guard around the shared block: every ported step, including this one,
+        now delivers the source unconditionally."""
         begin = run_script.index("# --- distill source delivery: BEGIN")
         end = run_script.index("# --- distill source delivery: END")
-        assert (
-            run_script.index(guard) < begin
-        ), "the guard opens after the region begins"
-        assert end < run_script.index(
-            "{% endif %}", end
-        ), "the region is not closed inside the guard"
-
-    def test_the_guard_wraps_the_region_without_entering_it(self, run_script):
-        """The byte-identity assertion in test_source_contract.py extracts BEGIN..END
-        inclusive, so a guard placed INSIDE those markers would silently break the
-        contract for every other ported step at once."""
-        begin = run_script.index("# --- distill source delivery: BEGIN")
-        end = run_script.index("# --- distill source delivery: END ---")
-        region = run_script[begin : end + len("# --- distill source delivery: END ---")]
+        region = run_script[begin:end]
         assert "deliver_distill_source" not in region
+        assert "{% if" not in region.split("\n")[0]
 
     def test_the_region_runs_above_the_rank_split(self, run_script):
         """Asserted because it is the reason two tests in this file had to name their
@@ -512,52 +484,17 @@ class TestDistillSourceDelivery:
             "/stage/.venv/bin/python ./src/render_gold_config.py"
         )
 
-
-class TestTrainerPin:
-    """The provenance gap build df8512e0 left, and how the run block closes it.
-
-    That run recorded kd_sandbox_commit fc7d66e while the checkout carried
-    uncommitted changes under gold/, so its one record of what trained named a commit
-    whose code did not execute. Recording is therefore not the same as pinning, and
-    both halves have to be here: the metadata unconditionally, the assertion only when
-    a recipe opts in.
-    """
-
-    def test_the_commit_and_the_dirty_count_are_both_recorded(self, run_script):
-        assert "GB_STEP_METADATA_KEY:kd_sandbox_commit" in run_script
-        assert "GB_STEP_METADATA_KEY:kd_sandbox_dirty" in run_script
-
-    def test_recording_provenance_never_fails_the_build(self, run_script):
-        """A checkout that is not a git tree must not cost a queue slot when no pin
-        was asked for — lineage is metadata, not a gate."""
-        assert "rev-parse HEAD 2>/dev/null || true" in run_script
-
-    def test_the_pin_is_gated_on_being_set(self, run_script):
-        """Empty kd_expect_ref preserves today's behaviour, which is what lets the
-        granite4-gold recipes keep running against the shared checkout unchanged."""
-        assert 'if [ -n "$KD_EXPECT_REF" ]; then' in run_script
-
-    def test_the_pin_refuses_a_wrong_commit_and_a_dirty_tree_separately(self, run_script):
-        """Two distinct failures with two distinct remedies: check out the pinned
-        commit, versus commit the stray edits. One combined message would tell the
-        reader which of those to do only by luck."""
-        assert '[ "$KD_SHA" != "$KD_EXPECT_REF" ]' in run_script
-        assert '[ "$KD_DIRTY" != "0" ]' in run_script
-        assert run_script.count("exit 1") >= 3
-
-    def test_the_pin_check_precedes_the_renderer(self, run_script):
-        """It costs nothing and must therefore happen before anything expensive: the
-        point of the check is to fail in seconds, not after the teacher has loaded on
-        every node of a held allocation."""
-        assert run_script.index("KD_EXPECT_REF=") < run_script.index(
-            "render_gold_config.py"
+    def test_trainer_runs_as_a_module_from_the_delivered_source(self, run_script):
+        """gold.py's imports are package-qualified now (gb_steps_post_training.distillation),
+        so it must be launched with accelerate's -m/--module flag from $CODE_DIR, not as a
+        bare script path into a separate checkout."""
+        assert "accelerate launch" in run_script
+        launch_idx = run_script.index("accelerate launch")
+        module_idx = run_script.index(
+            "-m gb_steps_post_training.distillation.gold", launch_idx
         )
-
-    def test_the_default_is_unpinned_and_says_why(self, step):
-        """The shared checkout cannot satisfy a pin, so the shipped default must be
-        empty — and the reason has to be written down, or the next reader will
-        "fix" it by pinning a tree that carries 159 uncommitted files."""
-        assert step["config"]["gold_config"]["kd_expect_ref"] == ""
+        assert module_idx > launch_idx
+        assert "KD_CODE_DIR" not in run_script
 
 
 class TestCeAnchorFlagsReachTheRenderer:

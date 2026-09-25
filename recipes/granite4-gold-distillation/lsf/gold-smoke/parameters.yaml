@@ -10,15 +10,11 @@
 RUN_NAME: "gold-smoke"
 
 # ─── Trainer code and image ───────────────────────────────────────────
-# Live kd-sandbox checkout on the shared FS; supplies gold/*.py and the DeepSpeed
-# configs. It is unpinned state, so rank 0 records kd_sandbox_commit as step metadata
-# — but only when this path is a git checkout: the step reads it with `git rev-parse
-# HEAD || true` and stays silent otherwise, so pointing this at a plain directory
-# leaves the run with no record of which trainer code ran. Set to /stage (the
-# in-image snapshot) for a fully pinned run.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-# accelerate + DeepSpeed ZeRO-3 config, resolved relative to KD_CODE_DIR.
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+# The GOLD trainer's commit is recorded automatically as distill_code_commit by
+# code_config's clone -- the same pin every ported step uses -- so there is
+# nothing to set here.
+# accelerate + DeepSpeed ZeRO-3 config, resolved relative to code_config's clone.
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # SM90 (H100) build — it will not run on A100. Carries the pinned torch/transformers/
 # trl/vllm/deepspeed set the step was validated against, with its venv at /stage/.venv.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"

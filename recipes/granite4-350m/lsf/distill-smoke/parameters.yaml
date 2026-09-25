@@ -64,16 +64,24 @@ INCLUDE_SFT: false
 # image.
 # SM90 (H100) build; it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
-# The GOLD trainer's live kd-sandbox checkout on the shared FS, supplying
-# gold/*.py and the DeepSpeed configs. Unpinned state, so rank 0 records
-# kd_sandbox_commit as step metadata.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
-# The five ported steps read their own code from a separate pinned checkout,
-# declared by each step's code_config (code_dir plus expect_ref) rather than
-# here — so a source bump is one edit in the step, not one per recipe.
+# The GOLD trainer (gb_steps_post_training.distillation.gold and friends) is
+# delivered by distill-gold's own code_config, the same pinned public-repo
+# clone every ported step uses — so a source bump is one edit in the step,
+# not one per recipe.
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 
 # ─── The pair, the data, and the chat template ────────────────────────
+# Each *_URI below carries a FULL uri, not a bare path — the scheme picks
+# how granite.build fetches it (see ibm-bluevela's environment.yaml
+# assetstores block for what's wired in):
+#   env://<absolute path>   already on the shared filesystem (BlueVela's /proj)
+#   hf:///<org>/<repo>      pulled fresh from the Hugging Face Hub
+#   s3://<bucket>/<key>     pulled from S3-compatible object storage
+# The defaults below use env:// against /proj, for the reasons documented
+# next to each one. Override with --param to source any of them from the
+# Hub or your own bucket instead, e.g.
+# --param DATASET_URI=s3://my-bucket/corpora/smoke.jsonl.
+#
 # granite-4.1-3b, via a PINNED-TOKENIZER copy rather than the model directory.
 #
 # That indirection is the difference between this pair and the reference one. Both
@@ -90,7 +98,7 @@ DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # The two tokenizer.json files are byte-identical (sha256 match, 7,153,421 bytes), so
 # once both are pinned there is no cross-tokenizer problem left: this is the
 # shared-vocabulary JSD path, which is the only path the step exposes.
-TEACHER_MODEL: "/proj/granite-build/g4os/models/granite-4.1-3b-pinned"
+TEACHER_MODEL_URI: "env:///proj/granite-build/g4os/models/granite-4.1-3b-pinned"
 # The SFT checkpoint, NOT granite-4.0-350m-base — and this is the recipe's central
 # design choice rather than a convenience.
 #
@@ -107,12 +115,12 @@ TEACHER_MODEL: "/proj/granite-build/g4os/models/granite-4.1-3b-pinned"
 # reference runs use is dense, which is why they never hit it. Run the README's load
 # probe before this recipe; if it fails, the fix is a prefetched HF_HOME, not a
 # different student.
-STUDENT_MODEL: "/proj/granite-build/g4os/skypilot-test/sft/checkpoints/v0-20260529-20260529_212150-hf/epoch_hf_2"
+STUDENT_MODEL_URI: "env:///proj/granite-build/g4os/skypilot-test/sft/checkpoints/v0-20260529-20260529_212150-hf/epoch_hf_2"
 # The gold smoke slice, reused as a PLUMBING FIXTURE. It is not stage 1's corpus and
 # is not meant to be: its content is irrelevant to every question this recipe asks,
 # and its schema is known-good. Stage 1 trains on the raw ancestor of the SFT mixture,
 # which is a different parameter in a different recipe.
-DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
+DATASET_URI: "env:///proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.jsonl"
 # ABSOLUTE, and granite-native. run-align.sh only prefixes the steps' code_dir when
 # the value is relative, so an absolute path needs no step change.
 #
@@ -133,7 +141,7 @@ DATASET: "/proj/granite-build/g4os/gbtest/gold-distill-smoke/smoke_2000_nothink.
 # the template the SFT mixture was actually tokenized with. The vendored base is the
 # Hub's copy of granite-4.0-350m's template, which SHOULD be the same file — but "should
 # be" is not "is", and a difference here moves every prompt. The README has the command.
-CHAT_TEMPLATE: "/proj/granite-build/g4os/chat_templates/granite_4_role_generation.jinja"
+CHAT_TEMPLATE_URI: "env:///proj/granite-build/g4os/chat_templates/granite_4_role_generation.jinja"
 # FALSE, and only safe because CHAT_TEMPLATE above is granite-native.
 #
 # align's stage 1 of 4 demands ChatML of the teacher, unconditionally upstream. No
