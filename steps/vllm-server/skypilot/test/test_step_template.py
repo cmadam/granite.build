@@ -109,9 +109,28 @@ class TestReadinessGate:
         assert step["config"]["vllm_config"]["health_timeout_seconds"] >= 600
 
     def test_it_holds_the_allocation_afterwards(self, run_script):
-        """A service that returns ends its own step, and the trainer would lose
-        the server mid-run."""
-        assert run_script.rstrip().endswith('wait "$SERVER_PID"')
+        """A service that returns ends its own step, and the trainer would lose the
+        server mid-run.
+
+        Asserted as a PROPERTY of every path rather than as the script's last token.
+        This test used to read `endswith('wait "$SERVER_PID"')`, which was true only
+        while the tail was a single unconditional wait; once max_lifetime_seconds
+        added a watchdog the script ends in `fi` and the waits moved inside two
+        branches. The literal form would have failed a correct step -- and it did,
+        the moment the authoring template caught up with the published asset.
+        """
+        # Scoped to the hold section: an earlier wait in the readiness gate reaps a
+        # server that died during startup, and it is not one of the two counted here.
+        tail = run_script[run_script.index("# Hold the allocation") :].rstrip()
+        # One wait per branch: with the cap armed, and without it.
+        assert tail.count('wait "$SERVER_PID"') == 2
+        # Nothing after the waits may run in the normal path except the watchdog
+        # cleanup and the reaped-flag check, both of which only follow a returned
+        # server. In particular the step must not end by falling off the end of the
+        # script with the server still up.
+        assert tail.endswith("fi")
+        for branch in ("$MAX_LIFETIME", "else"):
+            assert branch in tail
 
 
 class TestMarkers:
