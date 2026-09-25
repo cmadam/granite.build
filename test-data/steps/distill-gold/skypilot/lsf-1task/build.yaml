@@ -1,5 +1,5 @@
 granite.build:
-  name: gold-distill-smoke-1task
+  name: distill-gold-smoke-1task
   # 2-node variant pinned to ONE LSF TASK PER HOST, matching the reference
   # launcher's topology. This is an experiment, not a second smoke test.
   #

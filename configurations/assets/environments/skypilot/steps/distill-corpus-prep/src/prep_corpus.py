@@ -608,8 +608,10 @@ def explode_assistant_turns(
     if max_per_conv >= len(idx):
         chosen = list(idx)
     else:
-        # random.Random(str) is seeded from the string's hash; hashlib keeps it stable
-        # across interpreter runs, which PYTHONHASHSEED randomisation would not.
+        # Already stable across runs without the sha256: CPython seeds Random from a str
+        # via its bytes plus their sha512, not via hash(), so PYTHONHASHSEED does not
+        # reach it. The wrapper is kept only to leave the chosen turns byte-for-byte
+        # unchanged against corpora already built with it.
         rng = random.Random(hashlib.sha256(seed_key.encode("utf-8")).hexdigest())
         chosen = sorted(rng.sample(idx[:-1], max_per_conv - 1) + [idx[-1]])
     out = []
@@ -657,12 +659,14 @@ def prompt_token_count(record: dict, tok) -> int:
     filtering on a different rule is worse than one that makes no claim. Three things pay for
     it:
 
-      1. Upstream's checks/prompt-budget-parity.py imports BOTH this function and the
-         trainer's real prepare/filter path and asserts they agree row by row on real corpus
-         rows. Not a copy of the logic on either side -- the actual two call sites, so drift
-         fails a check instead of shipping. That harness lives in the checkout `code_config`
-         names, not in this repository; the parity claim is only as fresh as the ref pinned
-         there.
+      1. A parity check (checks/prompt-budget-parity.py) imports BOTH this function and
+         the trainer's real prepare/filter path and asserts they agree row by row on real
+         corpus rows. Not a copy of the logic on either side -- the actual two call sites,
+         so drift fails a check instead of shipping. KNOWN GAP: that check lives only in the
+         private checkout these files were first ported from. It is NOT in
+         gb-steps-distillation at `code_config.expect_ref`, and nothing in this repository
+         runs it, so from here the parity rests on this file and the delivered trainer
+         being the same pinned revision -- which they are -- not on a check that fails.
       2. Every kwarg here is the trainer's, including per-row `render_thinking` (the trainer's
          `row_thinking`, :1924) and the `documents` non-list coercion (:1902-1904, pandas NaN).
          The one difference is deliberate and inert: the trainer reads `tools` back out of an
@@ -1018,8 +1022,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
             # THAT OBJECTION NOW HAS AN ANSWER, and --max-completion-length takes it: the
             # render IS re-implemented (prompt_token_count), because the alternative was two
             # different row sets across the six arms of one sweep. What makes it safe is not
-            # confidence, it is upstream's checks/prompt-budget-parity.py asserting prep's
-            # predicate against the TRAINER'S OWN, so drift fails a check. This comment's
+            # confidence, it is a parity check asserting prep's predicate against the
+            # TRAINER'S OWN, so drift fails a check -- see prompt_token_count() for where that
+            # check lives, and why this repository does not run it. This comment's
             # argument still holds for its own subject: the row ids remain the record of what
             # the trainer consumed, since only the trainer knows what its arm did.
             #
