@@ -13,8 +13,10 @@ shell one that execs the real binary. run-bfcl.sh invokes this instead of
 plain `bfcl`; see README.md for the model-id gotcha this works around.
 
 Also patches `Granite4FCHandler._extract_tool_calls` to recover tool calls
-missing their `</tool_call>` closing tag -- see tool_call_tag_repair.py and
-docs/granite-model-issues.md. Set BFCL_TOOL_CALL_TAG_REPAIR=0 to disable and
+missing their `</tool_call>` closing tag -- see tool_call_tag_repair.py, whose
+docstring carries the measured root cause (the checkpoint stops right after the
+JSON payload without closing the tag, in ~88% of otherwise correctly-targeted
+calls). Set BFCL_TOOL_CALL_TAG_REPAIR=0 to disable and
 reproduce the original strict-regex behavior (e.g. for an apples-to-apples
 unfixed rerun).
 
@@ -70,9 +72,8 @@ EXTRA_MODELS = {
         "url": "https://huggingface.co/ibm-granite/granite-4.2-3b",
     },
     # The bf16, UNQUANTIZED 30b -- and the distinction is the whole point of adding it.
-    # docs/granite-model-issues.md measured the closing-tag defect (and 8.00% multi-turn after
-    # repair) on granite-4.2-30b-fp8, and said explicitly that whether the defect is
-    # fp8-specific was never checked. THIS is the checkpoint the distillation actually uses as
+    # The closing-tag defect (and 8.00% multi-turn after repair) was measured on
+    # granite-4.2-30b-fp8 only; whether the defect is fp8-specific was never checked. THIS is the checkpoint the distillation actually uses as
     # teacher (config.json: torch_dtype bfloat16, no quantization_config), so it is the one whose
     # score decides the teacher question. Registered separately rather than reusing the fp8 entry
     # so the two can never be confused in a result file.

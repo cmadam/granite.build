@@ -1,5 +1,5 @@
 granite.build:
-  name: gold-distill-smoke-1node
+  name: distill-gold-smoke-1node
   # SINGLE-NODE control for the distill-gold step. Not a plumbing test — a
   # discriminator.
   #
