@@ -3,7 +3,7 @@
 Scope note: the source-delivery half of this template is spliced VERBATIM from
 distill-tokenizer-align, and that step's test_source_contract.py asserts every ported
 step's copy is byte-identical to it. So this file asserts only what is specific to THIS
-step — including the four launcher facts the distill-sft-baseline port paid an allocation
+step — including the four launcher facts the distill-sft port paid an allocation
 each to learn, since this script has the same shape.
 """
 
@@ -75,7 +75,7 @@ class TestRunScriptIsValidShell:
 
 
 class TestLauncherFactsLearnedElsewhere:
-    """The four things distill-sft-baseline cost an allocation each to discover.
+    """The four things distill-sft cost an allocation each to discover.
 
     run-precompute.sh has the same shape as run-sft.sh — same discovery helper, same
     unguarded CHECKOUT_ROOT, same bare `accelerate`, same kernel preflight — so these are
@@ -87,7 +87,10 @@ class TestLauncherFactsLearnedElsewhere:
             'export PRECOMPUTE_SRC="$CODE_DIR/src/gb_steps_post_training/distillation"'
             in run_script
         )
-        assert 'export LIB_DIR="$CODE_DIR/scripts/bluevela/lib"' in run_script
+        assert (
+            'export LIB_DIR="$CODE_DIR/steps/distill-logit-precompute/src/lib"'
+            in run_script
+        )
         assert "export CHECKOUT_ROOT=" not in run_script
 
     def test_the_script_still_overwrites_checkout_root(self, pc_sh):
@@ -113,7 +116,7 @@ class TestLauncherFactsLearnedElsewhere:
 
 
 class TestResponseTemplateNewline:
-    """Same transport as distill-sft-baseline: the trailing newline is data."""
+    """Same transport as distill-sft: the trailing newline is data."""
 
     def test_the_default_carries_an_escape_not_a_real_newline(self, step):
         rt = step["config"]["precompute_config"]["response_template"]

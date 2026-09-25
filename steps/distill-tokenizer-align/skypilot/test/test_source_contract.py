@@ -83,7 +83,22 @@ def test_code_config_block_is_byte_identical_to_the_reference(name):
     )
 
 
-@pytest.mark.parametrize("name", sorted(n for n in _templates() if n != _REFERENCE))
+# distill-gold is the one ported step that runs multi-node, and code_config.workdir
+# is a path on the SHARED filesystem (GB_BUILD_WORKDIR) -- every other ported step is
+# single-node, so its copy of the byte-identical region can rm -rf/clone unconditionally
+# with no other rank racing it on the same path. distill-gold's region additionally
+# guards the clone on rank 0 and has every other rank wait for a completion marker,
+# which is real, necessary drift, not decay: measured on build 7e9995b3, where two
+# ranks' concurrent clones into the same CODE_DIR crashed one of them inside git's own
+# ref-transaction code. So it is exempted from the byte-identity check below rather than
+# forcing a single-node contract onto a multi-node step.
+_MULTI_NODE_STEPS = {"distill-gold"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    sorted(n for n in _templates() if n != _REFERENCE and n not in _MULTI_NODE_STEPS),
+)
 def test_source_delivery_region_is_byte_identical_to_the_reference(name):
     templates = _templates()
     expected = _source_region(templates[_REFERENCE].read_text())
@@ -110,28 +125,34 @@ def test_no_step_ships_a_dockerfile(name):
     assert not (_templates()[name].parent / "Dockerfile").exists()
 
 
-# ─── The pinned checkout ───────────────────────────────────────────────────────
+# ─── The pinned source ─────────────────────────────────────────────────────────
 # Asserted here rather than in test_step_template.py because it is a property of the
-# CONTRACT: all six steps must pin the same tree at the same commit, and the value
-# itself has to be one this project controls. The byte-identity tests above already
-# guarantee sameness; these say what the shared value must BE.
+# CONTRACT: all six steps must clone the same public repo at the same commit, and
+# the value itself has to be one this project controls. The byte-identity tests
+# above already guarantee sameness; these say what the shared value must BE.
+#
+# code_dir is deliberately empty on every ported step: there is no pre-staged
+# checkout to pin, on BlueVela or anywhere else. Each run clones _PINNED_REPO at
+# _PINNED_REF itself, which is what makes these steps runnable on any environment
+# class that can reach github.com rather than only the one host that happened to
+# have a /proj clone.
 
-_PINNED_DIR = "/proj/granite-build/g4os/gb-steps-collection-post-training-gb"
-_PINNED_REF = "09bfcb1662529644bd09f620c24293aa43f3b807"
-_SHARED_DIR = "/proj/granite-build/g4os/gb-steps-collection-post-training"
+_PINNED_REPO = "https://github.com/laminair/gb-steps-distillation.git"
+_PINNED_REF = "a5d59bc45524a8d75706e20d44ae1a254f273f23"
 
 
 @pytest.mark.parametrize("name", sorted(_templates()))
 def test_every_step_pins_the_project_controlled_checkout(name):
-    """Not the shared clone. That tree is advanced by its upstream author, and every
-    time it moves all six pins stop matching and the step exits 1 -- mid-build, in
-    1820703f, between `align` and `corpus`. Reverting it is a standoff lost on the next
-    fetch, and the failure reads as a recipe bug rather than a moved dependency."""
+    """Not a /proj checkout. A pre-staged filesystem clone only exists on the one host
+    it was staged on, which is exactly what made these six steps unrunnable anywhere
+    else; a public repo/ref clones identically in any environment class."""
     text = _templates()[name].read_text(encoding="utf-8")
-    assert f'code_dir: "{_PINNED_DIR}"' in text, f"{name} does not pin the -gb checkout"
     assert (
-        f'code_dir: "{_SHARED_DIR}"' not in text
-    ), f"{name} still points at the shared tree, which moves without warning"
+        f'code_dir: ""' in text
+    ), f"{name} pins a filesystem checkout, not a public repo"
+    assert (
+        f'repo: "{_PINNED_REPO}"' in text
+    ), f"{name} does not clone the public source repo"
 
 
 @pytest.mark.parametrize("name", sorted(_templates()))
@@ -140,21 +161,7 @@ def test_every_step_pins_a_full_commit(name):
     same provenance, and a prefix is not a commit."""
     text = _templates()[name].read_text(encoding="utf-8")
     assert f'expect_ref: "{_PINNED_REF}"' in text, f"{name} pins a different commit"
+    assert (
+        f'ref: "{_PINNED_REF}"' in text
+    ), f"{name}'s clone ref disagrees with expect_ref"
     assert len(_PINNED_REF) == 40
-
-
-def test_the_pin_is_reachable_from_the_patch_it_carries():
-    """The pinned commit is the base commit plus this repo's patch. Stating the base in
-    the patch file is what lets someone rebuild the checkout from scratch; without it
-    the pin names a tree that cannot be reconstructed."""
-    patch = (
-        _STEPS_ROOT
-        / _REFERENCE
-        / "skypilot"
-        / "patches"
-        / "retag_student_identity_vocab.diff"
-    )
-    assert patch.is_file(), f"missing {patch}"
-    text = patch.read_text(encoding="utf-8")
-    assert "70c1550a171aa8e09a9ad9047a5bf763c39e8579" in text, "base commit unstated"
-    assert "retag_student.py" in text

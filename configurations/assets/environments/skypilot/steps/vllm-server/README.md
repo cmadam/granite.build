@@ -12,7 +12,7 @@ a `mem://` binding, so a training target in a *separate* allocation can reach it
 | | |
 |---|---|
 | deps | the image (`/stage/.venv`), the same one `distill-gold` uses |
-| server code | `run_vllm_serve.py` from the `kd_code_dir` `/proj` checkout |
+| server code | `gb_steps_post_training.distillation.run_vllm_serve`, from `code_config`'s clone |
 | bsub, enroot, node topology | SkyPilot's LSF provisioner |
 | readiness, address publication, teardown hook | this step |
 
@@ -70,7 +70,6 @@ value through filesystem-path normalisation and mangles `http://host:8001` into
 
 | key | default | notes |
 |---|---|---|
-| `kd_code_dir` | `/proj/granite-build/g4os/kd-sandbox` | supplies `gold/run_vllm_serve.py` |
 | `model_path` | — | **required.** For on-policy GOLD the **student**, not the teacher |
 | `port` | `8001` | the reference launcher's `VLLM_API_PORT` |
 | `max_model_len` | `16384` | must be ≥ the trainer's `max_length` |

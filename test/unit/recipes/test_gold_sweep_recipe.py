@@ -42,7 +42,12 @@ import yaml
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
 
-_LSF = pathlib.Path(__file__).resolve().parents[3] / "recipes" / "granite4-gold-distillation" / "lsf"
+_LSF = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "recipes"
+    / "granite4-gold-distillation"
+    / "lsf"
+)
 
 _RECIPES = ("gold-sweep-100", "gold-sweep-smoke")
 
@@ -360,7 +365,6 @@ def test_smoke_and_real_arm_share_every_behavioural_parameter(tmp_path):
     NCCL_DEBUG/NCCL_TIMEOUT_MS (a smoke run wants a fast, loud failure).
     """
     behavioural = (
-        "KD_CODE_DIR",
         "DS_CONFIG",
         "IMAGE_ID",
         "TEACHER_MODEL",
