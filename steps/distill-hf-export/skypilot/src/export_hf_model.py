@@ -4,8 +4,16 @@
 #   path   steps/distill-hf-export/src/export_hf_model.py
 #   commit 70c1550a171aa8e09a9ad9047a5bf763c39e8579
 #
-# Verbatim apart from `black`/`isort` reflow, which CI requires repo-wide. Keep it that
-# way so re-syncing upstream stays a three-way merge; behaviour changes belong upstream.
+# Verbatim apart from `black`/`isort` reflow, which CI requires repo-wide, and ONE
+# behaviour divergence recorded below. Keep it otherwise verbatim so re-syncing upstream
+# stays a three-way merge.
+#
+# DIVERGENCE: `normalise_tokenizer_json` + its wiring in `export`, which clear the
+# trainer's live truncation/padding state out of the published `tokenizer.json`. Upstream
+# copies that file verbatim, so every model it publishes carries the trainer's last
+# truncation budget (`max_length: 466` on build df8512e0's stage-1 export). See
+# STRIP_TOKENIZER_JSON_RUNTIME_KEYS for why that is not cosmetic. This belongs upstream;
+# until it lands there, the divergence lives here and the three-way merge has to keep it.
 #
 # It imports gb_steps_post_training.distillation at MODULE scope, which is delivered at
 # RUN time from the checkout named by code_config (see step-template.yaml). That is why
@@ -26,8 +34,8 @@ So there are exactly four jobs here, and none of them is a weight conversion:
   2. PRUNE    the resumable-run state (DeepSpeed shards, optimizer, scheduler, RNG). This
               is also nearly all of the size difference -- ZeRO optimizer state is several
               times the weights.
-  3. NORMALISE the DEFAULTS the trainer saved for its own use, of which there are two and
-              both are about what a consumer gets when it asks for nothing:
+  3. NORMALISE the DEFAULTS the trainer saved for its own use, of which there are three
+              and all of them are about what a consumer gets when it asks for nothing:
                 - `gold.py:345` sets `padding_side="left"` because the trainer generates.
                   That is right for generation and wrong as a published default, since a
                   right-padding consumer trusting `tokenizer_config.json` will silently pad
@@ -38,7 +46,12 @@ So there are exactly four jobs here, and none of them is a weight conversion:
                   that is the prefix the weights never saw. `--chat-template-thinking default-off` flips
                   it; see THINKING_POLICIES, which also records why this step refuses to
                   delete the empty `<think></think>` blocks themselves.
-              Both are OPT-IN or reported, never silent: this step's contract is that the
+                - `tokenizer.json` carries the trainer's live `truncation` state, because
+                  saving a tokenizer serialises what it was last configured to do. A
+                  consumer reading that file through the raw `tokenizers` backend inherits
+                  a truncation budget belonging to one training batch. See
+                  STRIP_TOKENIZER_JSON_RUNTIME_KEYS.
+              All are OPT-IN or reported, never silent: this step's contract is that the
               export manifest says exactly which defaults it changed.
   4. ASSERT   the pruned directory actually loads.
 
@@ -123,6 +136,29 @@ STRIP_TOKENIZER_KEYS = ("local_files_only", "is_local")
 # consumer instantiates, which is the kind of silent substitution this step refuses
 # everywhere else.
 TOKENIZER_CLASS_REWRITES = {"TokenizersBackend": "PreTrainedTokenizerFast"}
+
+# RUNTIME state that `save_pretrained` serialises into `tokenizer.json` itself.
+#
+# A trained tokenizer.json carries `truncation` and `padding` as explicit nulls. But the
+# trainer's in-process tokenizer had truncation switched on for its own batching, and
+# saving the tokenizer writes that live state into the file -- so the published model
+# arrives with a budget nobody asked for. Observed on build df8512e0's stage-1 export:
+#   "truncation": {"direction": "Right", "max_length": 466, ...}
+# where the aligned student's was null. 466 is one training batch's longest sequence; it
+# describes the trainer's last call, not the model.
+#
+# It is not cosmetic. transformers' PreTrainedTokenizerFast calls `no_truncation()` when a
+# caller does not ask for truncation, so a transformers consumer is unaffected -- but a
+# consumer that loads the file through the raw backend
+# (`tokenizers.Tokenizer.from_file`, which is also how several serving stacks read it)
+# inherits the 466-token limit and silently truncates every longer prompt.
+#
+# NOT in this list, deliberately: `post_processor`. The trainer writes an identity
+# `TemplateProcessing` where align had null, and that one is genuinely inert -- it inserts
+# no special tokens. A post_processor decides which specials get added at encode time, so
+# rewriting one would be the kind of silent substitution this step refuses everywhere
+# else. It is left exactly as the checkpoint had it.
+STRIP_TOKENIZER_JSON_RUNTIME_KEYS = ("truncation", "padding")
 
 PADDING_SIDES = ("right", "left", "keep")
 
@@ -299,6 +335,35 @@ def normalise_tokenizer_config(
     return out, changes
 
 
+def normalise_tokenizer_json(
+    raw: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Return (normalised tokenizer.json, list of human-readable changes).
+
+    Clears the trainer's live truncation/padding state and touches nothing else -- the
+    vocabulary, merges, pre_tokenizer, added_tokens and post_processor are the tokenizer
+    and are none of this step's business. Set to None rather than deleted, because that
+    is how a clean tokenizer.json spells "no truncation configured".
+    """
+    out = dict(raw)
+    changes: list[str] = []
+
+    for key in STRIP_TOKENIZER_JSON_RUNTIME_KEYS:
+        stale = out.get(key)
+        if stale is None:
+            continue
+        out[key] = None
+        detail = ""
+        if isinstance(stale, dict) and "max_length" in stale:
+            detail = f": max_length={stale['max_length']}"
+        changes.append(
+            f"cleared {key}{detail} (the trainer's live tokenizer state, serialised "
+            "into tokenizer.json; a raw tokenizers consumer would inherit it)"
+        )
+
+    return out, changes
+
+
 def normalise_chat_template(
     text: str, *, chat_template_thinking: str = "keep"
 ) -> tuple[str, list[str]]:
@@ -405,6 +470,22 @@ def export(
                 json.dumps(norm, indent=2, ensure_ascii=False) + "\n"
             )
             changes.extend(f"tokenizer_config.json: {c}" for c in tc_changes)
+        elif name == "tokenizer.json":
+            # Rewritten only when there is something to clear. This file is ~7 MB of
+            # vocabulary, it was written by the Rust `tokenizers` serialiser, and
+            # json.dumps does not reproduce that formatting -- so a round-trip on a clean
+            # tokenizer would reformat the whole file and make `diff -r` against the
+            # checkpoint report a change this step did not make. Same discipline as the
+            # chat template below.
+            raw_j = json.loads(src.read_text())
+            norm_j, tj_changes = normalise_tokenizer_json(raw_j)
+            if tj_changes:
+                (dest / name).write_text(
+                    json.dumps(norm_j, indent=2, ensure_ascii=False) + "\n"
+                )
+            else:
+                shutil.copy2(src, dest / name)
+            changes.extend(f"tokenizer.json: {c}" for c in tj_changes)
         elif name == "chat_template.jinja":
             # Written rather than copy2'd only when the policy actually changes something, so
             # that `keep` leaves a byte-identical file with the checkpoint's own mtime -- a
