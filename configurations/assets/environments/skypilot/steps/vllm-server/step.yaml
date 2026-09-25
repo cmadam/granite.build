@@ -50,6 +50,18 @@ config:
     # How long to wait for /health before giving up. The reference launcher allows
     # 1800s: a cold multi-GB load plus CUDA graph capture is minutes, and on a
     # shared filesystem the first read is the slow one.
+    # Minimum tokens the student must generate before EOS is allowed, enforced on
+    # THIS side of the on-policy loop. 0 = off.
+    #
+    # It has to be set here as well as on the trainer, and that is not redundancy:
+    # gold-distill's min_completion_length only bounds what the TRAINER asks for, while
+    # the sampling decision is taken in this process. trl's vllm_serve has no
+    # min_tokens field, so run_vllm_serve.py monkey-patches SamplingParams from
+    # GOLD_MIN_TOKENS, which this step exports from the value below. Left at 0 while
+    # the trainer sets a floor, the student is free to emit an immediate EOS and the
+    # run collapses into empty completions the teacher then scores as if they were
+    # rollouts.
+    min_completion_length: 0
     health_timeout_seconds: 1800
     health_poll_seconds: 10
     # Ceiling on how long this SERVICE will hold its allocation once healthy.
@@ -105,6 +117,12 @@ environment_configs:
             # with `bash <file>` (non-login), so this export sticks.
             export PATH=/stage/.venv/bin:$PATH
             PYBIN=/stage/.venv/bin/python
+
+            # run_vllm_serve.py reads this and raises SamplingParams.min_tokens to it
+            # for every request, which is the only place a floor can be applied: the
+            # trainer's own min_completion_length does not travel with a served
+            # request.
+            export GOLD_MIN_TOKENS="{{ config.vllm_config.min_completion_length | default(0) }}"
 
             GPUS="${NUM_GPUS_PER_NODE:-8}"
             PORT="{{ config.vllm_config.port }}"
