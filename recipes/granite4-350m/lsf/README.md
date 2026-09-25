@@ -21,7 +21,9 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 | `export-results`    | Copy results from shared FS to the configured output store  |
 | `distill-probe`     | Two-question gate: does the 350m load in the distillation image, and is the tokenizer confound real |
 | `distill-smoke`     | Off-policy GOLD distillation from granite-4.1-3b, end to end at smoke scale (7 targets) |
-| `distill-stage1`    | Off-policy GOLD distillation, the real run: 2 nodes x 8 H100, effective batch 96, 8192 context |
+| `distill-stage1`    | Off-policy GOLD distillation, the first real run -- SUPERSEDED, see distill-stage1-v2 |
+| `distill-stage1-v2` | Off-policy GOLD, anchored and instrumented: 2,000 steps, checkpoint ladder, entropy guard |
+| `distill-onpolicy-v2` | On-policy GOLD from stage 1 v2's chosen checkpoint, with a vLLM server allocation (written, not yet run) |
 
 ## Distillation
 
@@ -35,8 +37,19 @@ Run them in this order, each gating the next:
 
 1. [`distill-probe`](distill-probe/README.md) — ~4 GPU-minutes, nothing trained.
 2. [`distill-smoke`](distill-smoke/README.md) — the full graph at 64 rows and 2 steps.
-3. stage 1 proper — off-policy, one epoch of the SFT mixture.
-4. stage 2 — on-policy on the IFRL and IdentityRL prompt sets, from stage 1's export.
+3. [`distill-stage1-v2`](distill-stage1-v2/README.md) — off-policy, 2,000 steps, run
+   twice: anchored and as a pure-divergence control.
+4. [`distill-onpolicy-v2`](distill-onpolicy-v2/README.md) — on-policy from the rung stage
+   1 v2 selects. Written, not yet run.
+5. stage 2 proper — on-policy on the IFRL and IdentityRL prompt sets rather than the SFT
+   mixture, which is a prompt-set change on top of step 4's policy change.
+
+[`distill-stage1`](distill-stage1/README.md) is step 3's first attempt and is kept only as
+the record of it. It ran as build `df8512e0`: one full epoch of pure-divergence GOLD, which
+completed cleanly and produced a model worse on every one of the 30+ benchmarks measured
+(HumanEval 40.85 → 0.61). The objective had no ground-truth term and the student had
+already nearly satisfied it, so entropy reduction was the only descent direction left for
+7,640 steps. `distill-stage1-v2` is the response and is what to run.
 
 
 ## Defaults are BlueVela-specific
