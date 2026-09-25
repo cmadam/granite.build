@@ -117,8 +117,8 @@ class TestResponseTemplateNewline:
             f"RT_RAW='{rt}'\n"
             'GOOD="$(printf \'%b.\' "$RT_RAW")"; GOOD="${GOOD%.}"\n'
             'NAIVE="$(printf \'%b\' "$RT_RAW")"\n'
-            'printf "good=%s|naive=%s|" "$(printf %s "$GOOD" | wc -c)" '
-            '"$(printf %s "$NAIVE" | wc -c)"\n'
+            'printf "good=%s|naive=%s|" "$(($(printf %s "$GOOD" | wc -c)))" '
+            '"$(($(printf %s "$NAIVE" | wc -c)))"\n'
         )
         out = subprocess.run(
             ["bash", "-c", script], capture_output=True, text=True, check=True

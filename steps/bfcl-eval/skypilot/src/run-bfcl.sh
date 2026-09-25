@@ -137,6 +137,9 @@ if [ "$evaluate_only" != "true" ]; then
   vllm_bin="${vllm_bin:-vllm}"
   # shellcheck disable=SC2206 # word-splitting is intentional here
   vllm_extra_args=(${VLLM_EXTRA_ARGS:-})
+  # Expanded below through ${arr[@]+...}: bash < 4.4 (macOS's /bin/bash is 3.2)
+  # treats "${arr[@]}" of an EMPTY array as unbound under `set -u`, which is the
+  # default case here, since VLLM_EXTRA_ARGS is usually unset.
 
   echo "run-bfcl: starting standalone vLLM server (model_path=${model_path} port=${vllm_port} tensor_parallel_size=${num_gpus_generate})"
   "$vllm_bin" serve "$model_path" \
@@ -144,7 +147,7 @@ if [ "$evaluate_only" != "true" ]; then
     --tensor-parallel-size "$num_gpus_generate" \
     --gpu-memory-utilization "$gpu_memory_utilization" \
     --trust-remote-code \
-    "${vllm_extra_args[@]}" \
+    ${vllm_extra_args[@]+"${vllm_extra_args[@]}"} \
     > "${output_dir}/vllm-server.log" 2>&1 &
   vllm_pid=$!
 
