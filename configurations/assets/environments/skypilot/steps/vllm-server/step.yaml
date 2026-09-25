@@ -23,14 +23,25 @@ version: 1.0.0
 # deliberately not hidden: see README.md.
 #
 # Division of labour, as in distill-gold: SkyPilot's LSF provisioner owns bsub,
-# enroot and the node topology; deps come from the image; the server code comes
-# from the live /proj checkout.
+# enroot and the node topology; deps come from the image; the server code (now
+# gb_steps_post_training.distillation.run_vllm_serve) comes from the same public
+# source-of-truth clone every ported distillation step uses.
 type: SERVICE
 config:
+  code_config:
+    # Same mechanism and same pin as the ported distillation steps: an
+    # unauthenticated HTTPS clone of the public source repo at run time. See
+    # distill-gold's step-template.yaml for the full rationale.
+    code_dir: ""
+    expect_ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+    repo: "https://github.com/laminair/gb-steps-distillation.git"
+    ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+    workdir: "distill-code"
+    token_secret: ""
+    python: "/stage/.venv/bin/python"
+    setup_command: ""
   vllm_config:
     # ── Code and model ──────────────────────────────────────────────────────
-    # Live kd-sandbox checkout, as in distill-gold. Supplies gold/run_vllm_serve.py.
-    kd_code_dir: "/proj/granite-build/g4os/kd-sandbox"
     # The model to serve. For on-policy GOLD this is the STUDENT, not the teacher:
     # the student generates and the teacher scores those generations, so serving
     # the teacher here would be a different algorithm that still runs.
@@ -52,18 +63,6 @@ config:
     # shared filesystem the first read is the slow one.
     health_timeout_seconds: 1800
     health_poll_seconds: 10
-    # Ceiling on how long this SERVICE will hold its allocation once healthy.
-    # 0 (default) = no ceiling: hold until the teardown target downs the cluster,
-    # which is the behaviour every existing recipe relies on for multi-hour runs.
-    #
-    # Set it when a leak would be expensive. Teardown targets are gated on the
-    # CONSUMER's output artifact (`binding: <train>.checkpoint`), which a failed
-    # consumer never emits, and gbserver's schema has no on-failure semantics — so
-    # a crashed trainer strands this server. LSF SERVICE clusters never autostop
-    # either (skypilot.py:1817 passes autostop=None for the SSH/HPC clouds), so
-    # nothing underneath reclaims it. Build d77546a9 held 8 H100s that way until
-    # they were downed by hand. This is the backstop, not the normal path.
-    max_lifetime_seconds: 0
 outputs:
   optional:
     # The URL, as a mem:// binding. mem:// and NOT env://: env:// would run the
@@ -106,6 +105,21 @@ environment_configs:
             export PATH=/stage/.venv/bin:$PATH
             PYBIN=/stage/.venv/bin/python
 
+            # Minimal source delivery: an unauthenticated HTTPS clone of the public
+            # repo, same mechanism as the ported distillation steps (see
+            # distill-gold's step-template.yaml for the full rationale on why this
+            # replaced a /proj checkout). Simplified here since this step has no
+            # filesystem-checkout fallback to support.
+            CODE_DIR="${GB_BUILD_WORKDIR:-$PWD}/{{ config.code_config.workdir }}"
+            REPO="{{ config.code_config.repo }}"
+            REF="{{ config.code_config.ref }}"
+            rm -rf "$CODE_DIR"
+            git clone --quiet "$REPO" "$CODE_DIR"
+            if [ -n "$REF" ]; then
+              git -C "$CODE_DIR" checkout --quiet "$REF"
+            fi
+            export PYTHONPATH="$CODE_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
             GPUS="${NUM_GPUS_PER_NODE:-8}"
             PORT="{{ config.vllm_config.port }}"
             DP="{{ config.vllm_config.data_parallel_size }}"
@@ -144,7 +158,7 @@ environment_configs:
             # answers /health, and an exec'd process cannot echo afterwards.
             # Publishing on start instead would defeat the whole design — the
             # trainer would dispatch and race a multi-minute model load.
-            "$PYBIN" "{{ config.vllm_config.kd_code_dir }}/gold/run_vllm_serve.py" \
+            "$PYBIN" -m gb_steps_post_training.distillation.run_vllm_serve \
               --port "$PORT" \
               --model "{{ config.vllm_config.model_path }}" \
               --gpu-memory-utilization {{ config.vllm_config.gpu_memory_utilization }} \
@@ -190,34 +204,8 @@ environment_configs:
             echo "GB_ARTIFACT_ID:vllm_url GB_ARTIFACT_STATE:http://${ADDR}:${PORT}"
 
             # Hold the allocation for the server's lifetime. It never returns on
-            # its own; the teardown target is what normally ends it.
-            #
-            # MAX_LIFETIME > 0 arms a watchdog so a stranded server (consumer
-            # crashed => teardown never eligible) releases its node instead of
-            # holding it indefinitely. The watchdog is killed on the normal path,
-            # so it costs a sleeping subshell and nothing else.
-            MAX_LIFETIME={{ config.vllm_config.max_lifetime_seconds }}
-            REAPED_FLAG="$(mktemp -u)"
-            if [ "$MAX_LIFETIME" -gt 0 ]; then
-              echo "vllm-server: lifetime cap ${MAX_LIFETIME}s armed"
-              (
-                sleep "$MAX_LIFETIME"
-                if kill -0 "$SERVER_PID" 2>/dev/null; then
-                  : > "$REAPED_FLAG"
-                  kill "$SERVER_PID" 2>/dev/null || true
-                fi
-              ) &
-              WATCHDOG_PID=$!
-              wait "$SERVER_PID"
-              kill "$WATCHDOG_PID" 2>/dev/null || true
-              if [ -f "$REAPED_FLAG" ]; then
-                rm -f "$REAPED_FLAG"
-                echo "vllm-server: FATAL: lifetime cap of ${MAX_LIFETIME}s reached; releasing the allocation. Nothing tore this server down in time — check whether the consumer target failed." >&2
-                exit 1
-              fi
-            else
-              wait "$SERVER_PID"
-            fi
+            # its own; the teardown target is what ends it.
+            wait "$SERVER_PID"
     monitors:
       skypilot_monitor:
         ref: space://monitors/skypilot

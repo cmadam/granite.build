@@ -45,7 +45,7 @@ Every model the reference distillation recipes use — `granite-4.1-3b-base`,
 first hybrid one, so this is the single largest threat to the family and the cheapest
 to retire.
 
-There is counter-evidence worth knowing: `distill-sft-baseline`'s `run-sft.sh` states
+There is counter-evidence worth knowing: `distill-sft`'s `run-sft.sh` states
 that upstream's student *is* granitemoehybrid and that job `1136209` failed only on a
 cold cache — which suggests the cached build is stale and a run-time Hub fetch of a
 newer revision works.

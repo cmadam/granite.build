@@ -17,11 +17,10 @@
 RUN_NAME: "gold-blend-smoke"
 
 # ─── Trainer code and image ───────────────────────────────────────────
-# One checkout, one image for BOTH targets: run_vllm_serve.py and gold.py come from
-# the same tree, and a server built from different code than the trainer expects is
-# a protocol mismatch that surfaces as a connection or shape error mid-run.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+# One code_config clone for BOTH targets: run_vllm_serve.py and gold.py come from
+# the same pinned public repo, so a server built from different code than the
+# trainer expects is not a failure mode this recipe can produce.
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 
 # ─── Model pair and data ──────────────────────────────────────────────

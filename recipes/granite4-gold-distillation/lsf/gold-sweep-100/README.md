@@ -31,10 +31,11 @@ no chance of a stale duplicate.
 
 Two things differ, and neither is incidental:
 
-- **The trainer.** `KD_CODE_DIR` is our `/proj/granite-build/g4os/kd-sandbox` checkout,
-  not the `distillation.scratchpad` tree the published sweep ran. Rank 0 records
-  `kd_sandbox_commit` as step metadata so the run says which code produced it. A numeric
-  mismatch against the published arm is therefore a **finding**, not a bug in this recipe.
+- **The trainer.** This recipe's GOLD trainer comes from `code_config`'s pinned public-repo
+  clone (`gb-steps-distillation`), not the checkout the published sweep ran under. The
+  clone's commit is recorded automatically as `distill_code_commit` step metadata, so the
+  run says which code produced it. A numeric mismatch against the published arm is
+  therefore a **finding**, not a bug in this recipe.
 - **No experiment tracking.** The published arm logged to ClearML project
   `gold-sweep100`; this recipe has none, because the step exposes no tracking keys and
   the upstream tracker treats a partial config as an error. Curves are in the job log;

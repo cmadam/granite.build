@@ -16,14 +16,12 @@
 RUN_NAME: "gold-sweep-100"
 
 # ─── Trainer code and image ───────────────────────────────────────────
-# Live kd-sandbox checkout on the shared FS; supplies gold/*.py and the DeepSpeed
-# configs. Unpinned state, so rank 0 records kd_sandbox_commit as step metadata — but
-# only because this path is a git checkout; the step reads it with `git rev-parse HEAD ||
-# true` and stays silent otherwise. This is NOT the same trainer the published sweep
-# ran, which is why a numeric mismatch against the published arm is a finding rather
-# than a bug: see README, "What this does and does not reproduce".
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+# The GOLD trainer comes from code_config's pinned public-repo clone -- the same
+# mechanism every ported step uses -- recorded automatically as distill_code_commit.
+# This is NOT the same trainer the published sweep ran, which is why a numeric
+# mismatch against the published arm is a finding rather than a bug: see README,
+# "What this does and does not reproduce".
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # SM90 (H100) build — it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 

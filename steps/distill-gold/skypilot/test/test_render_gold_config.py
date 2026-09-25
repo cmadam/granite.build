@@ -700,5 +700,5 @@ class TestCorpusTokenizerCheck:
             cmd, capture_output=True, text=True, check=False, env=env
         )
         assert result.returncode == 2, result.stdout + result.stderr
-        assert "deliver_distill_source" in result.stderr
+        assert "gb_steps_post_training is not importable" in result.stderr
         assert not out.exists(), "a refused render must not leave a config behind"

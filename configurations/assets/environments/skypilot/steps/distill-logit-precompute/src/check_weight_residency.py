@@ -1,7 +1,7 @@
 """Refuse to hold an allocation waiting for weights that live on tape.
 
 BYTE-IDENTICAL across every step that reads model weights (distill-gold,
-distill-sft-baseline, distill-logit-precompute) and asserted so by distill-gold's
+distill-sft, distill-logit-precompute) and asserted so by distill-gold's
 test_weight_residency_contract.py, for the same reason the source-delivery region is
 asserted by test_source_contract.py: three copies that drift are worse than one copy that
 is checked. distill-gold is the reference, and its test_check_weight_residency.py is where

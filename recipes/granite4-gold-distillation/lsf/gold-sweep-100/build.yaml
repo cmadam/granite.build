@@ -72,7 +72,6 @@ granite.build:
                 zone: "$${QUEUE}"
             gold_config:
               run_name: "$${RUN_NAME}"
-              kd_code_dir: "$${KD_CODE_DIR}"
               ds_config: "$${DS_CONFIG}"
               # The same three parameters the inputs above declare, so the lineage
               # record and the trainer's arguments cannot disagree.

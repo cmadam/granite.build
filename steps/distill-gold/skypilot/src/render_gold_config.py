@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Render the flat YAML config the kd-sandbox GOLD trainer consumes.
+"""Render the flat YAML config the GOLD trainer (gb_steps_post_training.distillation.gold)
+consumes.
 
 Why this is a Python script rather than a heredoc in the step's ``run:`` block.
 Jinja does work there, so this is not about capability — it is about which
@@ -63,11 +64,10 @@ _ONLINE_ONLY = (
 #       trains fused generalized JSD while the config claims another objective. Exactly one
 #       of those five is caught by the dataclass; the other four pass validation.
 #
-# DELIBERATELY WITHOUT TRAINER LINE NUMBERS. The upstream copy of this table cites
-# custom_gold_trainer.py line numbers, and they are NOT transferable: they were read off a
-# fork whose additions shift every line below them, and kd_code_dir points at a checkout
-# this account cannot read to re-derive them. A precise-looking wrong citation is worse than
-# none, so the branch conditions are named by their flags -- which are stable -- instead.
+# DELIBERATELY WITHOUT TRAINER LINE NUMBERS. An earlier copy of this table cited
+# custom_gold_trainer.py line numbers, and they were not transferable: they were read off a
+# fork whose additions shift every line below them. A precise-looking wrong citation is worse
+# than none, so the branch conditions are named by their flags -- which are stable -- instead.
 #
 # WHAT IS DELIBERATELY NOT AN ARM, because `beta` already reaches it: forward KL is `jsd` at
 # beta 0.0, reverse KL is `jsd` at beta 1.0. Arms for those would be two ways to say one
@@ -166,7 +166,7 @@ LOSS_ARMS: Dict[str, Dict[str, Any]] = {
         "flags": {"use_ce_loss": True},
         # An SFT control that runs INSIDE this trainer, on the same data path, collator and
         # masking as every distillation arm -- so a gap between them cannot be a data-pipeline
-        # artefact. Not a replacement for distill-sft-baseline, which trains with no teacher
+        # artefact. Not a replacement for distill-sft, which trains with no teacher
         # resident at all.
         "doc": "cross entropy only -- in-trainer SFT control, teacher still loaded",
         "requires": {"lmbda_eq": 0.0},
@@ -347,7 +347,7 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # its config with TRL's parse_args_and_config, which rejects unknown
         # top-level keys outright:
         #   ValueError: Unknown arguments from config file: ['--min_lr', ...]
-        # Every validated config in kd-sandbox/configs/gold/ nests it this way.
+        # Every validated GOLD config nests it this way.
         "lr_scheduler_kwargs": {
             "min_lr": _lr(args.min_lr),
         },
@@ -431,10 +431,11 @@ def check_corpus_tokenizer(args: argparse.Namespace) -> None:
     loss. distill-pipeline-smoke chains corpus-prep straight into this step, which is exactly
     where a mismatch can be introduced by changing one parameter.
 
-    LAZY AND LOUD, never silent. The check lives in the shared package, which reaches this
-    container only when the step sets ``deliver_distill_source: true``. Asking for the check
-    without the source is an error naming that key -- because a validator that quietly does
-    not run is worse than one that is absent: the operator believes they checked.
+    LAZY AND LOUD, never silent. The check lives in the shared package, which this step
+    delivers via code_config on every run; if PYTHONPATH was not set up to reach it (this
+    script invoked directly rather than through the step's run block, for instance), asking
+    for the check anyway is an error naming why -- because a validator that quietly does not
+    run is worse than one that is absent: the operator believes they checked.
     """
     try:
         from gb_steps_post_training.distillation import (  # noqa: PLC0415
@@ -443,9 +444,10 @@ def check_corpus_tokenizer(args: argparse.Namespace) -> None:
     except ImportError as exc:
         raise ValueError(
             "--check-corpus-tokenizer was requested but gb_steps_post_training is not "
-            f"importable ({exc}). That package reaches this container through the shared "
-            "checkout, so set gold_config.deliver_distill_source: true in the build -- or "
-            "drop the check deliberately rather than leaving it to fail open"
+            f"importable ({exc}). That package reaches this container through code_config's "
+            "clone, normally exported onto PYTHONPATH by the step's run block -- either run "
+            "this through the step, or drop the check deliberately rather than leaving it "
+            "to fail open"
         ) from exc
 
     # The corpus argument is the DATASET path the trainer will read. corpus_tokenizer_identity
@@ -531,8 +533,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
         default=False,
         help=(
             "verify the student's tokenizer matches the one the corpus was built with. "
-            "Requires gold_config.deliver_distill_source: true; errors rather than skipping "
-            "if the package is absent."
+            "Requires gb_steps_post_training to be importable (delivered by code_config); "
+            "errors rather than skipping if the package is absent."
         ),
     )
     p.add_argument("--response-template", default="<|im_start|>assistant")

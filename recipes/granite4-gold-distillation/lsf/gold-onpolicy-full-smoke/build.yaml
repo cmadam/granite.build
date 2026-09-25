@@ -68,7 +68,6 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
             vllm_config:
-              kd_code_dir: "$${KD_CODE_DIR}"
               # The STUDENT. On-policy GOLD has the student generate and the
               # teacher score those generations, so serving the teacher here
               # would be a different algorithm that still runs and still reports
@@ -125,7 +124,6 @@ granite.build:
                 zone: "$${QUEUE}"
             gold_config:
               run_name: "$${RUN_NAME}"
-              kd_code_dir: "$${KD_CODE_DIR}"
               ds_config: "$${DS_CONFIG}"
               model_name_or_path: "$${STUDENT_MODEL}"
               teacher_model_name_or_path: "$${TEACHER_MODEL}"

@@ -236,12 +236,17 @@ def test_all_trainer_nodes_train(targets):
 
 def test_both_targets_share_one_trainer_checkout_and_image(targets, params):
     """A server built from different code than the trainer expects is a protocol
-    mismatch surfacing as a connection or tensor-shape error mid-run."""
+    mismatch surfacing as a connection or tensor-shape error mid-run.
+
+    Neither target's build.yaml overrides code_config, so both resolve to their
+    step-template's default -- the same pinned public-repo clone -- and this
+    recipe-level render cannot see that default to compare it directly. What it CAN
+    see, and what this asserts, is the one thing the recipe itself controls: both
+    targets run the same image.
+    """
     server_step = targets["vllm-server"]["steps"][0]["config"]
     train_step = targets["train"]["steps"][0]["config"]
 
-    assert server_step["vllm_config"]["kd_code_dir"] == params["KD_CODE_DIR"]
-    assert train_step["gold_config"]["kd_code_dir"] == params["KD_CODE_DIR"]
     assert (
         server_step["launcher_config"]["image_id"]
         == train_step["launcher_config"]["image_id"]

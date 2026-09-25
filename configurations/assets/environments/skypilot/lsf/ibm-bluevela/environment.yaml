@@ -97,6 +97,20 @@ assetstores:
     push:
       - mode: default
         config: {}
+  # s3:// / cos:// — lets a recipe source a teacher/student model, dataset or
+  # chat template from S3-compatible object storage instead of only /proj or
+  # the Hub, via cosrclone (same mechanism the AWS and RunPod environments
+  # already use). Credentials are the store's own defaults
+  # (COS_ACCESS_KEY_ID / COS_SECRET_ACCESS_KEY, see
+  # configurations/assets/assetstores/s3/store.yaml) resolved from the space's
+  # secret manager, so nothing IBM-internal is required to use it.
+  - store_uri: space://assetstores/s3/
+    pull:
+      - mode: default
+        config: {}
+    push:
+      - mode: default
+        config: {}
   # NOTE: mem:// (in-memory) store is no longer declared here — it is now
   # auto-registered for every environment by the base class
   # (Environment._register_default_memstore), so no per-environment entry is

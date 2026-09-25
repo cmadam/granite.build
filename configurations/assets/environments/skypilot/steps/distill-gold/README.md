@@ -1,19 +1,20 @@
 # `distill-gold` — GOLD knowledge distillation (SkyPilot / LSF)
 
-Distils a small **student** from a larger **teacher** with the `kd-sandbox` GOLD
-trainer (generalized JSD), multi-node on BlueVela via the SkyPilot LSF cloud.
+Distils a small **student** from a larger **teacher** with the GOLD trainer
+(generalized JSD, `gb_steps_post_training.distillation.gold`), multi-node via the
+SkyPilot LSF cloud.
 
 ## What supplies what
 
 | Piece | Source |
 |---|---|
 | Pinned deps (torch, transformers, trl, vllm, deepspeed) | the container image, venv at `/stage/.venv` |
-| Trainer (`gold/*.py`, DeepSpeed config) | the live `/proj` checkout named by `kd_code_dir` |
+| Trainer (`gold.py`, `custom_gold_trainer.py`, DeepSpeed config) | `code_config`'s clone of the public source repo |
 | `bsub`, `blaunch`, enroot, per-node rank/master | SkyPilot's LSF provisioner |
 | Config rendering, node roles, `accelerate` launch | this step |
 
-The trainer being a live checkout means a trainer fix needs no change here. The
-cost is that it is unpinned state, so the step records `kd_sandbox_commit` as step
+The trainer's commit is pinned by `code_config.expect_ref`, the same pin every
+other ported distillation step uses — recorded as `distill_code_commit` step
 metadata on every run.
 
 ## Minimal build
@@ -41,12 +42,12 @@ steps:
 vocabulary is not sufficient, the token IDs must agree.
 
 That is a limitation of *this step*, not of GOLD. Upstream GOLD
-(`trl.experimental.gold`, which `kd-sandbox`'s `CustomGOLDTrainer` subclasses) exists
-precisely to distil across *differing* tokenizers, aligning them by byte offsets via
-its ULD loss; `kd_code_dir`'s trainer carries that path in full (`use_uld_loss`,
+(`trl.experimental.gold`, which `CustomGOLDTrainer` subclasses) exists precisely to
+distil across *differing* tokenizers, aligning them by byte offsets via its ULD
+loss; the trainer carries that path in full (`use_uld_loss`,
 `teacher_tokenizer_name_or_path`, and ~15 `uld_*` options in
-`gold/custom_gold_config.py`). This step exposes **none** of those keys, so no build
-can reach the cross-tokenizer path today, and the shared-vocabulary JSD path is the
+`custom_gold_config.py`). This step exposes **none** of those keys, so no build can
+reach the cross-tokenizer path today, and the shared-vocabulary JSD path is the
 only one it can run. Adding them is a config-surface change, not a redesign — see
 [Adding a hyperparameter](README.md#adding-a-hyperparameter).
 
@@ -55,17 +56,15 @@ one: `gold.py` calls `verify_tokenizer_consistency()`, which raises `RuntimeErro
 naming both sources when the two tokenizers disagree on class, pre-tokenizer,
 post-processor, normalizer, decoder, added-token table or a battery of encoding probes.
 (The trainer skips that check only when `use_uld_loss` is set, which this step cannot
-set.) Verified at `kd-sandbox` `fc7d66e`; it is unpinned state, so re-check if this
-matters to you.
+set.) Confirmed by direct measurement.
 
-On BlueVela the `/proj` overlays fall into several tokenizer families, and the
-family does **not** track the version number: `granite-4.0-1b-instruct-clean` and
-`granite-4.1-3b_r260401a` ship byte-identical tokenizers, while
-`granite-4.1-3b-base-hub` and `granite-4.1-3b-base-ct` do not share one. Group by
-the hash of `tokenizer.json`, not by name:
+Model directories fall into several tokenizer families, and the family does **not**
+track the version number — two models with different names can ship byte-identical
+tokenizers, and two models sharing a name prefix may not. Group by the hash of
+`tokenizer.json`, not by name:
 
 ```shell
-for d in /proj/granite-build/g4os/kd-sandbox/{student,teacher}_overlays/*; do
+for d in path/to/{student,teacher}_overlays/*; do
   echo "$(md5sum "$d/tokenizer.json" | cut -c1-8)  $(basename "$d")"
 done | sort
 ```
