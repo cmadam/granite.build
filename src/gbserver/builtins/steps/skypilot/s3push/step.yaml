@@ -23,9 +23,12 @@ environment_configs:
         - skypilot_monitor
         config:
           image_id: docker:amazon/aws-cli:latest
-          resources:
-            cpus: 2+
-            memory: 4+
+          # No cpus/memory floor: on the LSF cloud a "{n}+" minimum raises
+          # ValueError (sky/clouds/lsf.py does float("2+") without stripping
+          # the "+"), so hardcoding one here made this step LSF-incompatible
+          # — same failure mode measured on hfpull's sibling launcher.
+          # Leaving resources empty keeps the step cloud-agnostic.
+          resources: {}
           run: |
             set -euo pipefail
             trap 'EC=$?; echo "s3push failed at line $LINENO, exit code: $EC" >&2; exit $EC' ERR
