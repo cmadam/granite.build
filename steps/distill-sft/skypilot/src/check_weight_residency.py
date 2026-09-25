@@ -42,9 +42,9 @@ and `mmlsattr -L` are metadata-only operations on the inode.
 
 EXIT CODES DIFFER FROM THE STANDALONE AUDIT SCRIPT THIS WAS PORTED FROM, deliberately.
 There, UNMEASURED is rc 2 -- a reviewer reads it. Here a non-zero rc aborts the step, so
-only an authoritative OFFLINE earns rc 1. Unmeasured warns and returns 0: a host without
-mmlsattr, or a non-GPFS path, is the normal case off this cluster and must not stop a run
-that would have been fine. Warn-only otherwise, with an override that announces itself.
+only OFFLINE -- or a weight path the step cannot stat at all -- earns rc 1. Unmeasured
+warns and returns 0: a host without mmlsattr, or a non-GPFS path, is the normal case off
+this cluster and must not stop a run that would have been fine. Warn-only otherwise, with an override that announces itself.
 
 WHAT IT DOES NOT CHECK. Not correctness, completeness or shape of the weights -- a
 resident shard can still be truncated. Not datasets: the same migration applies, but a
@@ -143,7 +143,7 @@ def weight_files(d: Path) -> list[Path]:
 
 
 def probe(f: Path, mm: str | None, seen: dict[str, tuple[str, str]]) -> tuple[str, str]:
-    """(verdict, detail) for one file; verdict is "ok" | "offline" | "unmeasured".
+    """(verdict, detail) for one file: "ok" | "offline" | "unmeasured" | "unreadable".
 
     Resolved through symlinks, because THE SYMLINK IS THE POINT here: a model mirror
     commonly places weights as links at their realpath, so a teacher dir can be nine links
@@ -157,7 +157,10 @@ def probe(f: Path, mm: str | None, seen: dict[str, tuple[str, str]]) -> tuple[st
     try:
         st = os.stat(real)
     except OSError as exc:
-        res = ("offline", f"cannot stat: {exc.strerror}")
+        # Refused, like OFFLINE -- a weight file the step cannot stat is not one it can
+        # load -- but kept apart from it, because a permissions or dangling-symlink problem
+        # answered with "stage it in from tape" sends whoever reads the log the wrong way.
+        res = ("unreadable", f"cannot stat: {exc.strerror}")
         seen[real] = res
         return res
     size = st.st_size
@@ -201,7 +204,8 @@ def looks_like_a_local_path(value: str) -> bool:
     offline because for a real path that is the right reading. Without this, the preflight
     would abort every recipe that names a model by repo id -- a check whose failure mode is
     breaking correct runs is worse than no check. An absolute or explicitly relative value
-    is a path; a bare `org/name` that does not exist on disk is not.
+    is a path; a bare `org/name` that does not exist on disk is not. A `~` value is a
+    path too, and audit() expands it before looking.
     """
     if value.startswith(("/", "./", "../", "~")):
         return True
@@ -210,9 +214,15 @@ def looks_like_a_local_path(value: str) -> bool:
 
 def audit(
     roles: list[tuple[str, str]], mm: str | None
-) -> tuple[list[str], list[str], int]:
-    """(problems, notes, files_measured) over `role=value` pairs."""
+) -> tuple[list[str], list[str], list[str], int]:
+    """(offline, unreadable, notes, files_measured) over `role=value` pairs.
+
+    Both of the first two refuse the run. They are separate lists only so the refusal can
+    name the right remedy: tape recall for the first, the path or its permissions for the
+    second.
+    """
     problems: list[str] = []
+    unreadable: list[str] = []
     notes: list[str] = []
     seen: dict[str, tuple[str, str]] = {}
     measured = 0
@@ -224,13 +234,13 @@ def audit(
         if not looks_like_a_local_path(value):
             notes.append(f"{role}: {value!r} is not a local path (hub id?), skipped")
             continue
-        p = Path(value)
+        p = Path(value).expanduser()
         if p.is_file():
             files = [p]
         elif p.is_dir():
             files = weight_files(p)
         else:
-            problems.append(f"{role}: {value} does not exist")
+            unreadable.append(f"{role}: {value} does not exist")
             continue
         if not files:
             notes.append(
@@ -243,10 +253,12 @@ def audit(
             line = f"{role}: {f.name}: {detail}"
             if verdict == "offline":
                 problems.append(line)
+            elif verdict == "unreadable":
+                unreadable.append(line)
             elif verdict == "unmeasured":
                 notes.append(line)
 
-    return problems, notes, measured
+    return problems, unreadable, notes, measured
 
 
 def main() -> int:
@@ -277,13 +289,26 @@ def main() -> int:
         print(
             "[residency] WARN: mmlsattr not found; residency cannot be established here"
         )
-    problems, notes, measured = audit(parsed, mm)
+    problems, unreadable, notes, measured = audit(parsed, mm)
 
     for n in notes:
         print(f"[residency] note: {n}")
     print(
         f"[residency] measured {measured} weight file(s) across {len(parsed)} role(s)"
     )
+
+    if unreadable:
+        # Not overridable by --allow-offline: that flag accepts a slow first read, and there
+        # is no first read to accept for a file the step cannot even stat.
+        for p in unreadable:
+            print(f"[residency] PROBLEM: {p}", file=sys.stderr)
+        print(
+            "[residency] REFUSING to start: the weight path(s) above are missing or cannot "
+            "be read by this user. This is NOT a tape recall -- check the path, a dangling "
+            "symlink, or the permissions on it and its parent directories.",
+            file=sys.stderr,
+        )
+        return 1
 
     if not problems:
         print("[residency] OK: no weight file is migrated")
