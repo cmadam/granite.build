@@ -89,8 +89,9 @@ config:
     # comparison would be measuring two things at once.
     student_model_path: ""
     # Refuse to start when the student's weights have been migrated to tape by GPFS. See
-    # src/check_weight_residency.py: metadata only (mmlsattr), never reads contents, refuses
-    # only on an authoritative OFFLINE, and treats a hub id as not-a-path rather than as a
+    # src/check_weight_residency.py: metadata only (mmlsattr, else st_blocks arithmetic),
+    # never reads contents, refuses on OFFLINE or on a path it cannot stat, warns and
+    # proceeds when it cannot measure, and treats a hub id as not-a-path rather than as a
     # finding. precomputed_logits_dir is deliberately NOT checked -- it holds no weight
     # shards, and the trainer streams it.
     check_weight_residency: true

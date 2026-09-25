@@ -136,6 +136,52 @@ class TestTheTwoReadings:
         assert "failed" in detail
 
 
+class TestTheToolCanLoadInsideAContainer:
+    """With /usr/lpp/mmfs bind-mounted into the step container, mmlsattr is FOUND and then
+    fails to load libgpfs.so (rc 127): the host resolves it through /lib64/libgpfs.so, which
+    the image does not have. Measured on BlueVela 2026-09-25 -- the preflight then ran on the
+    heuristic alone and still said OK, so nothing but this test notices."""
+
+    def _gpfs_tree(self, tmp_path):
+        """/usr/lpp/mmfs's shape: bin/mmlsattr a symlink to bin/tslsattr, lib/ beside bin/."""
+        root = tmp_path / "mmfs"
+        (root / "bin").mkdir(parents=True)
+        (root / "lib").mkdir()
+        real = root / "bin" / "tslsattr"
+        real.write_text('#!/bin/sh\necho "Misc attributes: LD=$LD_LIBRARY_PATH"\n')
+        real.chmod(0o755)
+        (root / "bin" / "mmlsattr").symlink_to("tslsattr")
+        return root
+
+    def test_gpfs_lib_is_put_first_on_the_library_path(self, tmp_path, monkeypatch):
+        root = self._gpfs_tree(tmp_path)
+        monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/local/cuda/lib64")
+        env = cwr.mmlsattr_env(str(root / "bin" / "mmlsattr"))
+        assert (
+            env["LD_LIBRARY_PATH"] == f"{root.resolve() / 'lib'}:/usr/local/cuda/lib64"
+        )
+
+    def test_an_unset_library_path_gets_no_empty_entry(self, tmp_path, monkeypatch):
+        """A trailing ':' is an empty entry, which ld.so reads as the current directory."""
+        root = self._gpfs_tree(tmp_path)
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+        env = cwr.mmlsattr_env(str(root / "bin" / "mmlsattr"))
+        assert env["LD_LIBRARY_PATH"] == str(root.resolve() / "lib")
+
+    def test_no_lib_beside_the_tool_leaves_the_environment_alone(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+        env = cwr.mmlsattr_env(_fake_mmlsattr(tmp_path))
+        assert "LD_LIBRARY_PATH" not in env
+
+    def test_the_subprocess_actually_receives_it(self, tmp_path, monkeypatch):
+        root = self._gpfs_tree(tmp_path)
+        monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+        toks, _ = cwr.attrs_of("/anything", str(root / "bin" / "mmlsattr"))
+        assert toks == {f"LD={root.resolve() / 'lib'}"}
+
+
 class TestMmlsattrIsAuthoritativeInBothDirections:
     def test_offline_is_a_problem(self, tmp_path):
         f = _shard(tmp_path / "offline-teacher", "model-00001-of-00001.safetensors")

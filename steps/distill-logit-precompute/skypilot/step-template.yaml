@@ -101,8 +101,9 @@ config:
     # that defines the token ids in the index need not be the model directory's own.
     teacher_tokenizer_path: ""
     # Refuse to start when the teacher's weights have been migrated to tape by GPFS. See
-    # src/check_weight_residency.py: metadata only (mmlsattr), never reads contents, refuses
-    # only on an authoritative OFFLINE, and treats a hub id as not-a-path rather than as a
+    # src/check_weight_residency.py: metadata only (mmlsattr, else st_blocks arithmetic),
+    # never reads contents, refuses on OFFLINE or on a path it cannot stat, warns and
+    # proceeds when it cannot measure, and treats a hub id as not-a-path rather than as a
     # finding.
     check_weight_residency: true
     # Proceed anyway, loudly. For when you know the recall is already under way.
