@@ -1,7 +1,6 @@
 """Recover `ibm-granite/granite-4.2-30b-fp8` tool calls whose `</tool_call>`
 closing tag never got generated.
 
-See docs/granite-model-issues.md for the full root-cause writeup. In short:
 `Granite4FCHandler._extract_tool_calls` (bfcl_eval's own, unmodified) requires
 a literal `<tool_call>\\n...\\n</tool_call>` match. In practice this
 checkpoint frequently stops (or opens a second `<tool_call>`, or drifts into

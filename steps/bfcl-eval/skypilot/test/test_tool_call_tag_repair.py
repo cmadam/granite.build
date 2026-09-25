@@ -12,8 +12,8 @@ from tool_call_tag_repair import (  # noqa: E402
     repair_unclosed_tool_calls,
 )
 
-# Verbatim malformed samples from the granite-4.2-30b-fp8 full run --
-# see docs/granite-model-issues.md.
+# Verbatim malformed samples from the granite-4.2-30b-fp8 full run (see
+# tool_call_tag_repair.py's module docstring for the root-cause writeup).
 CLEAN_EARLY_STOP = '\n<tool_call>\n{"name": "get_user_info", "arguments": {"user_id": 7890, "special": "black"}}\n'
 SECOND_TAG_OPENED_INSTEAD_OF_CLOSE = (
     '\n<tool_call>\n{"name": "github_star", "arguments": '
