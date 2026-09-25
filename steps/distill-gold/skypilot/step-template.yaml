@@ -84,10 +84,13 @@ config:
     # Refuse to start when either of the two paths above names weights GPFS has
     # migrated to tape. Reading those back is a per-shard recall of minutes to
     # hours, inside a GPU allocation, and the failure it produces downstream does
-    # not look like a storage problem. The check is metadata-only (mmlsattr), it
-    # never touches file contents, and it only refuses on an authoritative
-    # OFFLINE -- if it cannot measure, it warns and proceeds. A hub id rather
-    # than a path is not a finding either.
+    # not look like a storage problem. The check is metadata-only (mmlsattr, and
+    # st_blocks arithmetic where mmlsattr cannot answer), it never touches file
+    # contents, and it refuses on OFFLINE -- GPFS's own verdict, or a large file
+    # with almost nothing allocated -- or on a path it cannot stat at all. If it
+    # cannot measure, it warns and proceeds. A hub id rather than a path is not a
+    # finding either. On BlueVela the environment bind-mounts /usr/lpp/mmfs so
+    # the container gets mmlsattr's answer rather than only the arithmetic's.
     check_weight_residency: true
     # Proceed anyway. Announces itself in the log; for the case where you know
     # the recall is already running.
