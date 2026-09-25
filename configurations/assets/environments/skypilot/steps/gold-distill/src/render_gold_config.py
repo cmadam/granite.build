@@ -22,6 +22,14 @@ producing an error, and each is handled badly by a shell heredoc:
   heredoc inside a YAML literal block — and it is exactly the seam the on-policy
   phase will reopen.
 
+* The trainer's newer keys must be ABSENT, not false, when unused. ``ce_coef``,
+  ``log_student_entropy`` and the entropy-guard trio only exist in the clone this
+  step pins (``kd_expect_ref``); emitting them unconditionally would make every
+  config here unreadable by any other kd-sandbox checkout, and TRL rejects unknown
+  top-level keys outright. Emitting them only when they are non-default also keeps
+  the rendered config of every existing recipe byte-identical, which is what
+  ``test_off_policy_key_set_is_exact`` asserts.
+
 Dumping with the same library the trainer parses with also means a config that
 renders is a config the trainer can read.
 """
@@ -87,6 +95,51 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
             f"({args.total_nodes}); every node would serve and none would train"
         )
 
+    # The CE anchor and the collapse guard. Validated here rather than left to the
+    # trainer's __post_init__ because a bad value there surfaces after accelerate has
+    # launched, the teacher has loaded and a 2-node allocation is already held.
+    if args.ce_coef < 0:
+        raise ValueError(f"ce_coef must be >= 0; got {args.ce_coef}")
+    if not 0.0 <= args.entropy_guard_drop_frac < 1.0:
+        raise ValueError(
+            "entropy_guard_drop_frac must be in [0.0, 1.0); got "
+            f"{args.entropy_guard_drop_frac}"
+        )
+    if args.entropy_guard_drop_frac > 0 and not args.log_student_entropy:
+        raise ValueError(
+            "entropy_guard_drop_frac > 0 needs log_student_entropy true: the guard reads "
+            "the entropy that flag computes, and without it the guard never arms — which "
+            "looks exactly like a run that never collapsed"
+        )
+    if args.entropy_guard_baseline_steps < 1:
+        raise ValueError("entropy_guard_baseline_steps must be >= 1")
+    if args.entropy_guard_patience < 1:
+        raise ValueError("entropy_guard_patience must be >= 1")
+
+    # The lmbda ramp and the generation floor are on-policy-only. At lmbda 0 the student
+    # never generates, so both would be silently inert rather than wrong — which is the
+    # class of mistake this renderer exists to turn into an error.
+    if args.lmbda_schedule not in ("constant", "linear"):
+        raise ValueError(
+            f"lmbda_schedule must be 'constant' or 'linear'; got {args.lmbda_schedule!r}"
+        )
+    if args.lmbda_schedule == "linear":
+        if not 0.0 <= args.lmbda_init <= 1.0:
+            raise ValueError(
+                "lmbda_schedule linear needs lmbda_init in [0.0, 1.0]; got "
+                f"{args.lmbda_init}"
+            )
+        if not online:
+            raise ValueError(
+                "lmbda_schedule linear ramps towards on-policy sampling, so it needs a "
+                "vLLM server; set vllm_num_servers > 0 or leave the schedule constant"
+            )
+    if args.min_completion_length > 0 and not online:
+        raise ValueError(
+            "min_completion_length bounds the student's vLLM rollout, so it does nothing "
+            "off-policy; set vllm_num_servers > 0 or leave it 0"
+        )
+
     config: Dict[str, Any] = {
         "model_name_or_path": args.model_name_or_path,
         "teacher_model_name_or_path": args.teacher_model_name_or_path,
@@ -133,6 +186,37 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # chat template carries no {% generation %} tag, so without this the
         # trainer cannot tell prompt from completion.
         "response_template": _decode_escapes(args.response_template),
+        # Emitted only when asked for — see the fourth bullet in the module docstring.
+        # ce_coef ADDS cross entropy to the divergence; it is not use_ce_loss, which
+        # replaces it. Build df8512e0 ran the unanchored objective for 8,150 steps and
+        # lost 42% of the student's entropy to it.
+        **({"ce_coef": float(args.ce_coef)} if args.ce_coef > 0 else {}),
+        **(
+            {"log_student_entropy": True}
+            if args.log_student_entropy
+            else {}
+        ),
+        **(
+            {
+                "entropy_guard_drop_frac": float(args.entropy_guard_drop_frac),
+                "entropy_guard_baseline_steps": args.entropy_guard_baseline_steps,
+                "entropy_guard_patience": args.entropy_guard_patience,
+            }
+            if args.entropy_guard_drop_frac > 0
+            else {}
+        ),
+        # The two on-policy shaping keys, same rule. lmbda_init is meaningless unless the
+        # schedule is linear, so the pair travels together.
+        **(
+            {"lmbda_schedule": args.lmbda_schedule, "lmbda_init": float(args.lmbda_init)}
+            if args.lmbda_schedule == "linear"
+            else {}
+        ),
+        **(
+            {"min_completion_length": args.min_completion_length}
+            if args.min_completion_length > 0
+            else {}
+        ),
     }
 
     if online:
@@ -223,6 +307,39 @@ def _parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--beta", type=float, default=0.0)
     p.add_argument("--use-liger-fused-jsd", type=_bool, default=False)
+    p.add_argument(
+        "--ce-coef",
+        type=float,
+        default=0.0,
+        help="Additive CE anchor weight; 0 omits the key and leaves the objective pure.",
+    )
+    p.add_argument(
+        "--log-student-entropy",
+        type=_bool,
+        default=False,
+        help="Log mean student entropy and reverse KL every logging_steps.",
+    )
+    p.add_argument(
+        "--entropy-guard-drop-frac",
+        type=float,
+        default=0.0,
+        help="Stop when entropy falls this fraction below baseline; 0 disables the guard.",
+    )
+    p.add_argument("--entropy-guard-baseline-steps", type=int, default=20)
+    p.add_argument("--entropy-guard-patience", type=int, default=3)
+    p.add_argument(
+        "--lmbda-schedule",
+        default="constant",
+        help="constant, or linear to ramp lmbda from --lmbda-init up to --lmbda.",
+    )
+    p.add_argument("--lmbda-init", type=float, default=0.0)
+    p.add_argument(
+        "--min-completion-length",
+        type=int,
+        default=0,
+        help="vLLM min_tokens for the student's rollout; >0 blocks the immediate-EOS "
+        "mode collapse. On-policy only.",
+    )
     p.add_argument("--response-template", default="<|im_start|>assistant")
 
     p.add_argument(

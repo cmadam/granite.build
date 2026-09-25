@@ -412,3 +412,141 @@ class TestSchemaMatchesTheValidatedConfigs:
         config = _render(tmp_path)
         assert config["lr_scheduler_type"] == "cosine_with_min_lr"
         assert "min_lr" in config["lr_scheduler_kwargs"]
+
+
+class TestCeAnchorAndCollapseGuard:
+    """The keys added after build df8512e0 collapsed a student into repetition loops.
+
+    Two properties matter and pull against each other. The keys have to REACH the
+    trainer when a recipe asks for them, and they have to be ABSENT when it does not
+    — they exist only in the clone this step pins, and TRL's parse_args_and_config
+    rejects unknown top-level keys outright, so an unconditional emit would make
+    every config here unreadable by any other kd-sandbox checkout.
+    """
+
+    ANCHOR_KEYS = {
+        "ce_coef",
+        "log_student_entropy",
+        "entropy_guard_drop_frac",
+        "entropy_guard_baseline_steps",
+        "entropy_guard_patience",
+    }
+
+    def test_none_of_them_are_emitted_by_default(self, tmp_path):
+        assert self.ANCHOR_KEYS.isdisjoint(_render(tmp_path))
+
+    def test_a_default_render_is_unchanged_by_the_new_flags_existing(self, tmp_path):
+        """The regression that would break every existing recipe at once: passing the
+        flags at their defaults must produce the same config as not passing them."""
+        implicit = _render(tmp_path)
+        explicit = _render(
+            tmp_path,
+            extra=[
+                "--ce-coef", "0.0",
+                "--log-student-entropy", "false",
+                "--entropy-guard-drop-frac", "0.0",
+                "--lmbda-schedule", "constant",
+                "--min-completion-length", "0",
+            ],
+        )
+        assert implicit == explicit
+
+    def test_the_anchor_is_emitted_as_a_float_when_asked_for(self, tmp_path):
+        config = _render(tmp_path, extra=["--ce-coef", "0.05"])
+        assert isinstance(config["ce_coef"], float)
+        assert config["ce_coef"] == pytest.approx(0.05)
+        # Requested alone, it must not drag the guard in with it.
+        assert "entropy_guard_drop_frac" not in config
+
+    def test_the_guard_travels_with_its_two_settings(self, tmp_path):
+        """Emitting the threshold without the baseline window and the patience would
+        leave the trainer applying defaults the recipe never stated."""
+        config = _render(
+            tmp_path,
+            extra=[
+                "--log-student-entropy", "true",
+                "--entropy-guard-drop-frac", "0.15",
+                "--entropy-guard-baseline-steps", "30",
+                "--entropy-guard-patience", "2",
+            ],
+        )
+        assert config["entropy_guard_drop_frac"] == pytest.approx(0.15)
+        assert config["entropy_guard_baseline_steps"] == 30
+        assert config["entropy_guard_patience"] == 2
+        assert config["log_student_entropy"] is True
+
+    def test_a_guard_without_its_metric_is_refused(self, tmp_path):
+        """The silent failure this check exists for: the guard reads what
+        log_student_entropy computes, so without it the guard never arms — which is
+        indistinguishable from a run that never collapsed."""
+        result = _render(
+            tmp_path, extra=["--entropy-guard-drop-frac", "0.15"], expect_rc=2
+        )
+        assert "log_student_entropy" in result.stderr
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--ce-coef", "-0.1"],
+            ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "1.0"],
+            ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "0.1",
+             "--entropy-guard-patience", "0"],
+            ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "0.1",
+             "--entropy-guard-baseline-steps", "0"],
+        ],
+        ids=["negative-ce", "drop-frac-1.0", "patience-0", "baseline-0"],
+    )
+    def test_out_of_range_values_fail_here_not_on_the_cluster(self, tmp_path, extra):
+        """Validated in the renderer rather than left to the trainer's __post_init__,
+        because a raise there surfaces after accelerate has launched and the teacher
+        has loaded on every node of a held allocation."""
+        _render(tmp_path, extra=extra, expect_rc=2)
+
+    def test_the_logged_entropy_is_the_signal_the_loss_was_blind_to(self, tmp_path):
+        """Documents why this exists, in the one place that cannot rot: df8512e0's
+        train loss moved 2.7% over the 7,640 steps in which the student lost 42% of
+        its entropy, so `loss` alone cannot gate a run of this shape."""
+        assert "student_entropy" not in _render(tmp_path)
+        assert _render(tmp_path, extra=["--log-student-entropy", "true"])[
+            "log_student_entropy"
+        ] is True
+
+
+class TestOnPolicyShapingKeys:
+    """lmbda_schedule and min_completion_length do nothing at lmbda 0, so the
+    renderer refuses them there rather than letting a recipe believe it asked for
+    something. Inert-but-accepted is the failure mode this file exists to remove."""
+
+    def test_neither_is_emitted_by_default(self, tmp_path):
+        config = _render(tmp_path)
+        for key in ("lmbda_schedule", "lmbda_init", "min_completion_length"):
+            assert key not in config
+
+    def test_a_linear_ramp_emits_both_halves(self, tmp_path):
+        config = _render(
+            tmp_path,
+            total_nodes=2,
+            extra=[
+                "--vllm-num-servers", "1", "--lmbda", "0.25",
+                "--lmbda-schedule", "linear", "--lmbda-init", "0.0",
+            ],
+        )
+        assert config["lmbda_schedule"] == "linear"
+        assert config["lmbda_init"] == pytest.approx(0.0)
+
+    def test_a_ramp_without_a_server_is_refused(self, tmp_path):
+        result = _render(
+            tmp_path,
+            extra=["--lmbda-schedule", "linear", "--lmbda-init", "0.0"],
+            expect_rc=2,
+        )
+        assert "vllm" in result.stderr.lower()
+
+    def test_a_generation_floor_without_a_server_is_refused(self, tmp_path):
+        result = _render(
+            tmp_path, extra=["--min-completion-length", "32"], expect_rc=2
+        )
+        assert "min_completion_length" in result.stderr
+
+    def test_an_unknown_schedule_is_refused(self, tmp_path):
+        _render(tmp_path, extra=["--lmbda-schedule", "cosine"], expect_rc=2)

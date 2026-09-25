@@ -224,6 +224,9 @@ class TestRendererInvocation:
     #    trainer's config file; the rest name paths the step itself resolves.
     STEP_ONLY = {
         "kd_code_dir",
+        # Asserted by the run block against `git rev-parse HEAD`, so it never reaches
+        # the trainer's config — the trainer cannot check its own provenance.
+        "kd_expect_ref",
         "ds_config",
         "run_name",
         "nccl_debug",
@@ -401,3 +404,98 @@ class TestExternalVllmServer:
     def test_an_unparseable_url_fails_loudly(self, run_script):
         """Rather than launching a trainer that cannot reach anything."""
         assert "could not parse a host out of vllm_server_url" in run_script
+
+
+class TestTrainerPin:
+    """The provenance gap build df8512e0 left, and how the run block closes it.
+
+    That run recorded kd_sandbox_commit fc7d66e while the checkout carried
+    uncommitted changes under gold/, so its one record of what trained named a commit
+    whose code did not execute. Recording is therefore not the same as pinning, and
+    both halves have to be here: the metadata unconditionally, the assertion only when
+    a recipe opts in.
+    """
+
+    def test_the_commit_and_the_dirty_count_are_both_recorded(self, run_script):
+        assert "GB_STEP_METADATA_KEY:kd_sandbox_commit" in run_script
+        assert "GB_STEP_METADATA_KEY:kd_sandbox_dirty" in run_script
+
+    def test_recording_provenance_never_fails_the_build(self, run_script):
+        """A checkout that is not a git tree must not cost a queue slot when no pin
+        was asked for — lineage is metadata, not a gate."""
+        assert "rev-parse HEAD 2>/dev/null || true" in run_script
+
+    def test_the_pin_is_gated_on_being_set(self, run_script):
+        """Empty kd_expect_ref preserves today's behaviour, which is what lets the
+        granite4-gold recipes keep running against the shared checkout unchanged."""
+        assert 'if [ -n "$KD_EXPECT_REF" ]; then' in run_script
+
+    def test_the_pin_refuses_a_wrong_commit_and_a_dirty_tree_separately(self, run_script):
+        """Two distinct failures with two distinct remedies: check out the pinned
+        commit, versus commit the stray edits. One combined message would tell the
+        reader which of those to do only by luck."""
+        assert '[ "$KD_SHA" != "$KD_EXPECT_REF" ]' in run_script
+        assert '[ "$KD_DIRTY" != "0" ]' in run_script
+        assert run_script.count("exit 1") >= 3
+
+    def test_the_pin_check_precedes_the_renderer(self, run_script):
+        """It costs nothing and must therefore happen before anything expensive: the
+        point of the check is to fail in seconds, not after the teacher has loaded on
+        every node of a held allocation."""
+        assert run_script.index("KD_EXPECT_REF=") < run_script.index(
+            "render_gold_config.py"
+        )
+
+    def test_the_default_is_unpinned_and_says_why(self, step):
+        """The shared checkout cannot satisfy a pin, so the shipped default must be
+        empty — and the reason has to be written down, or the next reader will
+        "fix" it by pinning a tree that carries 159 uncommitted files."""
+        assert step["config"]["gold_config"]["kd_expect_ref"] == ""
+
+
+class TestCeAnchorFlagsReachTheRenderer:
+    """The keys are useless if the run block does not pass them, and
+    test_all_renderer_flags_are_passed only checks the flag STRING exists. These
+    check each one is wired to its own config key rather than to a neighbour's —
+    a copy-paste that sends --ce-coef the entropy threshold would pass that test."""
+
+    @pytest.mark.parametrize(
+        "flag,key",
+        [
+            ("--ce-coef", "ce_coef"),
+            ("--log-student-entropy", "log_student_entropy"),
+            ("--entropy-guard-drop-frac", "entropy_guard_drop_frac"),
+            ("--entropy-guard-baseline-steps", "entropy_guard_baseline_steps"),
+            ("--entropy-guard-patience", "entropy_guard_patience"),
+            ("--lmbda-schedule", "lmbda_schedule"),
+            ("--lmbda-init", "lmbda_init"),
+            ("--min-completion-length", "min_completion_length"),
+        ],
+    )
+    def test_each_flag_reads_its_own_key(self, run_script, flag, key):
+        pattern = re.compile(
+            re.escape(flag) + r'\s+"?\{\{\s*config\.gold_config\.' + re.escape(key) + r'\b'
+        )
+        assert pattern.search(run_script), f"{flag} is not wired to {key}"
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "ce_coef",
+            "log_student_entropy",
+            "entropy_guard_drop_frac",
+            "entropy_guard_baseline_steps",
+            "entropy_guard_patience",
+            "lmbda_schedule",
+            "lmbda_init",
+            "min_completion_length",
+        ],
+    )
+    def test_each_new_flag_carries_a_default(self, run_script, key):
+        """These keys postdate the granite4-gold recipes' test-data build.yamls, which
+        do not set them. Without `| default(...)` the template renders an empty
+        argument and the renderer fails on a build that used to work."""
+        assert re.search(
+            r"config\.gold_config\." + re.escape(key) + r"\s*\|\s*default\(",
+            run_script,
+        ), f"{key} is templated without a default"

@@ -21,6 +21,17 @@ config:
     # Live kd-sandbox checkout on the shared filesystem. Supplies gold/*.py and
     # configs/deepspeed/. Set to the in-image snapshot (/stage) to pin instead.
     kd_code_dir: "/proj/granite-build/g4os/kd-sandbox"
+    # Full 40-char commit kd_code_dir must be at, and be CLEAN at, or the run fails
+    # before the allocation does any work. Empty disables the check.
+    #
+    # Empty is the default because the shared checkout above cannot satisfy it: it is
+    # another project's tree and carries uncommitted work in gold/ (159 files as of
+    # 2026-09-25). That is not a hypothetical — build df8512e0 recorded
+    # kd_sandbox_commit fc7d66e while the code that actually ran was working-tree
+    # state, so the one provenance record the run left did not describe the trainer
+    # it used. Any recipe whose numbers are meant to be reproducible should point
+    # kd_code_dir at a clone it controls and pin it here.
+    kd_expect_ref: ""
     # DeepSpeed ZeRO-3 accelerate config, relative to kd_code_dir.
     ds_config: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
     # Names the checkpoint directory and the rendered config. The node count is
@@ -72,6 +83,33 @@ config:
     beta: 0.0
     # granite's logits_scaling=10 overflows the fused bf16 JSD kernel -> NaN loss.
     use_liger_fused_jsd: false
+
+    # ── The CE anchor, and the instruments that watch for its absence ────────
+    # All five need a kd_code_dir carrying the ce_anchor_and_entropy_guard patch
+    # (patches/ce_anchor_and_entropy_guard.diff). They are rendered into the
+    # trainer's config ONLY when non-default, so a recipe that leaves them alone
+    # still runs against any kd-sandbox checkout.
+    #
+    # ce_coef ADDS cross entropy on the corpus tokens to the divergence:
+    #   loss = divergence + ce_coef * CE(student, labels)
+    # It is not the trainer's use_ce_loss, which REPLACES the divergence. Without an
+    # anchor the objective has no opinion about real text, so an already-SFT'd
+    # student — one that already matches the teacher closely — can only improve by
+    # sharpening, and sharpening ends in repetition loops. Additive rather than a
+    # convex mix because JSD runs ~0.07 here against CE ~1, so a convex 50/50 is
+    # ~20x CE-dominated. Both terms are logged, so the ratio is a reading.
+    ce_coef: 0.0
+    # Logs mean student entropy and reverse KL (nats, supervised positions) every
+    # logging_steps. The train loss is blind to collapse — it moved 2.7% across the
+    # 7,640 steps in which df8512e0's student lost 42% of its entropy.
+    log_student_entropy: false
+    # Stop when entropy falls this fraction below a baseline measured over the first
+    # entropy_guard_baseline_steps. 0 disables. Stops gracefully: the checkpoint is
+    # saved, the process exits 0, and export/eval still run, so a tripped guard is a
+    # finding rather than a failed build. Requires log_student_entropy.
+    entropy_guard_drop_frac: 0.0
+    entropy_guard_baseline_steps: 20
+    entropy_guard_patience: 3
     # Required for completion masking; the nothink chat template has no
     # {% generation %} tag, so this is what locates the span.
     #
@@ -129,6 +167,15 @@ config:
     last_message_only: false
     clip_alpha: 0.1
     opd_importance_sampling: false
+    # constant, or linear to ramp lmbda from lmbda_init up to lmbda across training —
+    # off-policy early, where the corpus signal is, on-policy later, where the
+    # student's own degenerate regions are. Both need a vLLM server, so the renderer
+    # refuses linear at vllm_num_servers 0 rather than leaving it inert.
+    lmbda_schedule: "constant"
+    lmbda_init: 0.0
+    # vLLM min_tokens for the student's rollout. >0 blocks the immediate-EOS mode
+    # collapse. For vllm_mode server the SERVER must agree, via GOLD_MIN_TOKENS.
+    min_completion_length: 0
 
 outputs:
   optional:
@@ -212,11 +259,41 @@ environment_configs:
             CKPT_DIR="${GB_BUILD_WORKDIR:-$PWD}/checkpoints/${CONFIG_NAME}"
             CFG="${GB_BUILD_WORKDIR:-$PWD}/gold_config_${CONFIG_NAME}.yaml"
 
-            # The trainer comes from a mutable shared checkout, so record which
-            # commit ran. Never fail the build for lineage metadata.
+            # Trainer provenance. Recording the commit is unconditional and never
+            # fails the build; ASSERTING it happens only when kd_expect_ref is set.
+            #
+            # Recording alone is not enough, which is the lesson of build df8512e0: it
+            # dutifully logged kd_sandbox_commit fc7d66e while gold/ carried
+            # uncommitted changes, so the metadata named a commit whose code did not
+            # run. kd_sandbox_dirty is therefore recorded too — a non-zero value means
+            # the commit above is not what executed — and a set kd_expect_ref refuses
+            # both a wrong commit and a dirty tree, here, in seconds, rather than after
+            # the teacher has loaded on every node.
+            KD_EXPECT_REF="{{ config.gold_config.kd_expect_ref | default('') }}"
+            KD_SHA="$(git -C "$KD_CODE_DIR" rev-parse HEAD 2>/dev/null || true)"
+            KD_DIRTY="$(git -C "$KD_CODE_DIR" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$NODE_RANK" = "0" ]; then
-              KD_SHA="$(git -C "$KD_CODE_DIR" rev-parse HEAD 2>/dev/null || true)"
               [ -n "$KD_SHA" ] && echo "GB_STEP_METADATA_KEY:kd_sandbox_commit GB_STEP_METADATA_VALUE:$KD_SHA"
+              [ -n "$KD_SHA" ] && echo "GB_STEP_METADATA_KEY:kd_sandbox_dirty GB_STEP_METADATA_VALUE:$KD_DIRTY"
+            fi
+            if [ -n "$KD_EXPECT_REF" ]; then
+              if [ -z "$KD_SHA" ]; then
+                echo "gold-distill: FATAL: kd_expect_ref is $KD_EXPECT_REF but $KD_CODE_DIR is not a git checkout, so what ran cannot be recorded" >&2
+                exit 1
+              fi
+              if [ "$KD_SHA" != "$KD_EXPECT_REF" ]; then
+                echo "gold-distill: FATAL: $KD_CODE_DIR is at $KD_SHA, expected $KD_EXPECT_REF." >&2
+                echo "  Either check the clone out at the pinned commit, or update gold_config.kd_expect_ref" >&2
+                echo "  after deliberately advancing it. See patches/ce_anchor_and_entropy_guard.diff." >&2
+                exit 1
+              fi
+              if [ "$KD_DIRTY" != "0" ]; then
+                echo "gold-distill: FATAL: $KD_CODE_DIR is at the pinned commit but has $KD_DIRTY uncommitted file(s)," >&2
+                echo "  so the pin describes the commit and not the code. Commit or stash them, or clear kd_expect_ref" >&2
+                echo "  to run unpinned and accept that the run's provenance is unrecorded." >&2
+                exit 1
+              fi
+              echo "gold-distill: trainer pinned at $KD_SHA, clean"
             fi
 
             # Rendered per node (each has its own container filesystem) but into
@@ -248,6 +325,14 @@ environment_configs:
               --lmbda {{ config.gold_config.lmbda }} \
               --beta {{ config.gold_config.beta }} \
               --use-liger-fused-jsd {{ config.gold_config.use_liger_fused_jsd }} \
+              --ce-coef {{ config.gold_config.ce_coef | default(0.0) }} \
+              --log-student-entropy {{ config.gold_config.log_student_entropy | default(false) }} \
+              --entropy-guard-drop-frac {{ config.gold_config.entropy_guard_drop_frac | default(0.0) }} \
+              --entropy-guard-baseline-steps {{ config.gold_config.entropy_guard_baseline_steps | default(20) }} \
+              --entropy-guard-patience {{ config.gold_config.entropy_guard_patience | default(3) }} \
+              --lmbda-schedule "{{ config.gold_config.lmbda_schedule | default('constant') }}" \
+              --lmbda-init {{ config.gold_config.lmbda_init | default(0.0) }} \
+              --min-completion-length {{ config.gold_config.min_completion_length | default(0) }} \
               --response-template '{{ config.gold_config.response_template }}' \
               --vllm-num-servers {{ config.gold_config.vllm_num_servers }} \
               --top-p {{ config.gold_config.top_p }} \
