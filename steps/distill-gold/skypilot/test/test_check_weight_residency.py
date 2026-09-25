@@ -205,8 +205,9 @@ class TestAllocationMayOnlyAccuse:
     def test_a_missing_file_is_condemned(self, tmp_path):
         """A path that cannot be stat'ed is a problem, not an UNMEASURED: for a real
         filesystem path, "gone" is a finding. Reading a hub id as a path is what
-        looks_like_a_local_path exists to prevent."""
-        assert cwr.probe(tmp_path / "nope.safetensors", None, {})[0] == "offline"
+        looks_like_a_local_path exists to prevent. It is UNREADABLE rather than OFFLINE so
+        the refusal does not tell its reader to recall it from tape."""
+        assert cwr.probe(tmp_path / "nope.safetensors", None, {})[0] == "unreadable"
 
 
 class TestWhichFilesAreEvenLookedAt:
@@ -253,33 +254,49 @@ class TestAuditKeepsProblemsAndNotesApart:
     """Only `problems` can stop a run, so what lands in which list IS the behaviour."""
 
     def test_an_empty_role_is_a_note(self):
-        problems, notes, measured = cwr.audit([("student", "")], None)
-        assert problems == []
+        problems, unreadable, notes, measured = cwr.audit([("student", "")], None)
+        assert problems == unreadable == []
         assert measured == 0
         assert "empty" in notes[0]
 
     def test_a_hub_id_is_a_note(self):
-        problems, notes, _ = cwr.audit(
+        problems, unreadable, notes, _ = cwr.audit(
             [("student", "ibm-granite/granite-4.0-tiny")], None
         )
-        assert problems == []
+        assert problems == unreadable == []
         assert "not a local path" in notes[0]
 
-    def test_a_nonexistent_local_path_is_a_problem(self, tmp_path):
-        problems, _, _ = cwr.audit([("student", str(tmp_path / "gone"))], None)
-        assert "does not exist" in problems[0]
+    def test_a_nonexistent_local_path_is_unreadable_not_offline(self, tmp_path):
+        problems, unreadable, _, _ = cwr.audit(
+            [("student", str(tmp_path / "gone"))], None
+        )
+        assert problems == []
+        assert "does not exist" in unreadable[0]
+
+    def test_a_tilde_path_is_expanded(self, tmp_path, monkeypatch):
+        """looks_like_a_local_path accepts `~`, so audit has to expand it: an unexpanded
+        Path("~/x") is neither a file nor a directory, and would refuse a real model."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        _shard(tmp_path / "m", "model-00001-of-00001.safetensors")
+        problems, unreadable, _, measured = cwr.audit(
+            [("student", "~/m")], _fake_mmlsattr(tmp_path)
+        )
+        assert problems == unreadable == []
+        assert measured == 1
 
     def test_a_directory_with_no_weights_is_a_note(self, tmp_path):
         """A tokenizer-only overlay is a legitimate value for these flags and has no
         shards. Refusing on it would block the retagging arms."""
         (tmp_path / "tok").mkdir()
-        problems, notes, _ = cwr.audit([("tokenizer", str(tmp_path / "tok"))], None)
-        assert problems == []
+        problems, unreadable, notes, _ = cwr.audit(
+            [("tokenizer", str(tmp_path / "tok"))], None
+        )
+        assert problems == unreadable == []
         assert "no weight files" in notes[0]
 
     def test_a_file_may_be_named_directly(self, tmp_path):
         f = _shard(tmp_path / "m", "model-00001-of-00001.safetensors")
-        _, _, measured = cwr.audit([("student", str(f))], _fake_mmlsattr(tmp_path))
+        _, _, _, measured = cwr.audit([("student", str(f))], _fake_mmlsattr(tmp_path))
         assert measured == 1
 
 
@@ -327,6 +344,16 @@ class TestExitCodes:
         )
         assert r.returncode == 0
         assert "OVERRIDDEN" in r.stderr
+
+    def test_a_missing_path_refuses_without_the_tape_remedy(self, tmp_path):
+        """Still rc 1 -- the run cannot load it -- but the message must not send its reader
+        to stage in from tape, and --allow-offline does not wave it through: there is no
+        slow first read to accept for a file that is not there."""
+        for args in ([], ["--allow-offline"]):
+            r = self._run(tmp_path, *args, f"student={tmp_path / 'gone'}")
+            assert r.returncode == 1
+            assert "NOT a tape recall" in r.stderr
+            assert "mmrestripefile" not in r.stderr
 
     def test_a_resident_student_is_rc_zero(self, tmp_path):
         d = tmp_path / "student"
