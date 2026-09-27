@@ -39,11 +39,15 @@ import pytest
 from export_hf_model import (  # noqa: E402
     THINKING_POLICIES,
     ExportError,
+    assert_config_portable,
     classify,
+    diff_resolved_numeric,
     export,
     normalise_chat_template,
+    normalise_model_config,
     normalise_tokenizer_config,
     normalise_tokenizer_json,
+    published_config_needs_repair,
     select_checkpoint,
 )
 
@@ -64,6 +68,7 @@ def _ckpt(
     root: Path,
     step: int,
     *,
+    model_config=None,
     tokenizer_config=None,
     tokenizer_json=None,
     chat_template=None,
@@ -72,7 +77,9 @@ def _ckpt(
 ) -> Path:
     d = root / f"checkpoint-{step}"
     d.mkdir(parents=True)
-    (d / "config.json").write_text("{}")
+    (d / "config.json").write_text(
+        "{}" if model_config is None else json.dumps(model_config, indent=2) + "\n"
+    )
     if weights:
         (d / "model.safetensors").write_text("w")
     (d / "tokenizer.json").write_text(
@@ -333,6 +340,162 @@ def test_normalise_tokenizer_json_preserves_the_vocabulary():
         assert out[key] == raw[key], f"{key} must survive untouched"
 
 
+# ------------------------------------------------- normalise config.json
+#
+# These cover the RoPE relocation bug: transformers 5.8.0 writes
+# `rope_parameters: {rope_theta: 10000000}` and no top-level `rope_theta`, so every
+# transformers-4-schema consumer (vLLM 0.11.0, bfcl-eval) silently resolves the class
+# default 10000.0 and serves a positionally scrambled model. Measured on both sides:
+#
+#   config                                    transformers 4.55.4 resolves rope_theta
+#   align/retagged_student (4.57.6-authored)  10000000     <- healthy
+#   export-N (5.8.0-authored)                 10000.0      <- 1000x too small
+#   export-N + top-level rope_theta hoisted   10000000     <- the repair
+#
+# and under 5.8.0 a hoisted top-level `rope_theta` is inert: the attribute does not exist
+# on that generation's config at all, so adding it changes nothing there.
+
+
+def test_hoists_nested_rope_theta_to_top_level(tmp_path):
+    """The bug, and the fix. A transformers-4 consumer reads the top-level field."""
+    raw = {"rope_parameters": {"rope_theta": 10000000, "rope_type": "default"}}
+    out, changes = normalise_model_config(raw)
+    assert out["rope_theta"] == 10000000
+    assert any("rope_theta" in c for c in changes)
+
+
+def test_hoisting_keeps_the_nested_dict(tmp_path):
+    """Hoist, not move: transformers 5 reads the nested dict and must stay served."""
+    raw = {"rope_parameters": {"rope_theta": 10000000, "rope_type": "default"}}
+    out, _ = normalise_model_config(raw)
+    assert out["rope_parameters"] == {"rope_theta": 10000000, "rope_type": "default"}
+
+
+def test_hoists_every_numeric_scalar_not_just_rope_theta():
+    """The generalisation the fix exists for. A hard-coded list of one protects exactly
+    one field and the next transformers reorganisation lands the same bug silently."""
+    raw = {"rope_parameters": {"rope_theta": 10000000, "partial_rotary_factor": 0.5}}
+    out, _ = normalise_model_config(raw)
+    assert out["rope_theta"] == 10000000
+    assert out["partial_rotary_factor"] == 0.5
+
+
+def test_does_not_hoist_non_numeric_scalars():
+    """`rope_type: "default"` is not a transformers-4 top-level field; inventing one
+    would change which RoPE implementation a v4 consumer selects."""
+    raw = {"rope_parameters": {"rope_theta": 1e7, "rope_type": "default"}}
+    out, _ = normalise_model_config(raw)
+    assert "rope_type" not in out
+
+
+def test_leaves_an_already_correct_config_alone():
+    """align/retagged_student is written under 4.57.6 and is already right. Idempotent:
+    re-running the export over a repaired dir must report no change."""
+    raw = {"rope_theta": 10000000, "use_cache": True}
+    out, changes = normalise_model_config(raw)
+    assert out == raw
+    assert changes == []
+
+
+def test_refuses_when_top_level_disagrees_with_nested():
+    """Two live values for one field. Picking one silently would publish a model served
+    at a RoPE base the weights never saw, which is the whole defect being fixed."""
+    raw = {"rope_theta": 10000.0, "rope_parameters": {"rope_theta": 10000000}}
+    with pytest.raises(ExportError, match="rope_theta"):
+        normalise_model_config(raw)
+
+
+def test_restores_use_cache(tmp_path):
+    """The trainer sets use_cache=False for gradient checkpointing; it is wrong to ship
+    on an inference artifact."""
+    raw = {"use_cache": False}
+    out, changes = normalise_model_config(raw)
+    assert out["use_cache"] is True
+    assert any("use_cache" in c for c in changes)
+
+
+def test_drops_a_non_finite_float_sentinel():
+    """transformers 5 spells infinity as {"__float__": "Infinity"}, which is not JSON any
+    other consumer parses into a float -- transformers 4.55.4 hands back a dict where a
+    float belongs. Infinity has no strict-JSON spelling, so the portable move is to drop
+    the key and let the consumer's own class default apply; verify() then asserts the
+    resolved value did not change."""
+    raw = {"time_step_limit": [0.0, {"__float__": "Infinity"}]}
+    out, changes = normalise_model_config(raw)
+    assert "time_step_limit" not in out
+    assert any("time_step_limit" in c for c in changes)
+
+
+def test_keeps_plain_float_neighbours_of_a_dropped_sentinel():
+    """time_step_min/max are plain portable floats equal to the class default on both
+    generations. Only the unrepresentable one goes."""
+    raw = {
+        "time_step_limit": [0.0, {"__float__": "Infinity"}],
+        "time_step_min": 0.001,
+        "time_step_max": 0.1,
+    }
+    out, _ = normalise_model_config(raw)
+    assert out["time_step_min"] == 0.001
+    assert out["time_step_max"] == 0.1
+
+
+# ---------------------------------------- the portability assertion
+
+
+def test_portability_assertion_catches_an_unmirrored_nested_numeric():
+    """THE PART THAT MATTERS. A resolved-vs-source comparison under one transformers
+    cannot catch this bug -- 5.8.0 reads the nested dict and resolves both sides to
+    10000000 either way. The invariant that does catch it is checkable in pure JSON:
+    every numeric scalar in a nested parameters dict must be mirrored top-level."""
+    with pytest.raises(ExportError, match="rope_theta"):
+        assert_config_portable({"rope_parameters": {"rope_theta": 10000000}})
+
+
+def test_portability_assertion_accepts_a_normalised_config():
+    cfg, _ = normalise_model_config(
+        {"rope_parameters": {"rope_theta": 10000000, "rope_type": "default"}}
+    )
+    assert_config_portable(cfg)  # must not raise
+
+
+def test_portability_assertion_rejects_a_surviving_sentinel():
+    with pytest.raises(ExportError, match="__float__"):
+        assert_config_portable({"time_step_limit": [0.0, {"__float__": "Infinity"}]})
+
+
+def test_export_normalises_the_model_config_on_disk(tmp_path):
+    """End to end: the written config.json is the repaired one, and the manifest says so."""
+    src = _ckpt(
+        tmp_path,
+        7,
+        model_config={
+            "rope_parameters": {"rope_theta": 10000000, "rope_type": "default"},
+            "use_cache": False,
+            "time_step_limit": [0.0, {"__float__": "Infinity"}],
+        },
+    )
+    manifest = export(src, tmp_path / "out")
+    cfg = json.loads((tmp_path / "out" / "config.json").read_text())
+    assert cfg["rope_theta"] == 10000000
+    assert cfg["use_cache"] is True
+    assert "time_step_limit" not in cfg
+    assert any("config.json" in c for c in manifest["normalisations"])
+    # And the trainer's own config must be untouched -- the run stays resumable.
+    assert "rope_theta" not in json.loads((src / "config.json").read_text())
+
+
+def test_export_leaves_a_clean_config_byte_identical(tmp_path):
+    """Same discipline as the tokenizer.json and chat-template paths: a rewritten but
+    unchanged file would make `diff -r` against the checkpoint report a change this step
+    did not make."""
+    clean = {"rope_theta": 10000000, "use_cache": True}
+    src = _ckpt(tmp_path, 8, model_config=clean)
+    export(src, tmp_path / "out")
+    assert (tmp_path / "out" / "config.json").read_bytes() == (
+        src / "config.json"
+    ).read_bytes()
+
+
 # ------------------------------------------------------------------ export
 
 
@@ -551,3 +714,97 @@ def test_export_without_a_template_is_not_an_error(tmp_path):
     man = export(src, tmp_path / "out", chat_template_thinking="default-off")
     assert not (tmp_path / "out" / "chat_template.jinja").exists()
     assert man["chat_template_thinking_policy"] == "default-off"
+
+
+# ------------------------------------- resolved-value drift (the second half of the guard)
+#
+# Kept as a pure function over two attribute dicts so it is testable with no transformers
+# installed, which is the property the whole module is arranged around. `verify()` supplies
+# the real `AutoConfig.to_dict()` pair.
+
+
+def test_resolved_drift_accepts_a_key_dropped_to_its_class_default():
+    """The sentinel drop is only safe because absence resolves to the same value. This is
+    what checks that per export instead of trusting a comment: `time_step_limit` is gone
+    from the written file, and both sides still RESOLVE (0.0, inf)."""
+    assert (
+        diff_resolved_numeric(
+            {"rope_theta": 10000000, "time_step_min": 0.001},
+            {"rope_theta": 10000000, "time_step_min": 0.001},
+        )
+        == []
+    )
+
+
+def test_resolved_drift_catches_a_dropped_key_that_was_not_default():
+    """The failure this guards: dropping or rewriting a key whose value was NOT the class
+    default silently changes the published model."""
+    drift = diff_resolved_numeric({"time_step_min": 0.005}, {"time_step_min": 0.001})
+    assert len(drift) == 1
+    assert "time_step_min" in drift[0]
+
+
+def test_resolved_drift_ignores_non_numeric_and_new_keys():
+    """Only numbers, and only fields the SOURCE had: this step adds top-level keys on
+    purpose (the hoist), and that is not drift."""
+    assert (
+        diff_resolved_numeric(
+            {"model_type": "granitemoehybrid", "use_cache": False},
+            {
+                "model_type": "granitemoehybrid",
+                "use_cache": True,
+                "rope_theta": 10000000,
+            },
+        )
+        == []
+    )
+
+
+# --------------------------------------- the resume gate vs a changed export contract
+#
+# `export_state.expectation()` keys a skip on the CHECKPOINT and the policy flags, and has
+# no component for the export's own normalisation contract. So when that contract gains a
+# rule -- as it just did for config.json -- every already-published export still hashes
+# equal and the resume gate SKIPs it, leaving the broken config in place forever. This is
+# exactly how 38 export directories would have survived their own repair.
+
+
+def test_published_config_needs_repair_flags_an_unmirrored_config(tmp_path):
+    dest = tmp_path / "published"
+    dest.mkdir()
+    (dest / "config.json").write_text(
+        json.dumps({"rope_parameters": {"rope_theta": 10000000}})
+    )
+    reason = published_config_needs_repair(dest)
+    assert reason is not None and "rope_theta" in reason
+
+
+def test_published_config_needs_repair_passes_a_repaired_config(tmp_path):
+    dest = tmp_path / "published"
+    dest.mkdir()
+    (dest / "config.json").write_text(
+        json.dumps(
+            {"rope_theta": 10000000, "rope_parameters": {"rope_theta": 10000000}}
+        )
+    )
+    assert published_config_needs_repair(dest) is None
+
+
+def test_published_config_needs_repair_is_quiet_when_there_is_nothing_published(
+    tmp_path,
+):
+    """No dest yet, or a dest with no config: not this function's business to complain --
+    the resume gate is already going to run the export."""
+    assert published_config_needs_repair(tmp_path / "nope") is None
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert published_config_needs_repair(empty) is None
+
+
+def test_published_config_needs_repair_survives_unreadable_json(tmp_path):
+    """A truncated config must read as 'needs repair', never as an uncaught crash in the
+    resume gate."""
+    dest = tmp_path / "published"
+    dest.mkdir()
+    (dest / "config.json").write_text("{not json")
+    assert published_config_needs_repair(dest) is not None

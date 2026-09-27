@@ -160,6 +160,80 @@ TOKENIZER_CLASS_REWRITES = {"TokenizersBackend": "PreTrainedTokenizerFast"}
 # else. It is left exactly as the checkpoint had it.
 STRIP_TOKENIZER_JSON_RUNTIME_KEYS = ("truncation", "padding")
 
+# THE ROPE RELOCATION, and the portability rule that generalises it.
+#
+# transformers 5 moved RoPE settings out of top-level config keys into a nested
+# `rope_parameters` dict. The value is not corrupted by that move, it is RELOCATED -- which
+# is why a key-by-key diff of a 4.57.6 config against a 5.8.0 one does not show it:
+# `rope_theta` is not DIFFERENT, it is MISSING ON ONE SIDE.
+#
+#   key               align/retagged_student (4.57.6)  export-N (5.8.0)
+#   rope_theta        10000000                         <ABSENT>
+#   rope_parameters   <ABSENT>                         {rope_theta: 10000000, ...}
+#
+# Every consumer on the transformers-4 schema -- vLLM 0.11.0, which the whole eval stack
+# serves through, and bfcl-eval -- reads the top-level field, does not find it, and falls
+# back to the class default. Measured directly under transformers 4.55.4:
+#
+#   align/retagged_student        rope_theta -> 10000000    <- healthy
+#   export-N as written          rope_theta ->     10000.0  <- 1000x too small
+#   export-N with the hoist      rope_theta -> 10000000    <- repaired
+#
+# A RoPE base 1000x too small destroys long-range position information while leaving local
+# coherence intact, so the published models wrote correct code and correct arithmetic and
+# never emitted a `<tool_call>`: BFCL 0.0000 on 400/400 across every arm in this epic, from
+# a single training step onward, while `eval-transfer` -- which loads through transformers
+# and therefore reads `rope_parameters` correctly -- reported healthy divergences digit for
+# digit. Two harnesses, one checkpoint, opposite verdicts. Restoring the one key returned
+# BFCL 0.8025 against a 0.8000-0.8125 baseline.
+#
+# HOIST, NOT MOVE. The nested dict stays exactly as the checkpoint had it, so
+# transformers-5 consumers are unaffected; the top-level key is added for the older schema.
+# Verified inert on the newer one: transformers 5.8.0's config does not define a
+# `rope_theta` attribute at all, so the added key changes nothing it resolves. (It is also
+# dropped again if a transformers-5 process re-serialises the config -- this step publishes
+# a final artifact, so nothing downstream does that, but a future step that re-saves a
+# config through transformers 5 would silently undo the hoist.)
+#
+# WHY THE RULE IS NOT `rope_theta`. A fix naming one field protects one field, and the next
+# transformers reorganisation lands this same bug silently somewhere else. The rule is
+# structural instead: any NUMERIC scalar inside a nested `*_parameters` dict must also
+# appear top-level with an equal value. `assert_config_portable` enforces it on what is
+# actually written, which is what makes the guard outlive this particular field.
+NESTED_PARAM_SUFFIX = "_parameters"
+
+# Non-numeric leaves are deliberately NOT mirrored. `rope_parameters.rope_type: "default"`
+# is not a transformers-4 top-level field; inventing one could change which RoPE
+# implementation a v4 consumer selects, which is the class of silent substitution this step
+# refuses everywhere else. Numbers are safe because a number means the same thing to both
+# generations -- it is the LOOKUP that moved, not the semantics.
+
+# The trainer's gradient-checkpointing flag, which has no business on a published inference
+# artifact. vLLM manages its own KV cache so this appears inert in the eval path, but a
+# transformers consumer calling `generate()` on a config that says use_cache=false gets no
+# KV cache and a quadratic decode.
+CONFIG_USE_CACHE_KEY = "use_cache"
+
+# transformers 5's JSON spelling for a float that has no JSON literal:
+#   "time_step_limit": [0.0, {"__float__": "Infinity"}]
+# There is no strict-JSON spelling of infinity, so this cannot be REPAIRED into a portable
+# number -- transformers 4.55.4 loads it and hands back a `dict` where a float belongs, and
+# any consumer doing arithmetic on `config.time_step_limit[1]` gets a TypeError. The
+# portable move is therefore to DROP the key and let the consumer's own class default
+# apply, which is exactly what the healthy 4.57.6-authored `align/retagged_student` config
+# does -- it carries none of the three `time_step_*` keys at all.
+#
+# Safe here because the value IS the class default on both generations, verified:
+# transformers 5.8.0 resolves an absent `time_step_limit` to `(0.0, inf)`, the same pair
+# the sentinel spells. `verify()` re-checks that per export rather than trusting this note.
+#
+# The neighbours are left alone on purpose. `time_step_min: 0.001` / `time_step_max: 0.1`
+# are plain portable floats, and they are also both exactly the 5.8.0 class defaults, so
+# there is nothing to fix. They are not inconsistent with a `time_step_limit` of [0.0, inf]
+# either, which is what it looks like at a glance: the limit clamps dt at runtime while
+# min/max bound its initialisation, so the stock default set is all three together.
+_FLOAT_SENTINEL_KEY = "__float__"
+
 PADDING_SIDES = ("right", "left", "keep")
 
 # The published chat template's THINKING POLICY.
@@ -291,6 +365,198 @@ def classify(checkpoint: Path) -> dict[str, list[str]]:
         else:
             unknown.append(name)
     return {"keep": keep, "prune": prune, "unknown": unknown}
+
+
+def _is_number(value: Any) -> bool:
+    # bool is an int subclass in Python and `use_cache: true` must not be mistaken for a
+    # number to mirror.
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _nested_param_dicts(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        k: v
+        for k, v in cfg.items()
+        if k.endswith(NESTED_PARAM_SUFFIX) and isinstance(v, dict)
+    }
+
+
+def _find_float_sentinel(value: Any) -> bool:
+    """True if `value` contains a transformers-5 non-finite-float sentinel anywhere."""
+    if isinstance(value, dict):
+        if _FLOAT_SENTINEL_KEY in value:
+            return True
+        return any(_find_float_sentinel(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_find_float_sentinel(v) for v in value)
+    return False
+
+
+def published_config_needs_repair(dest: Path) -> str | None:
+    """Return why `dest`'s already-published config.json fails today's contract, or None.
+
+    THE RESUME GATE'S BLIND SPOT. `export_state.expectation()` keys a skip on the source
+    checkpoint and the policy flags. It has no component for this step's own normalisation
+    contract, so when that contract gains a rule -- as it did when the RoPE hoist was added
+    -- every export already on disk still hashes equal, the gate says SKIP, and the broken
+    config survives its own fix. That is not hypothetical: it is how all 38 mis-served
+    export directories in this epic would have stayed mis-served after the bug was found.
+
+    Adding a version component to the expectation would be the tidier fix, but that key is
+    built in `gb_steps_post_training`, which this repo does not own and must not vendor
+    (see conftest.py). So the check lives here instead and is narrower on purpose: a skip
+    is valid only if what is already published still passes the guard it would be published
+    under today.
+
+    Silent when there is nothing published -- no dest, or no config.json in it. The resume
+    gate is already going to run the export in that case and a second complaint adds noise.
+    Unreadable JSON reads as "needs repair", never as a crash inside the gate.
+    """
+    cfg_path = dest / "config.json"
+    if not cfg_path.is_file():
+        return None
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, ValueError) as exc:
+        return f"{cfg_path} could not be read as JSON ({exc})"
+    if not isinstance(cfg, dict):
+        return f"{cfg_path} is not a JSON object"
+    try:
+        assert_config_portable(cfg)
+    except ExportError as exc:
+        return str(exc)
+    return None
+
+
+def normalise_model_config(raw: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Return (normalised config.json, list of human-readable changes).
+
+    Three jobs, all of them about what a consumer on the OTHER transformers generation
+    resolves; see the NESTED_PARAM_SUFFIX block for the measurements behind each.
+
+      1. MIRROR every numeric scalar from a nested `*_parameters` dict to a top-level key.
+      2. RESTORE use_cache.
+      3. DROP any key carrying a non-finite-float sentinel.
+
+    Refuses rather than repairs when a top-level key already exists and DISAGREES with its
+    nested twin: that is two live values for one field, and picking one silently is how a
+    model gets served at a RoPE base its weights never saw.
+    """
+    out = dict(raw)
+    changes: list[str] = []
+
+    for parent, nested in sorted(_nested_param_dicts(raw).items()):
+        for key, value in sorted(nested.items()):
+            if not _is_number(value):
+                continue
+            if key in out:
+                if out[key] != value:
+                    raise ExportError(
+                        f"config.json: {parent}.{key}={value!r} disagrees with top-level "
+                        f"{key}={out[key]!r}. This step will not guess which one a "
+                        "consumer should get -- they resolve on different transformers "
+                        "generations, so shipping both means shipping two models."
+                    )
+                continue
+            out[key] = value
+            changes.append(
+                f"hoisted {parent}.{key} -> top-level {key}={value!r} (kept nested; "
+                "transformers 5 reads the dict, every transformers-4-schema consumer "
+                "reads the top-level key and otherwise silently takes the class default)"
+            )
+
+    if out.get(CONFIG_USE_CACHE_KEY) is False:
+        out[CONFIG_USE_CACHE_KEY] = True
+        changes.append(
+            f"{CONFIG_USE_CACHE_KEY} False -> True (the trainer disables the KV cache for "
+            "gradient checkpointing; that is training state, not a published default)"
+        )
+
+    for key in [k for k, v in sorted(out.items()) if _find_float_sentinel(v)]:
+        stale = out.pop(key)
+        changes.append(
+            f"dropped {key}={stale!r} (a transformers-5 {_FLOAT_SENTINEL_KEY!r} sentinel; "
+            "no other JSON consumer parses it into a float, and infinity has no strict-"
+            "JSON spelling, so the portable form is absence + the consumer's class default)"
+        )
+
+    return out, changes
+
+
+def diff_resolved_numeric(source: dict[str, Any], dest: dict[str, Any]) -> list[str]:
+    """Return a human-readable line per numeric field whose RESOLVED value moved.
+
+    The second half of the config guard, and the one that keeps `normalise_model_config`
+    honest about the keys it DROPS. Dropping `time_step_limit` is only safe because an
+    absent key resolves to the same `(0.0, inf)` the sentinel spelled; this compares what
+    the two directories actually resolve, so a dropped key that was NOT its class default
+    fails the export instead of quietly changing the published model.
+
+    Only fields the SOURCE had, and only numbers. This step ADDS top-level keys on purpose
+    -- that is the hoist -- so a key present only in `dest` is not drift. Non-numerics are
+    out of scope: `dtype` and `architectures` are compared by the loads in `verify()`
+    itself, and a string-valued field that legitimately differs (transformers_version) is
+    not a statement about the weights.
+
+    Takes plain dicts rather than config objects so it is unit-testable on a box with no
+    transformers, which is the property this whole module is arranged around.
+    """
+    drift: list[str] = []
+    for key, want in sorted(source.items()):
+        if not _is_number(want):
+            continue
+        if key not in dest:
+            drift.append(
+                f"{key}: source resolves {want!r}, exported config has no such field"
+            )
+            continue
+        got = dest[key]
+        if _is_number(got) and got == want:
+            continue
+        drift.append(f"{key}: source resolves {want!r}, export resolves {got!r}")
+    return drift
+
+
+def assert_config_portable(cfg: dict[str, Any]) -> None:
+    """Raise unless `cfg` resolves the same way on both transformers generations.
+
+    THE GUARD THAT OUTLIVES THIS BUG. A resolved-value comparison between the written
+    config and the source checkpoint cannot catch the RoPE relocation at all: both files
+    are read by the SAME transformers inside this container, 5.8.0 reads the nested dict,
+    and both sides resolve 10000000 whether or not the top-level key was ever written. The
+    bug is a disagreement between transformers GENERATIONS, and the only side of it
+    available here is the schema -- which is checkable in pure JSON, with no transformers 4
+    to import.
+
+    So the invariant is structural, not a list of field names: every numeric scalar in a
+    nested `*_parameters` dict is mirrored top-level, and no key carries a sentinel a
+    non-transformers-5 parser cannot read.
+    """
+    for parent, nested in sorted(_nested_param_dicts(cfg).items()):
+        for key, value in sorted(nested.items()):
+            if not _is_number(value):
+                continue
+            if key not in cfg:
+                raise ExportError(
+                    f"config.json is not schema-portable: {parent}.{key}={value!r} has no "
+                    f"top-level {key}. A transformers-4-schema consumer (vLLM, bfcl-eval) "
+                    f"reads the top-level key, will not find it, and will silently serve "
+                    f"the class default instead of {value!r}."
+                )
+            if cfg[key] != value:
+                raise ExportError(
+                    f"config.json is not schema-portable: {parent}.{key}={value!r} but "
+                    f"top-level {key}={cfg[key]!r}. The two generations would serve "
+                    "different models from one directory."
+                )
+
+    for key, value in sorted(cfg.items()):
+        if _find_float_sentinel(value):
+            raise ExportError(
+                f"config.json is not schema-portable: {key}={value!r} carries a "
+                f"{_FLOAT_SENTINEL_KEY!r} sentinel, which only transformers 5 parses as a "
+                "float. Drop the key and let the consumer's class default apply."
+            )
 
 
 def normalise_tokenizer_config(
@@ -461,7 +727,25 @@ def export(
     changes: list[str] = []
     for name in parts["keep"]:
         src = checkpoint / name
-        if name == "tokenizer_config.json":
+        if name == "config.json":
+            # Rewritten only when there is something to change, same discipline as
+            # tokenizer.json and the chat template below: a config the trainer already
+            # wrote correctly (align's, on transformers 4) must stay byte-identical so
+            # `diff -r` against the checkpoint does not report a change this step did not
+            # make.
+            raw_c = json.loads(src.read_text())
+            norm_c, mc_changes = normalise_model_config(raw_c)
+            if mc_changes:
+                (dest / name).write_text(
+                    json.dumps(norm_c, indent=2, ensure_ascii=False) + "\n"
+                )
+            else:
+                shutil.copy2(src, dest / name)
+            # Asserted on what was actually WRITTEN, not on what normalise returned, so a
+            # future edit to the serialisation cannot slip past the guard.
+            assert_config_portable(json.loads((dest / name).read_text()))
+            changes.extend(f"config.json: {c}" for c in mc_changes)
+        elif name == "tokenizer_config.json":
             raw = json.loads(src.read_text())
             norm, tc_changes = normalise_tokenizer_config(
                 raw, padding_side=padding_side
@@ -518,13 +802,43 @@ def export(
     return manifest
 
 
-def verify(dest: Path, *, expect_tokenizer_from: Path | None = None) -> list[str]:
+def verify(
+    dest: Path,
+    *,
+    expect_tokenizer_from: Path | None = None,
+    source_checkpoint: Path | None = None,
+) -> list[str]:
     """Load the exported dir and confirm it works. Imports transformers LAZILY so that
     classify/normalise/export stay unit-testable on a CPU box with no transformers."""
     notes: list[str] = []
     from transformers import AutoConfig, AutoTokenizer  # noqa: PLC0415
 
-    AutoConfig.from_pretrained(str(dest))
+    cfg = AutoConfig.from_pretrained(str(dest))
+
+    # RESOLVED-VALUE DRIFT against the checkpoint this was cut from. Note what this can and
+    # cannot do: both configs are read by the SAME transformers here, so it CANNOT catch the
+    # RoPE relocation -- 5.8.0 reads the nested dict and resolves both sides to 10000000
+    # whether or not the top-level key was written. `assert_config_portable`, which runs in
+    # export() and needs no transformers, is what catches that.
+    #
+    # What this DOES catch is the risk normalise_model_config takes when it DROPS a key: an
+    # absent `time_step_limit` is only safe because the class default is the same
+    # `(0.0, inf)` the sentinel spelled. This asserts that per export rather than trusting
+    # the comment which says so.
+    if source_checkpoint is not None:
+        src_cfg = AutoConfig.from_pretrained(str(source_checkpoint))
+        drift = diff_resolved_numeric(src_cfg.to_dict(), cfg.to_dict())
+        if drift:
+            raise ExportError(
+                "the exported config does not resolve to the same numbers as its source "
+                f"checkpoint {source_checkpoint}:\n  "
+                + "\n  ".join(drift)
+                + "\nA normalisation changed a value that affects inference. Publishing "
+                "this would serve a model the training run never produced."
+            )
+        notes.append(
+            f"config resolves identically to {source_checkpoint} on every numeric field"
+        )
     tok = AutoTokenizer.from_pretrained(str(dest))
     notes.append(f"tokenizer loaded: {type(tok).__name__}, vocab={len(tok)}")
 
@@ -620,11 +934,22 @@ def main(argv: list[str] | None = None) -> int:
         for line in decision.lines:
             print(f"  {line}")
         if decision.kind == step_state.SKIP:
-            # Exit 0, not 64. The 64 is step_state's internal vocabulary; the contract with the
-            # launcher is that a successful no-op returns 0 so the LLMB_ARTIFACT_ID line after
-            # this call still runs. A step that skips and exits non-zero starves its consumer.
-            print(f"nothing to do: {dest} already holds this export.")
-            return 0
+            # A SKIP is only honoured if the artifact already on disk still passes the guard
+            # it would be published under TODAY. The expectation key covers the checkpoint
+            # and the policy flags but not this step's normalisation contract, so without
+            # this an export written before the RoPE hoist existed would be skipped forever
+            # -- see published_config_needs_repair.
+            stale = published_config_needs_repair(dest)
+            if stale is None:
+                # Exit 0, not 64. The 64 is step_state's internal vocabulary; the contract with the
+                # launcher is that a successful no-op returns 0 so the LLMB_ARTIFACT_ID line after
+                # this call still runs. A step that skips and exits non-zero starves its consumer.
+                print(f"nothing to do: {dest} already holds this export.")
+                return 0
+            print(
+                "  re-exporting: the expectation is unchanged but the published "
+                f"config.json no longer meets this step's contract -- {stale}"
+            )
         if decision.kind == step_state.REFUSE:
             print(
                 f"FATAL [{export_state.STEP_NAME}]: refusing to overwrite {dest}. "
@@ -646,7 +971,7 @@ def main(argv: list[str] | None = None) -> int:
         for c in manifest["normalisations"]:
             print(f"  normalised: {c}")
         if args.verify:
-            for note in verify(dest, expect_tokenizer_from=ref):
+            for note in verify(dest, expect_tokenizer_from=ref, source_checkpoint=ckpt):
                 print(f"  verified: {note}")
         # Marked LAST, after verify(). An export that cannot be loaded must not be recorded as
         # complete -- otherwise the next run SKIPs and the broken directory becomes permanent.
