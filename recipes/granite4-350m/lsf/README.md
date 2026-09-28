@@ -24,6 +24,7 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 | `distill-stage1`    | Off-policy GOLD distillation, the first real run -- SUPERSEDED, see distill-stage1-v2 |
 | `distill-stage1-v2` | Off-policy GOLD, anchored and instrumented: 2,000 steps, checkpoint ladder, entropy guard |
 | `distill-onpolicy-v2` | On-policy GOLD from stage 1 v2's chosen checkpoint, with a vLLM server allocation (written, not yet run) |
+| `distill-checkpoint-eval` | Off-policy GOLD for a full epoch, with every checkpoint exported and run through all 27 evals as it lands, rolled up into one benchmark x checkpoint table |
 
 ## Distillation
 
@@ -50,6 +51,19 @@ completed cleanly and produced a model worse on every one of the 30+ benchmarks 
 (HumanEval 40.85 → 0.61). The objective had no ground-truth term and the student had
 already nearly satisfied it, so entropy reduction was the only descent direction left for
 7,640 steps. `distill-stage1-v2` is the response and is what to run.
+
+[`distill-checkpoint-eval`](distill-checkpoint-eval/README.md) sits beside step 3 rather
+than in the sequence, because it answers a different question. `distill-stage1-v2` asks
+which OBJECTIVE, over 300 steps, read off divergence and entropy. This asks which
+CHECKPOINT of a full epoch, in benchmark points: nine rungs, each exported and run through
+all 27 evaluations, summarised into one `combined.csv`. It is what `distill-stage1` should
+have been — that run exported only its final checkpoint, which was also its worst — and it
+is ~249 GPU-h against v2's ~56, so run v2 first and this when the objective is settled.
+
+It is also the only recipe here that evaluates mid-run: `train-gold` declares one
+`checkpoint_<N>` output per rung and the `distill-gold` step's opt-in watcher
+(`emit_checkpoint_artifacts`) emits each as it is written, so the evaluation overlaps the
+13-hour epoch instead of queueing behind it.
 
 
 ## Defaults are BlueVela-specific
