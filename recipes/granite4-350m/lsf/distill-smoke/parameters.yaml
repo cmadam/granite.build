@@ -7,11 +7,12 @@
 # not have found. See the README.
 #
 # This recipe's subject is the PLUMBING of the chain — align -> corpus ->
-# [train-sft] -> train-gold -> export -> eval-transfer x2 -> eval-bfcl — not the
-# science. Every value below is chosen to make a wrong path, a missing artifact
-# or a disagreement between two steps cost minutes instead of hours. Nothing it
-# produces is a publishable measurement, and the transfer numbers it reports are
-# from a handful of optimizer steps over 48 rows.
+# [train-sft] -> train-gold -> export -> eval-transfer x2 ->
+# eval-swebench-verified — not the science. Every value below is chosen to make
+# a wrong path, a missing artifact or a disagreement between two steps cost
+# minutes instead of hours. Nothing it produces is a publishable measurement,
+# and the transfer numbers it reports are from a handful of optimizer steps over
+# 48 rows.
 #
 # Override any value with: gb build start --param KEY=VALUE
 
@@ -32,7 +33,8 @@ WORKDIR_ROOT: "/proj/granite-build/g4os/gbtest/distill"
 # skipped target's stored outputs as bindings: a target with no stored outputs
 # propagates nothing, its consumers never become ready, and the build reports
 # SUCCESS having silently skipped them. That is what build b5f030cd did — it
-# reported SUCCESS with eval-transfer still FAILED and eval-bfcl never started.
+# reported SUCCESS with eval-transfer still FAILED and eval-bfcl (the final eval
+# then; since replaced by eval-swebench-verified) never started.
 #
 # run_metadata.build_id is filled by gbserver per step, and every target in one
 # build fills the same value, so the root stays shared within a build. The Jinja
@@ -60,8 +62,8 @@ INCLUDE_SFT: false
 # ─── Image and trainer code ───────────────────────────────────────────
 # One image for every distillation step (each step's own default is this same
 # image; naming it here makes the pin visible and overridable in one place). The
-# BFCL target is deliberately NOT given it — that step runs its own harness
-# image.
+# eval-swebench-verified target is deliberately NOT given it — that step runs
+# its own sage2-evals image (SAGE2_IMAGE_SWEBENCH).
 # SM90 (H100) build; it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # The GOLD trainer (gb_steps_post_training.distillation.gold and friends) is
@@ -283,18 +285,21 @@ EVAL_DTYPE: "bfloat16"
 MAX_INCOMPLETE_FRACTION: 0.25
 EVAL_NUM_GPUS: 1
 
-# ─── BFCL ─────────────────────────────────────────────────────────────
-# ONE category, not "all": the full suite is hours of generation and this recipe
-# is asking whether the harness accepts the exported model at all. Expect a poor
-# score — the model underneath it has taken two optimizer steps.
-BFCL_TEST_CATEGORIES: "simple"
-BFCL_EVAL_NAME: "bfclv3"
-# The harness's own model handler name, which is what selects the prompt format.
-# NOT the run name: an unrecognised handler makes BFCL fall back and score a
-# differently-formatted prompt.
-BFCL_MODEL_ID: "ibm-granite/granite-4"
-BFCL_NUM_GPUS: 1
-BFCL_GPU_MEMORY_UTILIZATION: "0.5"
+# ─── Sage2 ────────────────────────────────────────────────────────────
+# The eval-swebench-verified target (space://steps/sage2-swebench-verified; runtime
+# github.com/laminair/sage2-evals).
+# The sage2-evals swebench image on ICR, pinned to a sage2-evals commit.
+SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+# A few instances, one repeat, not the full 500 x 3: the full suite is many GPU
+# hours and this recipe is asking whether the harness accepts the exported model
+# at all. Expect a poor score — the model underneath it has taken two optimizer
+# steps.
+SAGE2_LIMIT: 2
+SAGE2_REPEATS: 1
+SWEBENCH_WORKERS: 2
+# Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
+SWEBENCH_DATASET: ""
+SWEBENCH_OPTIONS: ""
 
 # ─── Topology and resources ───────────────────────────────────────────
 # One node, two GPUs for GOLD. A 3B teacher and a 3B student under ZeRO-3 at 4096

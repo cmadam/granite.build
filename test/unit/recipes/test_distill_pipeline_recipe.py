@@ -60,7 +60,7 @@ _TARGETS_WITHOUT_SFT = [
     "export",
     "eval-transfer-baseline",
     "eval-transfer",
-    "eval-bfcl",
+    "eval-swebench-verified",
 ]
 _TARGETS_WITH_SFT = [
     "align",
@@ -70,7 +70,7 @@ _TARGETS_WITH_SFT = [
     "export",
     "eval-transfer-baseline",
     "eval-transfer",
-    "eval-bfcl",
+    "eval-swebench-verified",
 ]
 
 
@@ -243,7 +243,9 @@ def test_every_edge_the_pipeline_depends_on_is_a_binding(off, on):
         assert targets["eval-transfer"]["inputs"]["student"]["binding"] == (
             "export.hf_model"
         )
-        assert targets["eval-bfcl"]["inputs"]["model"]["binding"] == "export.hf_model"
+        assert targets["eval-swebench-verified"]["inputs"]["model"]["binding"] == (
+            "export.hf_model"
+        )
 
 
 def test_a_failed_target_is_retried_with_the_earlier_ones_reused(off):
@@ -281,7 +283,7 @@ def test_the_gpu_targets_are_not_serialised_by_hand(off):
         "corpus",
         "teacher_model",
     }
-    assert set(targets["eval-bfcl"]["inputs"]) == {"model"}
+    assert set(targets["eval-swebench-verified"]["inputs"]) == {"model"}
 
 
 def test_both_evals_bind_the_corpus_for_the_ordering_edge(off):
@@ -305,7 +307,7 @@ def test_every_artifact_each_step_emits_is_declared_as_an_output(off, on):
         "export": {"hf_model"},
         "eval-transfer-baseline": {"eval_metrics"},
         "eval-transfer": {"eval_metrics"},
-        "eval-bfcl": {"bfcl_results"},
+        "eval-swebench-verified": {"sage2_results"},
     }
     for target, outputs in expected.items():
         assert set(_targets(off)[target]["outputs"]) == outputs, target
@@ -489,7 +491,7 @@ def test_both_trainers_mask_on_the_same_boundary(on):
 
 
 def test_every_composed_path_lands_under_one_per_build_run_directory(off):
-    """The pipeline's own root, so a run's align overlay, corpus, evals and BFCL
+    """The pipeline's own root, so a run's align overlay, corpus, evals and Sage2
     results can be found and cleaned up together rather than hunted for across
     per-target workdirs — and ONE DIRECTORY PER BUILD under it.
 
@@ -498,7 +500,8 @@ def test_every_composed_path_lands_under_one_per_build_run_directory(off):
     the emitting target still reports SUCCESS with an empty output list, and a
     later retry or restart then propagates no binding from it: consumers never
     become ready and the build reports SUCCESS having skipped them. Build b5f030cd
-    reported SUCCESS with eval-transfer FAILED and eval-bfcl never started.
+    reported SUCCESS with eval-transfer FAILED and eval-bfcl (the final eval then;
+    since replaced by eval-swebench-verified) never started.
     """
     root = _params()["WORKDIR_ROOT"]
     run = _params()["RUN_NAME"]
@@ -513,7 +516,7 @@ def test_every_composed_path_lands_under_one_per_build_run_directory(off):
         _config(off, "export")["export_config"]["dest"],
         _config(off, "eval-transfer-baseline")["eval_config"]["output_dir"],
         _config(off, "eval-transfer")["eval_config"]["output_dir"],
-        _config(off, "eval-bfcl")["bfcl_config"]["output_dir"],
+        _config(off, "eval-swebench-verified")["sage2_config"]["output_dir"],
     ]
     for path in composed:
         assert path.startswith(prefix), path

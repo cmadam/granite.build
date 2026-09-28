@@ -3,7 +3,10 @@
 The whole distillation chain in one build, at a scale where a wrong path costs
 minutes:
 
-    align → corpus → [train-sft] → train-gold → export → eval-transfer ×2 → eval-bfcl
+    align → corpus → [train-sft] → train-gold → export → eval-transfer ×2 → eval-swebench-verified
+
+The final eval is now the Sage2 suite (`sage2-*` steps, runtime
+[sage2-evals](https://github.com/laminair/sage2-evals)): SWE Bench Verified, replacing BFCL.
 
 Seven targets, eight with the SFT arm switched on. It is the first recipe here
 that wires the ported distillation steps together rather than exercising one of
@@ -45,11 +48,11 @@ file.
 | `train-gold → export` | Selects a checkpoint, prunes it, and verifies it loads. |
 | `align → export` | `expect_tokenizer_from`, so the export asserts the tokenizer it ships is the one that trained rather than whatever landed in the checkpoint directory. |
 | `align → eval-transfer-baseline` | The t=0 read, taken **before** training. A divergence with no baseline is a number without a direction. |
-| `export → eval-transfer`, `export → eval-bfcl` | Both post-training reads measure the published model, not a raw checkpoint. |
+| `export → eval-transfer`, `export → eval-swebench-verified` | Both post-training reads measure the published model, not a raw checkpoint. |
 
 The two evaluations answer different questions and neither substitutes for the
 other: a student can move toward the teacher's distribution while losing
-tool-calling accuracy, and the transfer metric cannot see that.
+agentic coding ability, and the transfer metric cannot see that.
 
 ## One bad host: p2-r03-n1
 
@@ -159,7 +162,8 @@ allocation. `granite-4.2-3b-nothink` carries the same ChatML surface.
 ## What this recipe found in the steps it chains
 
 **The published tokenizer was unreadable by transformers 4.** Build 30a99c4b got
-seven of eight targets green and then `eval-bfcl` died at
+seven of eight targets green and then `eval-bfcl` (the final eval then, since
+replaced by `eval-swebench-verified`) died at
 `base_oss_handler.py:109` with `ValueError: Tokenizer class TokenizersBackend does
 not exist or is not currently imported`. The distillation steps run transformers
 5.8.0, which records its fast-tokenizer backend under that v5-only name; the BFCL
@@ -199,7 +203,7 @@ per build:
       export/                    the published HF model
       eval-transfer-baseline/    t=0 divergence
       eval-transfer/             post-training divergence
-      eval-bfcl/<run>/bfclv3/    BFCL scores
+      eval-swebench-verified/    Sage2 results.json (+ per-instance trajectories)
 
 The absolute root is forced rather than chosen: `eval.jsonl` is deliberately not a
 declared artifact of corpus-prep — it exists only when `eval_fraction > 0`, and a
@@ -227,8 +231,8 @@ Build b5f030cd did exactly that. Its `align` and `corpus` targets wrote paths
 already registered by build 7853d33b, so both ended SUCCESS with no artifacts. On
 restart the six finished targets were reused, `corpus` propagated no `corpus`
 binding, `eval-transfer` — the one target that still needed running — was never
-dispatched, `eval-bfcl` never existed, and the build reported SUCCESS with
-`eval-transfer` still FAILED.
+dispatched, `eval-bfcl` (then the final eval) never existed, and the build
+reported SUCCESS with `eval-transfer` still FAILED.
 
 **Two things follow.** Do not pin `BUILD_SUBDIR` to a fixed string unless you want
 that (the only reason to is deliberately resuming a previous build's directory).

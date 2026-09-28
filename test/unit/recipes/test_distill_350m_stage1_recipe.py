@@ -67,7 +67,7 @@ _TARGETS = [
     "export",
     "eval-transfer-baseline",
     "eval-transfer",
-    "eval-bfcl",
+    "eval-swebench-verified",
 ]
 
 
@@ -112,6 +112,23 @@ def test_every_parameter_is_referenced():
 
 def test_the_recipe_renders_the_stage1_graph(off):
     assert list(_targets(off)) == _TARGETS
+
+
+def test_the_final_eval_is_sage2_swebench_verified_on_the_export(off):
+    """The capability read is the Sage2 SWE Bench Verified step (it replaced
+    eval-bfcl). It must score the PUBLISHED model, declare the one results file
+    the step emits as GB_ARTIFACT_ID, and write under the per-build run directory."""
+    target = _targets(off)["eval-swebench-verified"]
+    assert target["steps"][0]["step_uri"] == "space://steps/sage2-swebench-verified"
+    assert target["inputs"]["model"]["binding"] == "export.hf_model"
+    assert set(target["inputs"]) == {"model"}
+    assert set(target["outputs"]) == {"sage2_results"}
+    sage2 = _config(off, "eval-swebench-verified")["sage2_config"]
+    assert sage2["model_path"] == "{{ bindings.model.binding.path }}"
+    assert sage2["output_dir"] == (
+        f"{_params()['WORKDIR_ROOT']}/{_params()['RUN_NAME']}/"
+        f"{_params()['BUILD_SUBDIR']}/eval-swebench-verified"
+    )
 
 
 def test_results_do_not_land_under_gbtest(off):

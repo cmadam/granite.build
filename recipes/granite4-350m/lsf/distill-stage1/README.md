@@ -7,6 +7,10 @@ granite-4.1-3b teacher. `lmbda 0.0`, `beta 0.5`, 2 nodes x 8 H100, effective bat
 **Run [`distill-probe`](../distill-probe/README.md) and
 [`distill-smoke`](../distill-smoke/README.md) first.** Both are minutes; this is hours.
 
+The final eval is now the Sage2 suite (`sage2-*` steps, runtime
+[sage2-evals](https://github.com/laminair/sage2-evals)): `eval-swebench-verified`,
+replacing BFCL.
+
 ## The comparison this exists to make
 
 The baseline is the **existing after-SFT eval row**, not a new control run. The student
@@ -177,6 +181,7 @@ gb build start -f recipes/granite4-350m/lsf/distill-stage1/build.yaml --space <y
 | `corpus` | `kept` > 0 and no `empty_assistant_mask` drops; manifest `target_tokens` non-zero |
 | `train-gold` | a finite, non-zero loss at step 1; no `verify_tokenizer_consistency` refusal; no `ManifestDrift` |
 | `export` | `normalised: tokenizer_config.json: tokenizer_class ...` |
+| `eval-swebench-verified` | `vLLM ready at`, then `sage2-evals: swebench-verified =`; `results.json` under `eval-swebench-verified/` |
 
 Workload stdout for `command` steps (that is `sources`) is only in SkyPilot's log:
 

@@ -12,6 +12,10 @@ seven-target graph retargeted from the 4.1-3b/4.2-30b reference pair to ours:
 
 It is stage 1's graph at smoke scale. Nothing it reports is a measurement.
 
+The final eval is now the Sage2 suite (`sage2-*` steps, runtime
+[sage2-evals](https://github.com/laminair/sage2-evals)): `eval-swebench-verified`,
+replacing BFCL.
+
 **Run [`distill-probe`](../distill-probe/README.md) first.** It answers, for about four
 GPU-minutes, whether the student loads in this image at all.
 
@@ -269,8 +273,8 @@ In order, per target:
 | `train-gold` | a **finite, non-zero** loss at step 1 | NaN ⇒ liger or `logits_scaling` |
 | | no `verify_tokenizer_consistency` refusal | the pinned teacher matches the retagged student |
 | | no `ManifestDrift` | prep and the trainer agree on the row count |
-| `export` | `normalised: tokenizer_config.json: tokenizer_class ...` | the transformers-4 BFCL image can load it |
-| `eval-bfcl` | the handler loads the tokenizer | the `adfdc64` regression has not returned |
+| `export` | `normalised: tokenizer_config.json: tokenizer_class ...` | a transformers-4 consumer can load it |
+| `eval-swebench-verified` | `vLLM ready at`, then `sage2-evals: swebench-verified =` | the export serves and grades end to end (and the `adfdc64` tokenizer regression has not returned) |
 
 `gb build log <id>` gives gbserver's event view — statuses, artifact markers,
 exceptions. It does **not** carry the workload's stdout. For steps that use
