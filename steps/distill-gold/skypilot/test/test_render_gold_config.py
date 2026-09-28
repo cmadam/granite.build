@@ -733,11 +733,16 @@ class TestCeAnchorAndCollapseGuard:
         explicit = _render(
             tmp_path,
             extra=[
-                "--ce-coef", "0.0",
-                "--log-student-entropy", "false",
-                "--entropy-guard-drop-frac", "0.0",
-                "--lmbda-schedule", "constant",
-                "--min-completion-length", "0",
+                "--ce-coef",
+                "0.0",
+                "--log-student-entropy",
+                "false",
+                "--entropy-guard-drop-frac",
+                "0.0",
+                "--lmbda-schedule",
+                "constant",
+                "--min-completion-length",
+                "0",
             ],
         )
         assert implicit == explicit
@@ -755,10 +760,14 @@ class TestCeAnchorAndCollapseGuard:
         config = _render(
             tmp_path,
             extra=[
-                "--log-student-entropy", "true",
-                "--entropy-guard-drop-frac", "0.15",
-                "--entropy-guard-baseline-steps", "30",
-                "--entropy-guard-patience", "2",
+                "--log-student-entropy",
+                "true",
+                "--entropy-guard-drop-frac",
+                "0.15",
+                "--entropy-guard-baseline-steps",
+                "30",
+                "--entropy-guard-patience",
+                "2",
             ],
         )
         assert config["entropy_guard_drop_frac"] == pytest.approx(0.15)
@@ -777,9 +786,12 @@ class TestCeAnchorAndCollapseGuard:
         config = _render(
             tmp_path,
             extra=[
-                "--log-student-entropy", "true",
-                "--entropy-guard-drop-frac", "0.15",
-                "--entropy-guard-action", "warn",
+                "--log-student-entropy",
+                "true",
+                "--entropy-guard-drop-frac",
+                "0.15",
+                "--entropy-guard-action",
+                "warn",
             ],
         )
         assert config["entropy_guard_action"] == "warn"
@@ -790,9 +802,12 @@ class TestCeAnchorAndCollapseGuard:
         _render(
             tmp_path,
             extra=[
-                "--log-student-entropy", "true",
-                "--entropy-guard-drop-frac", "0.15",
-                "--entropy-guard-action", "continue",
+                "--log-student-entropy",
+                "true",
+                "--entropy-guard-drop-frac",
+                "0.15",
+                "--entropy-guard-action",
+                "continue",
             ],
             expect_rc=2,
         )
@@ -811,10 +826,22 @@ class TestCeAnchorAndCollapseGuard:
         [
             ["--ce-coef", "-0.1"],
             ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "1.0"],
-            ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "0.1",
-             "--entropy-guard-patience", "0"],
-            ["--log-student-entropy", "true", "--entropy-guard-drop-frac", "0.1",
-             "--entropy-guard-baseline-steps", "0"],
+            [
+                "--log-student-entropy",
+                "true",
+                "--entropy-guard-drop-frac",
+                "0.1",
+                "--entropy-guard-patience",
+                "0",
+            ],
+            [
+                "--log-student-entropy",
+                "true",
+                "--entropy-guard-drop-frac",
+                "0.1",
+                "--entropy-guard-baseline-steps",
+                "0",
+            ],
         ],
         ids=["negative-ce", "drop-frac-1.0", "patience-0", "baseline-0"],
     )
@@ -829,9 +856,12 @@ class TestCeAnchorAndCollapseGuard:
         train loss moved 2.7% over the 7,640 steps in which the student lost 42% of
         its entropy, so `loss` alone cannot gate a run of this shape."""
         assert "student_entropy" not in _render(tmp_path)
-        assert _render(tmp_path, extra=["--log-student-entropy", "true"])[
-            "log_student_entropy"
-        ] is True
+        assert (
+            _render(tmp_path, extra=["--log-student-entropy", "true"])[
+                "log_student_entropy"
+            ]
+            is True
+        )
 
 
 class TestOnPolicyShapingKeys:
@@ -849,8 +879,14 @@ class TestOnPolicyShapingKeys:
             tmp_path,
             total_nodes=2,
             extra=[
-                "--vllm-num-servers", "1", "--lmbda", "0.25",
-                "--lmbda-schedule", "linear", "--lmbda-init", "0.0",
+                "--vllm-num-servers",
+                "1",
+                "--lmbda",
+                "0.25",
+                "--lmbda-schedule",
+                "linear",
+                "--lmbda-init",
+                "0.0",
             ],
         )
         assert config["lmbda_schedule"] == "linear"
@@ -865,9 +901,7 @@ class TestOnPolicyShapingKeys:
         assert "vllm" in result.stderr.lower()
 
     def test_a_generation_floor_without_a_server_is_refused(self, tmp_path):
-        result = _render(
-            tmp_path, extra=["--min-completion-length", "32"], expect_rc=2
-        )
+        result = _render(tmp_path, extra=["--min-completion-length", "32"], expect_rc=2)
         assert "min_completion_length" in result.stderr
 
     def test_an_unknown_schedule_is_refused(self, tmp_path):

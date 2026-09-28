@@ -165,7 +165,9 @@ class TestTheAnchoredObjective:
         order 1. Below ~0.01 the anchor cannot restrain anything; above ~0.5 it is SFT
         with a divergence garnish, and either way the run answers a question nobody
         asked."""
-        assert 0.01 <= float(_config(off, "train-gold")["gold_config"]["ce_coef"]) <= 0.5
+        assert (
+            0.01 <= float(_config(off, "train-gold")["gold_config"]["ce_coef"]) <= 0.5
+        )
 
     def test_entropy_is_logged_every_step(self, off):
         gold = _config(off, "train-gold")["gold_config"]
@@ -232,7 +234,9 @@ class TestTheAnchoredObjective:
         it is only a control if that reproduces the failed run's loss rather than
         approximating it. The renderer emits the new keys only when non-default, so
         this asserts the recipe does not defeat that by setting them some other way."""
-        control = _render(tmp_path, INCLUDE_SFT=False, CE_COEF=0, ENTROPY_GUARD_DROP_FRAC=0)
+        control = _render(
+            tmp_path, INCLUDE_SFT=False, CE_COEF=0, ENTROPY_GUARD_DROP_FRAC=0
+        )
         gold = _config(control, "train-gold")["gold_config"]
         assert float(gold["ce_coef"]) == 0.0
         assert float(gold["entropy_guard_drop_frac"]) == 0.0
@@ -287,19 +291,43 @@ class TestTheTrainerPin:
     """
 
     def test_the_trainer_is_a_checkout_this_project_controls(self):
-        code_dir = _params()["KD_CODE_DIR"]
+        code_dir = _params()["CODE_DIR"]
         assert code_dir.endswith("-gb"), code_dir
         assert code_dir != "/proj/granite-build/g4os/kd-sandbox"
 
-    def test_the_pin_is_a_full_commit_not_a_branch(self):
-        """A branch head moves, which is the whole failure being fixed."""
-        ref = _params()["KD_EXPECT_REF"]
-        assert re.fullmatch(r"[0-9a-f]{40}", ref), ref
+    def test_the_pin_is_a_full_commit_or_deliberately_empty(self):
+        """A branch head moves, which is the whole failure being fixed -- so if this names
+        anything, it names a full commit.
+
+        Empty is allowed, and only because the check it disables is no longer the only thing
+        standing between this recipe and an unpatched trainer: the step renders with
+        gold_config.verify_trainer_accepts_keys, which refuses when the delivered
+        CustomGOLDConfig lacks the fields CE_COEF and the guard emit. Until the patched
+        checkout exists there is no commit to name, and a placeholder would be worse than
+        empty. Fill it in once it does, to get the dirty-tree check as well."""
+        ref = _params()["CODE_EXPECT_REF"]
+        assert ref == "" or re.fullmatch(r"[0-9a-f]{40}", ref), ref
 
     def test_the_pin_reaches_the_step(self, off):
-        assert _config(off, "train-gold")["gold_config"]["kd_expect_ref"] == _params()[
-            "KD_EXPECT_REF"
-        ]
+        code_config = _config(off, "train-gold")["code_config"]
+        assert code_config["code_dir"] == _params()["CODE_DIR"]
+        assert code_config["expect_ref"] == _params()["CODE_EXPECT_REF"]
+
+    def test_the_guard_that_replaces_the_pin_is_armed(self, off):
+        """The pin may be empty (see above), so this is what actually stands between the
+        recipe and a trainer that would make TrlParser reject the whole config after the
+        allocation is held. It must not be switched off while CE_COEF or the guard is set.
+        """
+        gold = _config(off, "train-gold")["gold_config"]
+        asks_for_extensions = (
+            float(gold.get("ce_coef", 0)) > 0
+            or float(gold.get("entropy_guard_drop_frac", 0)) > 0
+        )
+        if asks_for_extensions:
+            assert gold.get("verify_trainer_accepts_keys", True) is not False, (
+                "this recipe emits trainer keys that are not at the default pin, so the "
+                "renderer's field check has to stay on"
+            )
 
     def test_the_patch_that_builds_that_checkout_ships_with_the_repo(self):
         """Otherwise the pin names a tree nobody can rebuild, which is a different
@@ -307,7 +335,7 @@ class TestTheTrainerPin:
         patch = (
             _RECIPE.parents[3]
             / "steps"
-            / "gold-distill"
+            / "distill-gold"
             / "skypilot"
             / "patches"
             / "ce_anchor_and_entropy_guard.diff"
@@ -315,17 +343,42 @@ class TestTheTrainerPin:
         assert patch.is_file()
         text = patch.read_text(encoding="utf-8")
         assert "Base commit:" in text
-        assert _params()["KD_EXPECT_REF"] in text, "the patch must name the pinned result"
+        # CODE_EXPECT_REF is empty until the patched checkout is built, so the pin cannot
+        # be asserted against the patch yet. What still must hold is that the patch says
+        # which commit it applies to and under which directory -- without the remap the
+        # hunks land nowhere, and that is the part a reader needs.
+        assert "a5d59bc4" in text, "the patch must name the pin it applies to"
+        assert (
+            "src/gb_steps_post_training/distillation" in text
+        ), "the patch must state the directory remap it needs"
         for key in ("ce_coef", "log_student_entropy", "entropy_guard_drop_frac"):
             assert key in text, f"{key} is pinned but not in the patch"
 
-    def test_no_target_overrides_the_shared_step_code_config(self, off):
-        """The six ported steps' pin belongs to the step, once, for all six. A
-        recipe-level override is what left align reading a patched tree while corpus
-        read the shared one -- build 1820703f."""
+    def test_only_the_trainer_targets_override_the_shared_step_pin(self, off):
+        """The ported steps' pin belongs to the step, once, for all of them. A recipe-level
+        override is what left align reading a patched tree while corpus read the shared one
+        -- build 1820703f -- so an override is an exception that has to justify itself.
+
+        train-gold is the one justified exception, and it is not new: this recipe always read
+        its trainer from somewhere other than the shared steps checkout. Before the two
+        sources became one repo that was invisible here, because the trainer arrived through
+        gold_config.kd_code_dir and this test only ever looked at code_config. Now it is
+        visible, so it is bounded instead: exactly the targets that run trainer code may
+        override, every other target keeps the shared pin (which is what keeps align, corpus,
+        export and eval runnable off BlueVela at all), and every override is identical -- one
+        revision per build is the property 1820703f was really about."""
+        allowed = {"train-gold", "vllm-server"}
+        overrides = {}
         for name, target in _targets(off).items():
             for step in target["steps"]:
-                assert "code_config" not in step.get("config", {}), name
+                if "code_config" in step.get("config", {}):
+                    assert name in allowed, f"{name} overrides the shared steps pin"
+                    overrides[name] = step["config"]["code_config"]
+        assert overrides, "the patched trainer has to reach train-gold somehow"
+        distinct = {tuple(sorted(c.items())) for c in overrides.values()}
+        assert (
+            len(distinct) == 1
+        ), f"targets disagree on the trainer revision: {overrides}"
 
 
 # ─── The horizon and the ladder ────────────────────────────────────────────────
@@ -361,7 +414,9 @@ class TestTheHorizonAndTheLadder:
         gold = _config(off, "train-gold")["gold_config"]
         save = int(gold["save_steps"])
         for rung in _params()["CKPT_LADDER"].split(","):
-            assert int(rung) % save == 0, f"checkpoint-{rung} is not a multiple of {save}"
+            assert (
+                int(rung) % save == 0
+            ), f"checkpoint-{rung} is not a multiple of {save}"
             assert int(rung) <= int(gold["max_steps"])
 
     def test_the_last_rung_is_the_end_of_the_run(self, off):
@@ -415,7 +470,10 @@ class TestTheHorizonAndTheLadder:
         assert _config(off, "corpus")["corpus_config"]["max_length"] == budget
         assert _config(off, "train-gold")["gold_config"]["max_length"] == budget
         for rung in list(_params()["CKPT_LADDER"].split(",")) + ["baseline"]:
-            assert _config(off, f"eval-transfer-{rung}")["eval_config"]["max_length"] == budget
+            assert (
+                _config(off, f"eval-transfer-{rung}")["eval_config"]["max_length"]
+                == budget
+            )
 
 
 # ─── The generation smoke test ─────────────────────────────────────────────────
@@ -520,7 +578,9 @@ class TestGenSmoke:
         template, so a templated prompt set would test a different thing from the
         benchmark that caught this."""
         body = textwrap.dedent(_HEREDOC.findall(cmd)[0])
-        prompts = body[body.index("PROMPTS = ["):body.index("]", body.index("PROMPTS = ["))]
+        prompts = body[
+            body.index("PROMPTS = [") : body.index("]", body.index("PROMPTS = ["))
+        ]
         assert "<|start_of_role|>" not in prompts
         assert "<|im_start|>" not in prompts
 
@@ -537,7 +597,9 @@ class TestGenSmoke:
         metric gives 1.00 for the collapsed sample and 0.00 for the correct one."""
         assert 'degenerate": mean_looped > threshold' in cmd
         assert "def looped_fraction" in cmd
-        assert "def adjacent_rate" in cmd, "keep reporting it; the post-mortem quotes it"
+        assert (
+            "def adjacent_rate" in cmd
+        ), "keep reporting it; the post-mortem quotes it"
 
     def test_the_detector_separates_the_post_mortems_two_samples(self, cmd):
         """Executes the shipped detector rather than trusting its docstring. These are
@@ -602,7 +664,9 @@ class TestGenSmoke:
         or below that shoulder."""
         rungs = [int(n) for n in _params()["CKPT_LADDER"].split(",")]
         early = [n for n in rungs if n <= 120]
-        assert len(early) >= len(rungs) / 2, f"only {early} of {rungs} are in the descent"
+        assert (
+            len(early) >= len(rungs) / 2
+        ), f"only {early} of {rungs} are in the descent"
 
 
 # ─── Diagnosability ────────────────────────────────────────────────────────────
@@ -729,7 +793,6 @@ class TestTheCorpusPin:
             }
             assert "corpus-pin-check.pin_check" in bindings, name
 
-
     @pytest.mark.parametrize("include_sft", [False, True])
     @pytest.mark.parametrize("pin", ["", _PIN])
     def test_both_switches_render_together(self, tmp_path, include_sft, pin):
@@ -751,7 +814,9 @@ class TestTheCorpusPin:
         POSIX but records an artifact URI that does not match the canonical one."""
         contents = (_RECIPE / "build.yaml").read_text(encoding="utf-8")
         plain, slashed = (
-            apply_parameters(contents, [], _params(INCLUDE_SFT=False, CORPUS_DIR=d), str(tmp_path))
+            apply_parameters(
+                contents, [], _params(INCLUDE_SFT=False, CORPUS_DIR=d), str(tmp_path)
+            )
             for d in (_PIN, _PIN + "/")
         )
         assert plain == slashed
@@ -862,11 +927,20 @@ class TestThePinCheckScript:
         script.write_text(src)
         proc = subprocess.run(
             [
-                "python3", str(script), str(corpus),
-                "/models/granite-4.1-3b-pinned", "8192", "keep", "keep", "0.005",
-                str(tok), str(tmp_path / "out.json"),
+                "python3",
+                str(script),
+                str(corpus),
+                "/models/granite-4.1-3b-pinned",
+                "8192",
+                "keep",
+                "keep",
+                "0.005",
+                str(tok),
+                str(tmp_path / "out.json"),
             ],
-            text=True, capture_output=True, check=False,
+            text=True,
+            capture_output=True,
+            check=False,
         )
         assert proc.returncode != 0
         assert "eval.jsonl" in proc.stdout + proc.stderr

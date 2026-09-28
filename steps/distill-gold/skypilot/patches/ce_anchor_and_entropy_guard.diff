@@ -1,11 +1,39 @@
 gold: anchor the divergence with CE, log the entropy that collapses, and let the
 guard warn without stopping
 
-Applies to: kd-sandbox
+Applies to: github.com/laminair/gb-steps-distillation at a5d59bc4 -- the commit this
+            step's code_config pins -- under a DIFFERENT directory than the one the
+            hunks name. Remap gold/ onto src/gb_steps_post_training/distillation/:
+
+              cd <checkout>/src/gb_steps_post_training/distillation
+              patch -p2 -F3 < ce_anchor_and_entropy_guard.diff
+
+            or, equivalently, from the checkout root:
+
+              git apply -p2 --directory=src/gb_steps_post_training/distillation -C1 \
+                steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
+
+            ALL SIX HUNKS APPLY, but two need fuzz 2 and the offsets run to 1,137
+            lines, because the public repo's trainer has moved a long way from the
+            kd-sandbox commit the diff was cut against. Fuzz can place a hunk
+            somewhere plausible and wrong, so placement was verified per function
+            rather than taken from patch's exit code (2026-09-28): the six fields
+            land in CustomGOLDConfig, the CE term in compute_loss, the new
+            _maybe_act_on_entropy_collapse beside it, and the logging in log(). Every
+            dependency resolves -- cross_entropy_loss is a pre-existing @staticmethod,
+            and shifted_student_logits/_teacher_logits/_labels are assigned about 75
+            lines above the CE term. Re-verify the same way after any pin bump.
+
+            It does NOT carry min_completion_length: that key needs a trainer field
+            and run_vllm_serve's GOLD_MIN_TOKENS handling, neither of which exists at
+            this pin nor anywhere in this repo. render_gold_config.py refuses rather
+            than emitting it against a trainer that would reject it.
+
+Originally cut against: kd-sandbox
             gold/custom_gold_config.py
             gold/custom_gold_trainer.py
 Base commit: 20b416c9710ff9d4f60f086432fdb2188c3c5e77  (see WHICH BASE, below)
-Result:      09deff2bf1892ec572b3df2fe7a77bc639b2e1f8  (this step's gold_config.kd_expect_ref)
+Result:      09deff2bf1892ec572b3df2fe7a77bc639b2e1f8
              26c31a07b6a0695506e2649490752c42f4c4bfa4 is the same patch before
              entropy_guard_action existed; recipes pinned to it still render.
 
@@ -146,7 +174,9 @@ the tree. So the two delivery routes are not interchangeable for the pin:
     got the same code:
         git diff --stat 09deff2 HEAD     # empty means the trees agree
 
-Offer this upstream. When it lands in kd-sandbox, drop the clone and move kd_code_dir back.
+Offer this upstream, to gb-steps-distillation now rather than to kd-sandbox: that repo is
+what code_config pins. When it lands there and the pin is bumped past it, point the
+recipes' CODE_DIR back at "" and delete this file.
 
 diff --git a/gold/custom_gold_config.py b/gold/custom_gold_config.py
 index ce11aac..99e8cc5 100644

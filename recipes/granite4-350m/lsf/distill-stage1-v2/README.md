@@ -53,7 +53,7 @@ are what this recipe implements.
 | `GOLD_MAX_STEPS` | 0 (epoch) | 300 | the control's entropy is 96% collapsed by step 250 |
 | `GOLD_SAVE_STEPS` / `_TOTAL_LIMIT` | 1000 / 3 | 250 / 16 | keep the whole curve, not its last 750 steps |
 | `CKPT_LADDER` | — | 25,50,75,100,150,200,300 | export + transfer-eval + BFCL + generation check per rung |
-| `KD_CODE_DIR` | shared checkout | `kd-sandbox-gb`, pinned | the shared tree is dirty; see below |
+| `CODE_DIR` | `""` (public clone) | `gb-steps-distillation-gb` | the default pin has no CE anchor; see below |
 | `NCCL_DEBUG` | `""` | `INFO` | build `8f02b739` hung with no trace and had to be relaunched |
 
 Held fixed on purpose: the corpus and its sampling, the geometry (effective batch 96), the
@@ -145,7 +145,7 @@ byte-identical to what `df8512e0` executed — every `gold/*.py` that `gold.py` 
 is `gold/sft.py`, which `gold.py` never imports.
 
 Building that checkout, and the one commit on top of it, is
-[`steps/gold-distill/skypilot/patches/ce_anchor_and_entropy_guard.diff`](../../../../steps/gold-distill/skypilot/patches/ce_anchor_and_entropy_guard.diff).
+[`steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff`](../../../../steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff).
 Without it `CE_COEF` and the guard have nothing to act on: the keys render and the trainer
 rejects the config, which is the loud failure and the one to want.
 

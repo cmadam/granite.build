@@ -24,7 +24,7 @@
 #
 #   1. CE_COEF adds cross entropy on the corpus tokens to the divergence, so drifting
 #      away from real text costs something and "become more confident" stops being a
-#      free win. Needs the patched trainer — see KD_CODE_DIR in parameters.yaml.
+#      free win. Needs the patched trainer — see CODE_DIR in parameters.yaml.
 #   2. LOG_STUDENT_ENTROPY logs entropy and reverse KL every step, and
 #      ENTROPY_GUARD_DROP_FRAC stops the run when entropy falls 15% below its own
 #      baseline. At that threshold df8512e0 would have stopped inside the first hour
@@ -719,7 +719,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/gold-distill
+        - step_uri: space://steps/distill-gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -739,14 +739,30 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 # For the LSF cloud, SkyPilot's zone is the queue name.
                 zone: "$${QUEUE}"
+            code_config:
+              # The trainer for this recipe is NOT the default public clone: it is a
+              # checkout of that same repo carrying patches/ce_anchor_and_entropy_guard.diff,
+              # because the CE anchor and the collapse guard below are not at the pinned
+              # commit upstream. Every key is restated rather than overriding code_dir alone,
+              # so this block does not depend on how a partial config override merges.
+              #
+              # Build it once, on a node that can reach github.com:
+              #   git clone https://github.com/laminair/gb-steps-distillation.git $CODE_DIR
+              #   git -C $CODE_DIR checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
+              #   cd $CODE_DIR/src/gb_steps_post_training/distillation
+              #   patch -p2 -F3 < <this repo>/steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
+              #   git -C $CODE_DIR commit -am "ce anchor and entropy guard"
+              # then put that commit in CODE_EXPECT_REF.
+              code_dir: "$${CODE_DIR}"
+              expect_ref: "$${CODE_EXPECT_REF}"
+              repo: "https://github.com/laminair/gb-steps-distillation.git"
+              ref: "a5d59bc45524a8d75706e20d44ae1a254f273f23"
+              workdir: "distill-code"
+              token_secret: ""
+              python: "/stage/.venv/bin/python"
+              setup_command: ""
             gold_config:
               run_name: "$${RUN_NAME}"
-              kd_code_dir: "$${KD_CODE_DIR}"
-              # Asserted, not merely recorded. df8512e0 logged kd_sandbox_commit
-              # fc7d66e while the checkout carried 159 uncommitted files including
-              # gold/, so its one record of what trained named a commit whose code
-              # did not run. A mismatch or a dirty tree fails this target in seconds.
-              kd_expect_ref: "$${KD_EXPECT_REF}"
               ds_config: "$${DS_CONFIG}"
               model_name_or_path: "{{ bindings.student.binding.path }}"
               # A path, never a hub id: this teacher is not publicly fetchable.
@@ -780,7 +796,7 @@ granite.build:
               use_liger_fused_jsd: $${USE_LIGER_FUSED_JSD}
 
               # ── the anchor and the instruments ──────────────────────────────
-              # All five need the patched trainer at KD_CODE_DIR. They render into
+              # All five need the patched trainer at CODE_DIR. They render into
               # the trainer's config only when non-default, so a zeroed CE_COEF and
               # a zeroed guard reproduce df8512e0's objective exactly — which is
               # what makes the control arm a control.
