@@ -10,6 +10,10 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | Target | Metric | Status |
 |---|---|---|
 | `swebench-verified` | pass@1[avg-of-3] resolve rate | implemented |
+| `aime25`, `hmmt-feb25` | pass@1[avg-of-4] symbolic correct | implemented (NeMo-Skills, `SAGE2_IMAGE_NEMOSKILLS`) |
+| `gpqa` (Diamond) | pass@1[avg-of-2] symbolic correct | implemented (NeMo-Skills; gated data, needs `HF_TOKEN`) |
+| `mmlu-pro` | symbolic correct | implemented (NeMo-Skills) |
+| `arena-hard-v2` | win rate | implemented (NeMo-Skills; judge `aws/claude-sonnet-5`, not the official GPT-4.1, no style control; needs `SAGE2_JUDGE_API_KEY`) |
 | others | see `suites/granite42.yaml` | pending |
 
 ## Running

@@ -13,6 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:652326d"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +26,23 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── NeMo-Skills: AIME25, HMMT Feb25, GPQA, MMLU-Pro, Arena-Hard-V2 ───
+# WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.
+# "max_tokens=32768" or "answers=gold" (reference answers; not arena-hard-v2).
+# GPQA's dataset (Idavidrein/gpqa) is gated: the job env needs HF_TOKEN.
+# ARENA_HARD_V2 is judged by aws/claude-sonnet-5 (IBM LiteLLM): the job env needs
+# SAGE2_JUDGE_API_KEY; "judge_model=self" judges with the served model instead.
+AIME25_WORKERS: 32
+AIME25_OPTIONS: ""
+HMMT_FEB25_WORKERS: 32
+HMMT_FEB25_OPTIONS: ""
+GPQA_WORKERS: 64
+GPQA_OPTIONS: ""
+MMLU_PRO_WORKERS: 128
+MMLU_PRO_OPTIONS: ""
+ARENA_HARD_V2_WORKERS: 32
+ARENA_HARD_V2_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
