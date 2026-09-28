@@ -70,6 +70,27 @@ config:
     # already carries torch 2.8.0, transformers 5.8.0, tokenizers 0.22.1 and
     # safetensors 0.7.0, confirmed by direct measurement on a real GPU node.
     setup_command: ""
+  # ── Per-checkpoint artifact emission ──────────────────────────────────────
+  # OFF by default, and that default is the contract: with it off this step emits
+  # exactly one artifact, `checkpoint`, at the end of the run — which is what every
+  # single-checkpoint recipe binds and what they all did before this existed.
+  #
+  # ON, a background watcher on rank 0 polls the checkpoint directory during training
+  # and emits `checkpoint_<N>` per HF checkpoint-<N> dir as soon as it is completely
+  # written. A recipe that declares matching `checkpoint_<N>` outputs can then export
+  # and evaluate rung N while the run is still training, instead of after it — see
+  # recipes/granite4-350m/lsf/distill-checkpoint-eval, where that turns ~36 GPU-h of
+  # eval from a serial tail into work overlapped with a 13-hour epoch.
+  #
+  # The emitted ids are a CONTRACT with the recipe: a rung whose checkpoint dir the
+  # trainer never writes is an artifact never emitted, and a target bound to it waits
+  # forever with no error. Hence the zero-emission guard in run: below, and hence the
+  # recipe tests that assert every rung is a multiple of save_steps.
+  emit_checkpoint_artifacts: false
+  # How often that watcher polls. Lower detects a new checkpoint sooner and costs a
+  # directory listing; the log-scrape interval of the monitor is the other half of
+  # the latency, since an emitted line is only seen when the logs are next pulled.
+  checkpoint_watch_interval_seconds: 60
   gold_config:
     # ── Code and image ──────────────────────────────────────────────────────
     # DeepSpeed ZeRO-3 accelerate config, relative to code_config's clone.
@@ -524,6 +545,94 @@ environment_configs:
             # by the (now unconditional) source-delivery block: the trainer and the
             # rest of this collection are the same checkout, so there is nothing
             # left to record separately here.
+            {% set _true = [true, "true", "True", "1", 1] -%}
+            {% if config.emit_checkpoint_artifacts in _true %}
+            # ── Per-checkpoint artifact emission ────────────────────────────
+            # Rendered only when emit_checkpoint_artifacts is on, so the
+            # single-checkpoint recipes get byte-identical script to before.
+            #
+            # HF Trainer writes each save into ${CKPT_DIR}/checkpoint-<N>, where
+            # <N> is the optimizer step. A downstream export/eval target can
+            # start against rung N the moment it is written rather than after the
+            # whole run, but only if something says so mid-run — the final
+            # artifact at the bottom of this script is emitted once, at the end.
+            # So: a background loop globs the dir and emits one artifact line per
+            # newly completed checkpoint, which the monitor's periodic log
+            # retrieval scrapes while the job is still RUNNING.
+            #
+            # The emitted id is checkpoint_<N> and it MUST match the output names
+            # the recipe declares on this target.
+            CKPT_GLOB="checkpoint-"
+            CKPT_WATCH_INTERVAL="{{ config.checkpoint_watch_interval_seconds | default(60) }}"
+            # Completeness sentinels: a checkpoint is emitted only once ALL of
+            # these exist. Trainer._save_checkpoint writes in a fixed order —
+            # save_model (config, weights, tokenizer) -> optimizer/scheduler ->
+            # rng_state -> state.save_to_json(trainer_state.json) — so requiring
+            # the weights, the last tokenizer file AND trainer_state.json brackets
+            # the entire write sequence. A plain non-empty check would race it and
+            # hand a half-written model to an export that has already allocated.
+            # Sharded weights (not this 350m pair) would need
+            # model.safetensors.index.json here too.
+            CKPT_SENTINELS="model.safetensors tokenizer.json trainer_state.json"
+            # One marker file per emitted checkpoint. On disk rather than in a
+            # shell variable because emit_new_checkpoints also runs inside the
+            # backgrounded watcher subshell, whose variables never propagate back
+            # to this shell — the markers are the two halves' only shared state,
+            # and the final guard counts them.
+            EMITTED_DIR="$(mktemp -d)"
+
+            emit_new_checkpoints() {
+              for ckpt in "$CKPT_DIR"/${CKPT_GLOB}*; do
+                [ -d "$ckpt" ] || continue
+                base="$(basename "$ckpt")"
+                step="${base#${CKPT_GLOB}}"
+                marker="$EMITTED_DIR/$base"
+                [ -e "$marker" ] && continue
+                complete=1
+                for sentinel in $CKPT_SENTINELS; do
+                  [ -f "$ckpt/$sentinel" ] || { complete=0; break; }
+                done
+                [ "$complete" -eq 1 ] || continue
+                touch "$marker"
+                echo "GB_ARTIFACT_ID:checkpoint_${step} GB_ARTIFACT_PATH:${ckpt}"
+              done
+            }
+
+            watch_checkpoints() {
+              while true; do
+                emit_new_checkpoints
+                sleep "$CKPT_WATCH_INTERVAL"
+              done
+            }
+
+            WATCH_PID=""
+            cleanup_watcher() {
+              if [ -n "$WATCH_PID" ] && kill -0 "$WATCH_PID" 2>/dev/null; then
+                kill "$WATCH_PID" 2>/dev/null || true
+                wait "$WATCH_PID" 2>/dev/null || true
+                WATCH_PID=""
+              fi
+            }
+
+            # RANK 0 ONLY, for the same reason the final artifact line below is
+            # rank-guarded: the executor streams every node's stdout into one
+            # driver log, so an unguarded marker would register the same
+            # checkpoint N times. The watcher is started just before the trainer.
+            if [ "$NODE_RANK" = "0" ]; then
+              # EXIT-time cleanup on every path — success, trainer failure, or
+              # signal — so the loop cannot outlive the script and keep emitting.
+              trap 'cleanup_watcher; rm -rf "$EMITTED_DIR"' EXIT
+              mkdir -p "$CKPT_DIR"
+              watch_checkpoints &
+              WATCH_PID=$!
+              echo "distill-gold: watching $CKPT_DIR/${CKPT_GLOB}* every ${CKPT_WATCH_INTERVAL}s (pid $WATCH_PID)"
+            fi
+            {% endif %}
+
+            # The trainer's commit is already recorded above as distill_code_commit,
+            # by the (now unconditional) source-delivery block: the trainer and the
+            # rest of this collection are the same checkout, so there is nothing
+            # left to record separately here.
 
             # Rendered per node (each has its own container filesystem) but into
             # a shared path, so the content must be identical on every node — it
@@ -649,6 +758,33 @@ environment_configs:
               --output_dir "$CKPT_DIR" \
               --use_vllm={{ 'True' if config.gold_config.vllm_num_servers | int > 0 else 'False' }} \
               $VLLM_ARGS
+
+            {% if config.emit_checkpoint_artifacts in _true %}
+            # The trainer has exited. Stop the watcher, then sweep once more for
+            # anything written between its last poll and that exit — including the
+            # final checkpoint, which on a run bounded by an epoch rather than by
+            # save_steps is written at a step no save grid names.
+            if [ "$NODE_RANK" = "0" ]; then
+              cleanup_watcher
+              emit_new_checkpoints
+
+              # Fail LOUDLY on zero, because the alternative failure is silent:
+              # a recipe's checkpoint_<N> outputs would never be produced, every
+              # export/eval target bound to them would stay unready, and the build
+              # would hang with no error to read. Count the markers, not a shell
+              # variable — see EMITTED_DIR above.
+              EMITTED_COUNT="$(find "$EMITTED_DIR" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)"
+              if [ "$EMITTED_COUNT" -eq 0 ]; then
+                echo "distill-gold: FATAL: no checkpoint dirs matched '${CKPT_DIR}/${CKPT_GLOB}*'." >&2
+                echo "  emit_checkpoint_artifacts is on, so a recipe is bound to" >&2
+                echo "  checkpoint_<N> ids that will now never arrive. Either the run" >&2
+                echo "  never reached save_steps, or the trainer's checkpoint dir" >&2
+                echo "  naming changed — align CKPT_GLOB and the recipe's ladder." >&2
+                exit 1
+              fi
+              echo "distill-gold: emitted $EMITTED_COUNT per-checkpoint artifact(s)"
+            fi
+            {% endif %}
 
             # Rank 0 only: the executor streams every node's output into one
             # driver log, so an unguarded marker would register N artifacts.

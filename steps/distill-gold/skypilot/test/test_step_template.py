@@ -96,7 +96,11 @@ class TestRankZeroGuards:
     """
 
     def test_artifact_marker_is_guarded(self, run_script):
-        marker = 'echo "GB_ARTIFACT_ID:checkpoint'
+        # The FINAL marker, pinned by its trailing space: "GB_ARTIFACT_ID:checkpoint"
+        # is a prefix of the watcher's "checkpoint_${step}" id, whose own guarding is
+        # covered by TestPerCheckpointArtifacts (it sits in a function that only
+        # rank-0-guarded code calls, so a position test would not show it).
+        marker = 'echo "GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:'
         assert marker in run_script
         guard = run_script.rindex('if [ "$NODE_RANK" = "0" ]; then')
         assert guard < run_script.index(marker)
@@ -546,3 +550,143 @@ class TestCeAnchorFlagsReachTheRenderer:
             r"config\.gold_config\." + re.escape(key) + r"\s*\|\s*default\(",
             run_script,
         ), f"{key} is templated without a default"
+
+
+class TestPerCheckpointArtifacts:
+    """The opt-in mid-run checkpoint watcher.
+
+    Added for recipes/granite4-350m/lsf/distill-checkpoint-eval, which needs to export
+    and evaluate checkpoint N while the run is still training rather than after it, and
+    modelled on the watcher openinstruct-rl already carried.
+
+    Two contracts, and both are the kind that fail silently:
+
+    * OFF BY DEFAULT. Every other recipe using this step binds exactly one artifact,
+      `checkpoint`, emitted when the run ends. If the watcher rendered unconditionally
+      those builds would start seeing artifact ids they declare no outputs for.
+    * RANK 0 ONLY. The executor streams every node's stdout into one driver log, so an
+      unguarded marker registers each checkpoint once per node -- two registrations of
+      one URI on the 2-node reference topology.
+    """
+
+    def test_it_is_off_by_default(self, step):
+        assert step["config"]["emit_checkpoint_artifacts"] is False
+
+    def test_the_watch_interval_has_a_default_and_a_template_default(
+        self, step, run_script
+    ):
+        """A recipe that turns emission on without naming an interval must still
+        render: `| default(60)` is what stops an empty `sleep` argument."""
+        assert int(step["config"]["checkpoint_watch_interval_seconds"]) > 0
+        assert "config.checkpoint_watch_interval_seconds | default(" in run_script
+
+    def test_the_whole_mechanism_is_behind_the_flag(self, run_script):
+        """Both halves -- the watcher setup before the trainer and the final sweep
+        after it -- must be gated, or the default render changes."""
+        blocks = re.findall(
+            r"\{%\s*if config\.emit_checkpoint_artifacts[^%]*%\}", run_script
+        )
+        assert len(blocks) == 2, blocks
+        for marker in ("watch_checkpoints &", "emit_new_checkpoints", "EMITTED_DIR"):
+            assert marker in run_script
+
+    def test_nothing_is_emitted_when_the_flag_is_off(self):
+        """Renders the run block as the server would, with the flag off, and checks the
+        per-checkpoint id is absent while the final one survives. The _as_shell helper
+        STRIPS {% %} blocks rather than evaluating them, so it cannot see this."""
+        from jinja2 import Template
+
+        step = yaml.safe_load(_STEP.read_text())
+        script = step["environment_configs"]["Skypilot"]["launchers"]["gold"]["config"][
+            "run"
+        ]
+        # The step's OWN declared defaults, so this renders the config a recipe that
+        # sets nothing would actually get.
+        config = dict(step["config"])
+
+        off = Template(script).render(config=config)
+        assert "GB_ARTIFACT_ID:checkpoint_" not in off
+        assert "GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:" in off
+        assert "watch_checkpoints" not in off
+        assert "EMITTED_DIR" not in off
+
+        config["emit_checkpoint_artifacts"] = True
+        on = Template(script).render(config=config)
+        assert "GB_ARTIFACT_ID:checkpoint_${step}" in on
+        # The final marker survives alongside it.
+        assert "GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:" in on
+        # And the interval reached the sleep rather than rendering empty.
+        assert (
+            f'CKPT_WATCH_INTERVAL="{config["checkpoint_watch_interval_seconds"]}"' in on
+        )
+
+    def test_emission_is_rank_guarded(self, run_script):
+        """Both the watcher start and the final sweep sit inside a NODE_RANK test."""
+        start = run_script.index("watch_checkpoints &")
+        guard = run_script.rindex('if [ "$NODE_RANK" = "0" ]', 0, start)
+        assert start - guard < 500, "watcher start is not inside a rank-0 guard"
+        sweep = run_script.index("cleanup_watcher\n  emit_new_checkpoints")
+        guard = run_script.rindex('if [ "$NODE_RANK" = "0" ]', 0, sweep)
+        assert sweep - guard < 500, "final sweep is not inside a rank-0 guard"
+
+    def test_it_globs_the_hf_checkpoint_naming(self, run_script):
+        """HF Trainer writes checkpoint-<N>. The id it emits is checkpoint_<N>, which
+        is what a recipe's outputs must be named -- keep the two in lock-step."""
+        assert 'CKPT_GLOB="checkpoint-"' in run_script
+        assert (
+            "GB_ARTIFACT_ID:checkpoint_${step} GB_ARTIFACT_PATH:${ckpt}" in run_script
+        )
+
+    def test_a_checkpoint_is_only_emitted_once_it_is_complete(self, run_script):
+        """Trainer._save_checkpoint writes save_model -> optimizer/scheduler ->
+        rng_state -> trainer_state.json, so requiring the weights, the last tokenizer
+        file AND trainer_state.json brackets the whole write sequence. Without
+        trainer_state.json the sentinels only bracket save_model, and an export that
+        has already allocated a node can open a checkpoint still being written."""
+        sentinels = re.search(r'CKPT_SENTINELS="([^"]+)"', run_script)
+        assert sentinels
+        assert set(sentinels.group(1).split()) == {
+            "model.safetensors",
+            "tokenizer.json",
+            "trainer_state.json",
+        }
+
+    def test_each_checkpoint_is_emitted_exactly_once(self, run_script):
+        """Markers on disk, not a shell counter: emit_new_checkpoints also runs inside
+        the backgrounded subshell, whose variables never reach the parent."""
+        assert 'marker="$EMITTED_DIR/$base"' in run_script
+        assert '[ -e "$marker" ] && continue' in run_script
+        assert 'touch "$marker"' in run_script
+
+    def test_the_watcher_cannot_outlive_the_script(self, run_script):
+        """An orphaned loop keeps emitting after the trainer has gone. The trap covers
+        every exit path -- success, trainer failure, signal."""
+        assert "trap 'cleanup_watcher; rm -rf \"$EMITTED_DIR\"' EXIT" in run_script
+        assert 'kill "$WATCH_PID"' in run_script
+        assert 'wait "$WATCH_PID"' in run_script
+
+    def test_the_watcher_starts_before_the_trainer_and_sweeps_after_it(
+        self, run_script
+    ):
+        start = run_script.index("watch_checkpoints &")
+        launch = run_script.index("accelerate launch")
+        sweep = run_script.index("cleanup_watcher\n  emit_new_checkpoints")
+        assert start < launch < sweep
+
+    def test_zero_emissions_fails_the_build_loudly(self, run_script):
+        """The alternative failure is silent and expensive: a recipe's checkpoint_<N>
+        outputs are never produced, every export/eval target bound to them stays
+        unready, and the build hangs with nothing to read. Counted from the markers,
+        not from a variable the subshell incremented."""
+        assert 'EMITTED_COUNT="$(find "$EMITTED_DIR"' in run_script
+        assert 'if [ "$EMITTED_COUNT" -eq 0 ]; then' in run_script
+        guard = run_script.index('if [ "$EMITTED_COUNT" -eq 0 ]')
+        assert "exit 1" in run_script[guard : guard + 900]
+
+    def test_the_final_single_checkpoint_artifact_is_untouched(self, run_script):
+        """Unconditional, and after the sweep: it is what every single-checkpoint
+        recipe binds, and it is the one line of the output contract that does not
+        depend on the watcher having worked."""
+        final = run_script.index("GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:")
+        sweep = run_script.index("cleanup_watcher\n  emit_new_checkpoints")
+        assert sweep < final
