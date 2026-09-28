@@ -13,6 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:8b2f324"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +26,17 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── LiveCodeBench v6 / SciCode (NeMo-Skills) ─────────────────────────
+LIVECODEBENCH_WORKERS: 64
+LIVECODEBENCH_OPTIONS: ""
+SCICODE_WORKERS: 64
+SCICODE_OPTIONS: ""
+
+# ─── RULER 128k / 64k (NeMo-Skills) ───────────────────────────────────
+# Data are generated in the job for MODEL_PATH's tokenizer.
+RULER_WORKERS: 32
+RULER_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
