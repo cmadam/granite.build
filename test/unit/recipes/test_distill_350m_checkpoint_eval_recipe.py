@@ -546,16 +546,41 @@ def test_gen_smoke_covers_every_rung_and_is_valid_bash_and_python(built, tmp_pat
         assert path.endswith(f"/export-{rung}")
 
 
-def test_the_entropy_guard_warns_and_never_stops_the_run():
+def test_nothing_can_stop_this_run_early():
     """A guard that may stop at an arbitrary step and a ladder that names fixed ones
     cannot both have their way. On build d1acf1c0 the guard stopped at step 77 of 2,000
     and all four export targets failed with `requested checkpoint does not exist`. On a
-    run whose whole point is the epoch, the guard is an instrument only."""
+    run whose whole point is the epoch, that is the one outcome worth ruling out.
+
+    It is now ruled out twice over: the guard is disarmed (the completed CE sweep retired
+    it -- the 42% entropy collapse it watched for turned out not to damage the model), and
+    even re-armed it may only warn."""
     params = _params()
+    assert float(params["ENTROPY_GUARD_DROP_FRAC"]) == 0
     assert params["ENTROPY_GUARD_ACTION"] == "warn"
-    # Still armed -- the trip step is the most interesting checkpoint in the run.
-    assert float(params["ENTROPY_GUARD_DROP_FRAC"]) > 0
-    assert params["LOG_STUDENT_ENTROPY"] is True
+
+
+def test_the_objective_is_unanchored_and_needs_no_patched_trainer():
+    """This recipe measures WHERE in an epoch the gains land, and the epoch it measures is
+    df8512e0's: pure divergence, lmbda 0, no CE anchor. Keeping it that way is also what
+    keeps it runnable on the step's own public trainer pin -- none of the six patch-gated
+    fields exist in CustomGOLDConfig at a5d59bc4, so any one of them being set both changes
+    the objective under measurement and drags CODE_DIR back to a BlueVela-only /proj path.
+    """
+    params = _params()
+    assert float(params["CE_COEF"]) == 0
+    assert params["LOG_STUDENT_ENTROPY"] is False
+    assert float(params["ENTROPY_GUARD_DROP_FRAC"]) == 0
+    assert float(params["LMBDA"]) == 0
+    assert params["CODE_DIR"] == ""
+
+
+def test_entropy_is_still_measured_without_the_trainers_help():
+    """The per-step entropy log went off with the patch dependency; the quantity did not
+    go away. distill-eval computes entropy and reverse KL from a checkpoint with no
+    trainer involvement, and this recipe evaluates every rung -- which is the resolution
+    that actually matters for the question it asks."""
+    assert set(_params()["EVAL_METRICS"].split(",")) >= {"entropy", "rkld"}
 
 
 def test_nothing_downstream_is_gated_on_a_divergence_reading(built):

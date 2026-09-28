@@ -51,10 +51,18 @@
 # lmbda_schedule is a trainer key this repo had not previously exposed — so treat it as
 # untested plumbing and smoke it first.
 #
-# Everything else is distill-stage1-v2: the anchored objective, the entropy guard, the
-# 2,000-step horizon, the checkpoint ladder with an export, a transfer eval and a
-# generation check per rung. The anchor matters MORE here, not less: on-policy training
-# on a student's own output is the regime where a collapse feeds itself.
+# Everything else is distill-stage1-v2: the step-bounded horizon and the checkpoint
+# ladder with an export, a transfer eval and a generation check per rung. NOT its CE
+# anchor and NOT its entropy guard — the completed CE sweep retired both, and CE_COEF and
+# ENTROPY_GUARD_DROP_FRAC are 0 here as they are there.
+#
+# That is worth stating rather than inheriting quietly, because the anchor's rationale
+# was strongest in exactly this regime: on-policy training on a student's own output is
+# where a collapse could feed itself, and the sweep was run off-policy, so it says
+# nothing about that. What it does say is that non-zero CE costs capability in ordered
+# amounts and that the collapse it prevented damaged nothing off-policy. So this starts
+# where the evidence is — at zero — and CE_COEF is one --param plus a patched CODE_DIR
+# away if the on-policy entropy curve argues otherwise.
 #
 # Run:
 #   gb build start -f recipes/granite4-350m/lsf/distill-onpolicy-v2/build.yaml \
@@ -687,19 +695,23 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
             code_config:
-              # The trainer for this recipe is NOT the default public clone: it is a
-              # checkout of that same repo carrying patches/ce_anchor_and_entropy_guard.diff,
-              # because the CE anchor and the collapse guard below are not at the pinned
-              # commit upstream. Every key is restated rather than overriding code_dir alone,
-              # so this block does not depend on how a partial config override merges.
+              # The step's own public pin, restated. CODE_DIR is empty by default, so the
+              # step clones github.com/laminair/gb-steps-distillation at `ref` below --
+              # the same trainer every other distillation recipe here runs. This block
+              # used to point at a local patched checkout, because the CE anchor and the
+              # collapse guard need trainer fields that commit does not define; both are
+              # off now, nothing patch-gated renders, and the override is gone.
               #
-              # Build it once, on a node that can reach github.com:
+              # Every key is restated rather than overriding code_dir alone, so this block
+              # does not depend on how a partial config override merges.
+              #
+              # To re-arm CE_COEF or the guard, build a patched checkout once on a node
+              # that can reach github.com and pass it as CODE_DIR (with CODE_EXPECT_REF):
               #   git clone https://github.com/laminair/gb-steps-distillation.git $CODE_DIR
               #   git -C $CODE_DIR checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
               #   cd $CODE_DIR/src/gb_steps_post_training/distillation
               #   patch -p2 -F3 < <this repo>/steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
               #   git -C $CODE_DIR commit -am "ce anchor and entropy guard"
-              # then put that commit in CODE_EXPECT_REF.
               code_dir: "$${CODE_DIR}"
               expect_ref: "$${CODE_EXPECT_REF}"
               repo: "https://github.com/laminair/gb-steps-distillation.git"
@@ -793,19 +805,23 @@ granite.build:
                 # For the LSF cloud, SkyPilot's zone is the queue name.
                 zone: "$${QUEUE}"
             code_config:
-              # The trainer for this recipe is NOT the default public clone: it is a
-              # checkout of that same repo carrying patches/ce_anchor_and_entropy_guard.diff,
-              # because the CE anchor and the collapse guard below are not at the pinned
-              # commit upstream. Every key is restated rather than overriding code_dir alone,
-              # so this block does not depend on how a partial config override merges.
+              # The step's own public pin, restated. CODE_DIR is empty by default, so the
+              # step clones github.com/laminair/gb-steps-distillation at `ref` below --
+              # the same trainer every other distillation recipe here runs. This block
+              # used to point at a local patched checkout, because the CE anchor and the
+              # collapse guard need trainer fields that commit does not define; both are
+              # off now, nothing patch-gated renders, and the override is gone.
               #
-              # Build it once, on a node that can reach github.com:
+              # Every key is restated rather than overriding code_dir alone, so this block
+              # does not depend on how a partial config override merges.
+              #
+              # To re-arm CE_COEF or the guard, build a patched checkout once on a node
+              # that can reach github.com and pass it as CODE_DIR (with CODE_EXPECT_REF):
               #   git clone https://github.com/laminair/gb-steps-distillation.git $CODE_DIR
               #   git -C $CODE_DIR checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
               #   cd $CODE_DIR/src/gb_steps_post_training/distillation
               #   patch -p2 -F3 < <this repo>/steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
               #   git -C $CODE_DIR commit -am "ce anchor and entropy guard"
-              # then put that commit in CODE_EXPECT_REF.
               code_dir: "$${CODE_DIR}"
               expect_ref: "$${CODE_EXPECT_REF}"
               repo: "https://github.com/laminair/gb-steps-distillation.git"
@@ -848,11 +864,15 @@ granite.build:
               beta: $${BETA}
               use_liger_fused_jsd: $${USE_LIGER_FUSED_JSD}
 
-              # ── the anchor and the instruments ──────────────────────────────
-              # All five need the patched trainer at CODE_DIR. They render into
-              # the trainer's config only when non-default, so a zeroed CE_COEF and
-              # a zeroed guard reproduce df8512e0's objective exactly — which is
-              # what makes the control arm a control.
+              # ── the anchor and the guard, both off ──────────────────────────
+              # All six are patch-gated: they need trainer fields the step's public pin
+              # does not define, and render_gold_config.py emits each one only when it is
+              # non-default. At the zeroed defaults in parameters.yaml nothing here
+              # reaches the config, which is exactly what lets this recipe run on that
+              # public pin — and what makes its objective df8512e0's, unanchored.
+              #
+              # Setting any of them non-zero requires CODE_DIR at a patched checkout. See
+              # CE_COEF in parameters.yaml for the sweep that retired them.
               ce_coef: $${CE_COEF}
               log_student_entropy: $${LOG_STUDENT_ENTROPY}
               entropy_guard_drop_frac: $${ENTROPY_GUARD_DROP_FRAC}

@@ -1,13 +1,30 @@
 # distill-onpolicy-v2 — on-policy GOLD, from stage 1 v2's chosen checkpoint
 
 **Written, not yet run.** `STUDENT_MODEL` has no working default on purpose; see
-[Choosing the student](#choosing-the-student).
+[Choosing the student](#choosing-the-student). Everything else now runs on the step's own
+public trainer pin.
+
+> **There is no generation floor.** `MIN_COMPLETION_LENGTH` is 0, because neither half of it
+> exists at the pin (`a5d59bc4`): `CustomGOLDConfig` has no `min_completion_length`, and
+> `run_vllm_serve.py` never reads `GOLD_MIN_TOKENS`. A non-zero value buys two pre-allocation
+> refusals rather than a floor. So the immediate-EOS failure it guarded against — an empty
+> completion the teacher scores as if it were a rollout — is unmitigated and has to be *read*
+> instead: check `gen-smoke` on the first rung before letting a long arm run. Restoring a
+> floor means landing both halves upstream and bumping the pin.
 
 On-policy GOLD distillation towards the same `granite-4.1-3b` teacher, continuing from
-whichever rung of [`distill-stage1-v2`](../distill-stage1-v2/README.md)'s ladder its
-readings select. `lmbda 0.25`, `beta 0.5`, the same anchored objective, the same
-2,000-step horizon, the same checkpoint ladder — plus a vLLM server in its own
-allocation and a teardown target.
+a chosen off-policy checkpoint. `lmbda 0.25`, `beta 0.5`, the same **unanchored**
+objective as [`distill-stage1`](../distill-stage1/README.md), the same step-bounded horizon
+and checkpoint ladder as [`distill-stage1-v2`](../distill-stage1-v2/README.md) — plus a vLLM
+server in its own allocation and a teardown target.
+
+> **The CE anchor and the entropy guard are off here too.** The completed CE sweep found the
+> anchor monotone-bad on capability off-policy, and the collapse the guard watched for did
+> no damage. The anchor's rationale was *strongest* in this regime — a student training on
+> its own output has no corpus token pulling it back — so the removal is stated rather than
+> inherited: the sweep ran off-policy and says nothing about on-policy directly, but it is
+> the only evidence there is, so this arm starts where the evidence is. See
+> [What is held fixed](#what-is-held-fixed).
 
 ## Why on-policy, after an off-policy arm
 
@@ -25,8 +42,9 @@ where teacher correction has something left to say.
 It is not free. Generation is the expensive half — the reference arms measured ~135 GPU-h
 against off-policy's ~15 — and it is the half that can feed a collapse, since a student
 training on its own output has no corpus token pulling it back. Hence `lmbda 0.25`: one
-sequence in four generated, three still real text, and the CE anchor still on. Read an
-arm at 0.25 before raising it.
+sequence in four generated and three still real text, which is the only thing now damping
+that feedback. Read an arm at 0.25 before raising it, and read its entropy curve per rung
+(`eval-transfer-<N>`) rather than trusting the off-policy sweep to cover this regime.
 
 ## Choosing the student
 
@@ -89,8 +107,9 @@ Read the constant arm first regardless. A ramp confounds *on-policy helped* with
 
 ## What is held fixed
 
-Everything from [`distill-stage1-v2`](../distill-stage1-v2/README.md): `CE_COEF 0.05`,
-the entropy guard at 15% in warn mode, `beta 0.5`, 300 steps, the
+Everything from [`distill-stage1-v2`](../distill-stage1-v2/README.md): `CE_COEF 0.0` and
+the entropy guard disarmed — matched to the off-policy arm so the two remain comparable, and
+enforced by `test_it_matches_the_off_policy_arm` — plus `beta 0.5`, 300 steps, the
 25/50/75/100/150/200/300 ladder, the corpus and its sampling and the `CORPUS_DIR` pin, the
 geometry (effective batch 96 — the server has its own
 allocation, so `GOLD_NUM_NODES` still counts trainers), the LR schedule, the pinned
