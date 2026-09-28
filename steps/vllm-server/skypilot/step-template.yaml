@@ -65,7 +65,7 @@ config:
     # THIS side of the on-policy loop. 0 = off.
     #
     # It has to be set here as well as on the trainer, and that is not redundancy:
-    # gold-distill's min_completion_length only bounds what the TRAINER asks for, while
+    # distill-gold's min_completion_length only bounds what the TRAINER asks for, while
     # the sampling decision is taken in this process. trl's vllm_serve has no
     # min_tokens field, so run_vllm_serve.py monkey-patches SamplingParams from
     # GOLD_MIN_TOKENS, which this step exports from the value below. Left at 0 while
