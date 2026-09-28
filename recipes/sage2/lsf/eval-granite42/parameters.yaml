@@ -13,6 +13,8 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_BIRD: "icr.io/tir-hew-sage2-evals/sage2-evals-bird:a420f05"
+SAGE2_IMAGE_BFCL: "icr.io/tir-hew-sage2-evals/sage2-evals-bfcl:a420f05"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +27,17 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── BirdBench ────────────────────────────────────────────────────────
+BIRDBENCH_WORKERS: 32
+# e.g. "sql=gold" (score the gold SQL, no model) or "temperature=0.6".
+BIRDBENCH_OPTIONS: ""
+
+# ─── BFCL v4 ──────────────────────────────────────────────────────────
+# Single run: SAGE2_REPEATS does not apply.
+BFCL_WORKERS: 8
+# e.g. "categories=simple_python,web_search".
+BFCL_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
