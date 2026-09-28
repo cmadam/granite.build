@@ -19,7 +19,7 @@ They answer different questions and neither substitutes for the other.
 
 | | [`distill-stage1-v2`](../distill-stage1-v2/README.md) | this |
 |---|---|---|
-| question | **which objective** — does a CE anchor stop the collapse? | **which checkpoint** of a full epoch is the best model? |
+| question | superseded; its premise was an export bug and its CE anchor is retired | **which checkpoint** of a full epoch is the best model? |
 | horizon | 300 steps (`GOLD_MAX_STEPS`) | one epoch, ~8,150 steps |
 | ladder | 25,50,75,100,150,200,300 — weighted to the descent | 1000…8000, 8150 — an even grid |
 | reads per rung | divergence, entropy, repetition, BFCL `simple` | **all 27 benchmarks**, BFCL at `all` |
@@ -98,9 +98,10 @@ eight earlier rungs have already been exported and evaluated by the time it bite
 
 ## Nothing acts on a reading
 
-`eval-transfer-<N>` reports divergence and entropy per rung, `gen-smoke` reports
-repetition, and the entropy guard runs in `warn` mode. All three are **instruments**: none
-stops the run, fails a target, or skips a rung. The whole epoch is the measurement, so a
+`eval-transfer-<N>` reports divergence and entropy per rung and `gen-smoke` reports
+repetition. Both are **instruments**: neither stops the run, fails a target, or skips a rung.
+The entropy guard is disarmed outright (the completed CE sweep retired it), so there is no
+longer even a warning path that could end the run early. The whole epoch is the measurement, so a
 reading that truncated it would destroy the thing being measured. `gen-smoke` in particular
 carries **no exit gate** here, unlike v2's copy which fails on a degenerate final rung —
 `test_gen_smoke_reports_without_gating` holds that line.

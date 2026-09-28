@@ -1,48 +1,40 @@
 ######
-# distill-stage1-v2 — off-policy GOLD for the granite4-350m pair, anchored,
-# instrumented, and bounded by steps rather than by an epoch. BlueVela (SkyPilot / LSF).
+# distill-stage1-v2 — off-policy GOLD for the granite4-350m pair, instrumented and
+# bounded by steps rather than by an epoch. BlueVela (SkyPilot / LSF).
 #
-# WHY THERE IS A V2
+# SUPERSEDED. ITS PREMISE WAS A BUG IN THE EXPORT, NOT IN THE OBJECTIVE.
 #
-# distill-stage1 ran as build df8512e0: 8,150 steps, 13h20 on 2x8 H100, every step
-# exit 0, and a model worse on every one of the 30+ benchmarks measured. HumanEval
-# 40.85 -> 0.61. MultiPL-E Java 21.05 -> 0.00. MGSM 17.60 -> 0.08. Nothing was broken:
-# the objective did what it was told, for far too long, with nothing watching.
+# distill-stage1 ran as build df8512e0: 8,150 steps, 13h20 on 2x8 H100, and read as
+# worse on every one of the 30+ benchmarks measured — HumanEval 40.85 -> 0.61, MultiPL-E
+# Java 21.05 -> 0.00, MGSM 17.60 -> 0.08. That reading was an artefact. The export
+# dropped the model's top-level rope_theta (transformers 5.8.0 nests it), so vLLM served
+# a 10M-theta model at 10k. Fixed 2026-09-27; re-evaluated, the SAME checkpoint beats its
+# own SFT baseline — GSM8K +10.7, ifeval +7.4, Minerva +4.0, MGSM +3.1, HumanEval and
+# BFCL level — and is the best model in the epic. Nothing was ever wrong with the
+# weights, and nothing had to be retrained.
 #
-# GOLD's loss IS the divergence — no term measures the student against the corpus
-# tokens. The student was already two epochs of SFT into this corpus family, so it
-# began 12% of the way from the teacher (JSD 0.0825 against a ln2 = 0.693 ceiling) and
-# had banked ~68% of the realisable gain by step 509. For the remaining 7,640 steps the
-# only descent direction left was to become more certain, so it did: student entropy
-# fell 42% (0.684 -> 0.396 nats, effective branching factor 1.49), reverse KL moved
-# 1.8% while forward KL improved 36%, and the generations became repetition loops
-# (back-to-back repetition 0.4% -> 20.8% on Java). The train loss moved 2.7% across
-# those steps and reported none of it. save_total_limit 3 then deleted every checkpoint
-# from before the collapse, so nothing was recoverable and stage 1 had to be retrained.
+# WHAT SURVIVES THE CORRECTION. The measurements this recipe was built on are real; only
+# their consequence was wrong. The student began 12% of the way from the teacher (JSD
+# 0.0825 against a ln2 = 0.693 ceiling) and banked ~68% of the realisable gain by step
+# 509; over the remaining 7,640 steps its entropy fell 42% (0.684 -> 0.396 nats) while
+# the train loss moved 2.7%. So most of the divergence gain IS early, and the run does
+# sharpen. It just does not cost capability, and CE does:
 #
-# FOUR CHANGES, EACH AIMED AT ONE PART OF THAT
+#   * THE CE ANCHOR IS RETIRED. The sweep completed at four coefficients (2026-09-28)
+#     and the dose-response is monotone-bad on two independent suites. Dropped, not
+#     tuned, and CE_COEF is 0 here. See its comment in parameters.yaml.
+#   * THE ENTROPY GUARD IS RETIRED. It was never more than a warning here
+#     (ENTROPY_GUARD_ACTION "warn"), and the collapse it watched for damaged nothing.
+#   * THE LADDER AND THE CHEAP READS SURVIVE, and are the only reason to run this file:
+#     GOLD_SAVE_STEPS 25 with GOLD_SAVE_TOTAL_LIMIT 16 keeps every checkpoint, and
+#     CKPT_LADDER measures the curve instead of its endpoint. df8512e0's
+#     save_total_limit 3 is still the thing worth not repeating.
 #
-#   1. CE_COEF adds cross entropy on the corpus tokens to the divergence, so drifting
-#      away from real text costs something and "become more confident" stops being a
-#      free win. Needs the patched trainer — see CODE_DIR in parameters.yaml.
-#   2. LOG_STUDENT_ENTROPY logs entropy and reverse KL every step, and
-#      ENTROPY_GUARD_DROP_FRAC stops the run when entropy falls 15% below its own
-#      baseline. At that threshold df8512e0 would have stopped inside the first hour
-#      instead of after 13 hours plus a full eval sweep.
-#   3. GOLD_MAX_STEPS 2000 sizes the horizon to the headroom that actually existed,
-#      rather than to one epoch of the corpus.
-#   4. GOLD_SAVE_STEPS 250 with GOLD_SAVE_TOTAL_LIMIT 16 keeps every checkpoint, so a
-#      collapse can be bisected instead of retrained.
-#
-# TWO ARMS, ONE RECIPE
-#
-# Run it twice. Once as shipped (CE_COEF 0.05, guard armed) and once as a control with
-# --param CE_COEF=0 --param ENTROPY_GUARD_DROP_FRAC=0 --param RUN_NAME=<other>. Without
-# the control a better result is ambiguous between "the anchor worked" and "2,000 steps
-# instead of 8,150 worked", and df8512e0 cannot serve as that control: it kept no
-# checkpoint below step 7750 and evaluated nothing in between. The control's guard is
-# OFF deliberately, so it runs the full 2,000 steps and the two arms are comparable at
-# matched steps rather than one being cut short.
+# WHAT TO RUN INSTEAD. A full epoch is distill-stage1. "Is there a good checkpoint
+# earlier than one epoch" is distill-checkpoint-eval with a shorter horizon —
+# GOLD_MAX_STEPS, GOLD_SAVE_STEPS, CKPT_LADDER and STUDENT_MODEL are the four knobs —
+# and it reads every rung with the full 27-eval suite rather than divergence alone. This
+# recipe is the cheap, shallow version of that, plus the harness the CE sweep ran in.
 #
 # THE CHECKPOINT LADDER
 #
@@ -740,19 +732,23 @@ granite.build:
                 # For the LSF cloud, SkyPilot's zone is the queue name.
                 zone: "$${QUEUE}"
             code_config:
-              # The trainer for this recipe is NOT the default public clone: it is a
-              # checkout of that same repo carrying patches/ce_anchor_and_entropy_guard.diff,
-              # because the CE anchor and the collapse guard below are not at the pinned
-              # commit upstream. Every key is restated rather than overriding code_dir alone,
-              # so this block does not depend on how a partial config override merges.
+              # The step's own public pin, restated. CODE_DIR is empty by default, so the
+              # step clones github.com/laminair/gb-steps-distillation at `ref` below --
+              # the same trainer every other distillation recipe here runs. This block
+              # used to point at a local patched checkout, because the CE anchor and the
+              # collapse guard need trainer fields that commit does not define; both are
+              # off now, nothing patch-gated renders, and the override is gone.
               #
-              # Build it once, on a node that can reach github.com:
+              # Every key is restated rather than overriding code_dir alone, so this block
+              # does not depend on how a partial config override merges.
+              #
+              # To re-arm CE_COEF or the guard, build a patched checkout once on a node
+              # that can reach github.com and pass it as CODE_DIR (with CODE_EXPECT_REF):
               #   git clone https://github.com/laminair/gb-steps-distillation.git $CODE_DIR
               #   git -C $CODE_DIR checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
               #   cd $CODE_DIR/src/gb_steps_post_training/distillation
               #   patch -p2 -F3 < <this repo>/steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
               #   git -C $CODE_DIR commit -am "ce anchor and entropy guard"
-              # then put that commit in CODE_EXPECT_REF.
               code_dir: "$${CODE_DIR}"
               expect_ref: "$${CODE_EXPECT_REF}"
               repo: "https://github.com/laminair/gb-steps-distillation.git"
@@ -795,11 +791,15 @@ granite.build:
               beta: $${BETA}
               use_liger_fused_jsd: $${USE_LIGER_FUSED_JSD}
 
-              # ── the anchor and the instruments ──────────────────────────────
-              # All five need the patched trainer at CODE_DIR. They render into
-              # the trainer's config only when non-default, so a zeroed CE_COEF and
-              # a zeroed guard reproduce df8512e0's objective exactly — which is
-              # what makes the control arm a control.
+              # ── the anchor and the guard, both off ──────────────────────────
+              # All six are patch-gated: they need trainer fields the step's public pin
+              # does not define, and render_gold_config.py emits each one only when it is
+              # non-default. At the zeroed defaults in parameters.yaml nothing here
+              # reaches the config, which is exactly what lets this recipe run on that
+              # public pin — and what makes its objective df8512e0's, unanchored.
+              #
+              # Setting any of them non-zero requires CODE_DIR at a patched checkout. See
+              # CE_COEF in parameters.yaml for the sweep that retired them.
               ce_coef: $${CE_COEF}
               log_student_entropy: $${LOG_STUDENT_ENTROPY}
               entropy_guard_drop_frac: $${ENTROPY_GUARD_DROP_FRAC}

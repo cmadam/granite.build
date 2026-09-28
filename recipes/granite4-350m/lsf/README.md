@@ -21,8 +21,8 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 | `export-results`    | Copy results from shared FS to the configured output store  |
 | `distill-probe`     | Two-question gate: does the 350m load in the distillation image, and is the tokenizer confound real |
 | `distill-smoke`     | Off-policy GOLD distillation from granite-4.1-3b, end to end at smoke scale (7 targets) |
-| `distill-stage1`    | Off-policy GOLD distillation, the first real run -- SUPERSEDED, see distill-stage1-v2 |
-| `distill-stage1-v2` | Off-policy GOLD, anchored and instrumented: 2,000 steps, checkpoint ladder, entropy guard |
+| `distill-stage1`    | Off-policy GOLD distillation, a full epoch -- the best recipe on record |
+| `distill-stage1-v2` | SUPERSEDED (its premise was an export bug). A cheap 300-step laddered sample of the same objective |
 | `distill-onpolicy-v2` | On-policy GOLD from stage 1 v2's chosen checkpoint, with a vLLM server allocation (written, not yet run) |
 | `distill-checkpoint-eval` | Off-policy GOLD for a full epoch, with every checkpoint exported and run through all 27 evals as it lands, rolled up into one benchmark x checkpoint table |
 
@@ -38,10 +38,13 @@ Run them in this order, each gating the next:
 
 1. [`distill-probe`](distill-probe/README.md) — ~4 GPU-minutes, nothing trained.
 2. [`distill-smoke`](distill-smoke/README.md) — the full graph at 64 rows and 2 steps.
-3. [`distill-stage1-v2`](distill-stage1-v2/README.md) — off-policy, 2,000 steps, run
-   twice: anchored and as a pure-divergence control.
-4. [`distill-onpolicy-v2`](distill-onpolicy-v2/README.md) — on-policy from the rung stage
-   1 v2 selects. Written, not yet run.
+3. [`distill-stage1`](distill-stage1/README.md) — off-policy, one full epoch, unanchored.
+   The best result on record. For "is a shorter run enough", use
+   [`distill-checkpoint-eval`](distill-checkpoint-eval/README.md) with a shorter
+   `GOLD_MAX_STEPS`; [`distill-stage1-v2`](distill-stage1-v2/README.md) is the cheap,
+   shallow version of that and is otherwise superseded.
+4. [`distill-onpolicy-v2`](distill-onpolicy-v2/README.md) — on-policy from a chosen
+   off-policy rung. Written, not yet run.
 5. stage 2 proper — on-policy on the IFRL and IdentityRL prompt sets rather than the SFT
    mixture, which is a prompt-set change on top of step 4's policy change.
 

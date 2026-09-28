@@ -13,9 +13,18 @@
 # OWN generations, including the degenerate ones, which is where teacher correction has
 # something left to say.
 #
-# Everything from distill-stage1-v2 carries over: the CE anchor, the entropy guard, the
-# 2,000-step horizon, the checkpoint ladder. The anchor matters MORE here: on-policy
-# training on a student's own output is the regime where a collapse feeds itself.
+# Everything from distill-stage1-v2 carries over EXCEPT its objective changes: the
+# horizon, the checkpoint ladder and the instruments, but not the CE anchor and not the
+# entropy guard. Both are off, at zero, for the reason their comment gives -- the sweep
+# that retired them is complete and monotone-bad on capability.
+#
+# That removal is worth naming here rather than inheriting quietly, because the anchor's
+# stated rationale was STRONGEST in this regime: on-policy training on a student's own
+# output is where a collapse could feed itself, and nothing in the off-policy sweep
+# measures that. What the sweep does establish is that the collapse it was built to
+# prevent did not damage the off-policy model, and that non-zero CE costs capability in
+# ordered amounts. If on-policy turns out to behave differently, CE_COEF is one --param
+# and a patched CODE_DIR away -- but it starts here where the evidence is, at zero.
 #
 # Override any value with: gb build start --param KEY=VALUE
 
@@ -106,31 +115,30 @@ INCLUDE_SFT: false
 # image.
 # SM90 (H100) build; it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
-# The GOLD trainer, and NOT the shared checkout this time.
+# The GOLD trainer: the step's own public pin, which is the default again.
 #
-# /proj/granite-build/g4os/kd-sandbox is another project's tree and carries
-# uncommitted work under gold/ (159 files as of 2026-09-25). df8512e0 read it and
-# recorded kd_sandbox_commit fc7d66e, which describes a commit whose code did not run:
-# what ran was working-tree state that can change between one build and the next.
+# EMPTY means the step clones github.com/laminair/gb-steps-distillation at the commit
+# its own code_config pins, which resolves on any environment class that can reach
+# github.com. This recipe used to override it with a local checkout at
+# /proj/granite-build/g4os/gb-steps-distillation-gb carrying
+# patches/ce_anchor_and_entropy_guard.diff, because CE_COEF and the entropy guard need
+# trainer fields the public pin does not define. Both are off now -- see CE_COEF below
+# for the sweep that retired them -- so nothing patch-gated renders, the override has
+# no purpose left, and this recipe runs the same trainer as every other distillation
+# recipe here, on any cluster rather than only on BlueVela.
 #
-# kd-sandbox-gb is a clone this project controls, at the commit whose gold/ tree is
-# byte-identical to what df8512e0 executed (karve/kd-sandbox 20b416c) plus the one
-# commit that adds ce_coef, the entropy/RKL logging and the guard. Without it CE_COEF
-# and the guard below have nothing to act on — the keys would render and the trainer
-# would reject the config, which is the loud failure and the one to want.
-#
-# The diff ships at steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
-# with its base commit stated, so this checkout can be rebuilt from scratch. Offer it
-# upstream; when it lands, point CODE_DIR back at "" and drop CODE_EXPECT_REF.
-CODE_DIR: "/proj/granite-build/g4os/gb-steps-distillation-gb"
-# The full 40-char commit that checkout must be at, and be clean at. Empty would
-# disable the check; it is set here because a run whose objective differs from
-# df8512e0's is worth nothing if the code that implemented the difference is
-# unrecorded. The step fails in seconds on a mismatch or a dirty tree.
-# EMPTY UNTIL THE CHECKOUT ABOVE EXISTS. Empty disables the HEAD check, which is
-# safe here only because render_gold_config.py refuses outright when the delivered
-# trainer lacks the fields these keys render -- so a checkout without the patch
-# fails loudly either way. Fill it in once built, to get the dirty-tree check too.
+# To re-arm either key, point this at a checkout carrying that patch and set
+# CODE_EXPECT_REF to its HEAD; the diff header states its base commit and the directory
+# remap it needs. render_gold_config.py refuses to emit a patch-gated key against a
+# trainer whose CustomGOLDConfig lacks the field, so the wrong combination fails in
+# seconds instead of after the allocation is held.
+CODE_DIR: ""
+# The full 40-char commit CODE_DIR must be at, and be clean at. Consulted ONLY on the
+# CODE_DIR path: the clone path checks out code_config.ref by construction, so there is
+# nothing there for this to catch. Empty is therefore the right value while CODE_DIR is
+# empty, and the value to fill in the moment one is set -- it is what turns a mutable
+# shared checkout back into a recorded provenance, and it brings the dirty-tree check
+# with it.
 CODE_EXPECT_REF: ""
 DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # The five ported steps read their own code from a separate pinned checkout,
@@ -400,11 +408,31 @@ LMBDA_INIT: 0.0
 # field, so run_vllm_serve.py patches SamplingParams from GOLD_MIN_TOKENS, which the
 # vllm-server step exports from its own min_completion_length.
 #
-# 32 because the failure it prevents is an immediate EOS: an empty completion is a
-# rollout the teacher then scores as if it were one, and the run quietly becomes an
-# expensive way to score nothing. Its help text in CustomGOLDConfig names this exact
-# mode collapse.
-MIN_COMPLETION_LENGTH: 32
+# 0 MEANS THERE IS NO FLOOR, AND THAT IS THE STATE OF THE PINNED CODE RATHER THAN A
+# PREFERENCE. Neither half of this setting exists at the step's pin, checked against the
+# public repo at a5d59bc4 on 2026-09-28:
+#
+#   * the TRAINER half needs CustomGOLDConfig.min_completion_length, which is absent --
+#     and ce_anchor_and_entropy_guard.diff does not add it either, so unlike the CE anchor
+#     there is no patched checkout that would carry it;
+#   * the SERVER half, which is where the sampling decision is actually taken, needs
+#     run_vllm_serve.py to read GOLD_MIN_TOKENS and patch SamplingParams.min_tokens. That
+#     file at the pin is 108 lines and mentions none of the three.
+#
+# So a non-zero value here does not buy a floor, it buys two failures: train-gold refused by
+# render_gold_config's field check, and vllm-server refused by its own GOLD_MIN_TOKENS grep.
+# Both are loud and both land before the allocation -- the step's own message says to "set
+# min_completion_length 0 and accept that there is no floor", and that is what this does.
+#
+# WHAT IS NOW UNMITIGATED. The failure the floor prevented is an immediate EOS: an empty
+# completion is a rollout the teacher scores as if it were one, and the run becomes an
+# expensive way to score nothing. Nothing in the pinned code stops that, so it has to be
+# READ instead -- gen-smoke reports per rung, and a collapse to empty or repeated output
+# shows there first. Watch the first rung before letting a long arm run.
+#
+# To restore a real floor, both halves have to land in gb-steps-distillation and the pin has
+# to be bumped; a recipe parameter cannot do it alone.
+MIN_COMPLETION_LENGTH: 0
 # ─── The vLLM server ──────────────────────────────────────────────────
 # An EXTERNAL server in its own allocation, which is the topology that has actually run
 # (build 9973e766 synced all 362 parameter tensors across two allocations). The
@@ -445,62 +473,59 @@ OPD_IMPORTANCE_SAMPLING: false
 # reverse KL's mode-seeking half buys, and forward KL alone would spread a 350M
 # student thin across modes it cannot afford.
 BETA: 0.5
-# ─── The CE anchor, and the instruments ───────────────────────────────
-# All five need CODE_DIR above. Zeroing CE_COEF and ENTROPY_GUARD_DROP_FRAC
-# reproduces df8512e0's objective exactly, which is what makes the control arm a
-# control rather than an approximation.
+# ─── The CE anchor and the entropy guard: both off ────────────────────
+# OFF, AND THAT IS A RESULT rather than a default awaiting a value.
+#
+# The CE sweep is complete at four coefficients (0 / 0.05 / 0.15 / 0.40, read at step
+# 25 and step 300, 2026-09-28) and the dose-response is monotone-bad on two suites that
+# share no items. At step 300, as the coefficient rises: ifeval gain
+# +5.57 -> +4.04 -> +2.71 -> +2.56, and HumanEval +1 -> 0 -> -3 -> -9 problems. No
+# pairwise gap in that grid clears its own noise band -- the ORDERING is the finding,
+# and it has no interior optimum. ce015 was the last candidate for a usable middle and
+# it sits exactly where the trend predicts, so further rungs on this axis are not worth
+# GPU-hours.
+#
+# And the collapse the anchor was written to prevent turned out to be harmless.
+# df8512e0 did lose 42% of its student entropy over one epoch; once its export was
+# repaired (the dropped top-level rope_theta, fixed 2026-09-27) that same checkpoint
+# beat its own SFT baseline -- GSM8K +10.7, ifeval +7.4, Minerva +4.0, MGSM +3.1, with
+# HumanEval and BFCL level. The premise these keys were added under, "the objective is
+# wrong", is withdrawn. Longer, unanchored, off-policy is the best recipe on record.
+#
+# THE KEYS STAY, AT ZERO, rather than being deleted. Zero is what lets this recipe run
+# on the step's own public trainer pin: render_gold_config.py emits each of them only
+# when non-default, and emitting any one against a trainer that lacks the field makes
+# TrlParser reject the config on every node after the allocation is already held. And
+# the sweep left one question open -- no CE arm was ever measured for safety, which is
+# the only axis where the unanchored epoch went backwards (SALAD 93.5 -> 90.7, AttaQ
+# -1.2). If that experiment is run, it is --param CE_COEF=<x> plus a CODE_DIR pointing
+# at a patched checkout, and nothing else.
 #
 # loss = JSD(student || teacher) + CE_COEF * CE(student, corpus tokens)
+CE_COEF: 0.0
+# Mean student entropy and reverse KL in the trainer log, every logging_steps.
 #
-# 0.05, and the number is not arbitrary. The two terms differ by an order of
-# magnitude on this pair — JSD ran 0.068 and CE on an SFT'd student of this size runs
-# order 1 — so at 0.05 the anchor contributes ~0.05-0.15 against a divergence of
-# ~0.068: the same order, neither term ignorable. A convex (1-a)*JSD + a*CE at a=0.5
-# would be ~20x CE-dominated, which is SFT with a garnish, and that is why this is
-# ADDITIVE. Both terms are logged separately (loss and ce_anchor_loss), so the smoke
-# run's first steps confirm the ratio before 2 nodes are committed for 3.5 hours.
-#
-# What it buys: without a ground-truth term the objective has no opinion about real
-# text, so "become more confident" is a free way to score better. The CE term prices
-# it.
-CE_COEF: 0.05
-# Logs mean student entropy and reverse KL every step (logging_steps is 1 here).
-#
-# TRUE in BOTH arms, including the control. The metric is the instrument, not the
-# intervention, and the control's entropy curve is the evidence for what the anchor
-# prevented.
-LOG_STUDENT_ENTROPY: true
-# Stop when entropy falls 15% below a baseline measured over the first 20 steps.
-#
-# 15% because df8512e0 lost 42% in total and the decline was monotonic, so a 15%
-# threshold fires early in the descent rather than confirming the arrival. The stop is
-# graceful — checkpoint saved, exit 0 — but "export and eval still run" was only ever
-# true if the checkpoints they name exist, and with a FIXED ladder a stop mid-run means
-# they do not. Build d1acf1c0 tripped at step 77 of 2,000 and took all four export
-# targets down with it: checkpoint-500 through checkpoint-2000 were never written. That
-# is what ENTROPY_GUARD_ACTION below is for.
-#
-# ARMED HERE, AND OFF IN THE CONTROL ARM (--param ENTROPY_GUARD_DROP_FRAC=0). The
-# control is expected to collapse; stopping it early would cut the comparison short.
-# Letting it run all 2,000 steps is what makes the two arms readable at matched steps.
-ENTROPY_GUARD_DROP_FRAC: 0.15
-# 20 steps of baseline at effective batch 96 is ~1,920 rows, which is enough to
-# average out batch composition without waiting through the warmup ratio.
+# FALSE for pin reasons, not because the metric stopped mattering. It is one of the six
+# patch-gated fields, so leaving this true alone would hold CODE_DIR at a patched
+# checkout for an instrument. The quantity survives without it: distill-eval computes
+# entropy and rkld from a checkpoint with no trainer involvement (see EVAL_METRICS
+# below), and the eval-transfer targets read every checkpoint this recipe exports. What
+# is lost is resolution WITHIN a run, not the measurement.
+LOG_STUDENT_ENTROPY: false
+# 0 disables the guard, and disabling it changes no behaviour: ENTROPY_GUARD_ACTION has
+# been "warn" for as long as there has been a ladder, so the guard has only ever printed
+# the trip step and never ended a run. With the collapse now known not to damage the
+# model there is nothing left for it to warn about, and it is patch-gated like the two
+# keys above.
+ENTROPY_GUARD_DROP_FRAC: 0.0
+# INERT while ENTROPY_GUARD_DROP_FRAC is 0 -- the renderer emits this trio only when the
+# fraction is positive. Left at the values every sweep arm ran with, so re-arming the
+# guard alongside a CE arm is one --param and not a reconstruction.
 ENTROPY_GUARD_BASELINE_STEPS: 20
-# Three consecutive logs, so one unlucky batch cannot end a multi-hour job.
 ENTROPY_GUARD_PATIENCE: 3
-# WARN, NOT STOP, and the reason is what this recipe is FOR. The ladder at CKPT_LADDER
-# exists to measure how the collapse develops, so the trip step is the least useful
-# place to stop: d1acf1c0 stopped at 77 and answered nothing, while the control arm
-# (bb779f1f) ran to 2,000 and showed the collapse is complete by step ~500 — entropy
-# 0.714 -> 0.46, JSD and forward KL flat after 500, reverse KL never improving, BFCL
-# simple 0.0. That reading required the whole curve. MAX_STEPS already bounds the waste
-# the guard was written to prevent (~2.3h, against the 13h20 of df8512e0), so here the
-# trip is worth a loud line in the log and a checkpoint, not an early exit. Both modes
-# print the trip step and checkpoint it; only "stop" ends the run.
-#
-# Set this to "stop" for an unbounded or production run, where burning the horizon on a
-# student that has already narrowed is the thing to avoid.
+# "warn" rather than "stop", still, and for the same reason as before: a laddered recipe
+# wants the whole curve, and the trip step is the least useful place to end a run. Inert
+# while the fraction above is 0.
 ENTROPY_GUARD_ACTION: "warn"
 
 # granite's logits_scaling=10 overflows the fused bf16 JSD kernel and yields NaN

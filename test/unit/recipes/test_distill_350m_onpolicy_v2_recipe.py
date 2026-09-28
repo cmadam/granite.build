@@ -170,16 +170,34 @@ class TestTheTrainerActuallyUsesTheServer:
 
 
 class TestTheGenerationFloor:
-    def test_it_is_set_on_both_sides(self, on):
-        """Not redundancy. The trainer's copy bounds what it ASKS for; the server's is
-        where the sampling decision is taken, and trl's vllm_serve has no min_tokens
-        field, so run_vllm_serve.py patches SamplingParams from GOLD_MIN_TOKENS, which
-        the step exports from its own key."""
+    """There is none, and 0 is the state of the PINNED CODE rather than a preference.
+
+    The floor has two halves and the step's pin (a5d59bc4) carries neither, checked against
+    the public repo on 2026-09-28. The trainer half needs
+    CustomGOLDConfig.min_completion_length, which is absent -- and unlike the CE anchor keys,
+    ce_anchor_and_entropy_guard.diff does not add it, so no patched checkout carries it
+    either. The server half, which is where the sampling decision is actually taken, needs
+    run_vllm_serve.py to read GOLD_MIN_TOKENS and patch SamplingParams.min_tokens; that file
+    at the pin is 108 lines and mentions none of the three.
+
+    So a non-zero value buys two pre-allocation refusals -- render_gold_config's field check
+    and vllm-server's own GOLD_MIN_TOKENS grep -- rather than a floor.
+
+    WHAT IS UNMITIGATED: an immediate EOS. An empty completion is a rollout the teacher scores
+    as if it were one, and the run becomes an expensive way to score nothing. Nothing in the
+    pinned code reports it, so gen-smoke on the first rung is the read that has to replace it.
+    """
+
+    def test_neither_side_asks_for_a_floor_the_pin_cannot_deliver(self, on):
+        """Asserted as a value rather than tolerated either way: raising it is only correct
+        once both halves land upstream and the pin is bumped, and the cost of getting that
+        wrong is an arm that trains on empty completions with nothing saying so."""
+        assert int(_params()["MIN_COMPLETION_LENGTH"]) == 0
         assert (
-            int(_config(on, "train-gold")["gold_config"]["min_completion_length"]) > 0
+            int(_config(on, "train-gold")["gold_config"]["min_completion_length"]) == 0
         )
         assert (
-            int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]) > 0
+            int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]) == 0
         )
 
     def test_the_two_sides_agree(self, on):
@@ -188,7 +206,10 @@ class TestTheGenerationFloor:
         ) == (int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]))
 
     def test_the_step_exports_it_to_the_server_process(self):
-        """The recipe key is inert unless the step turns it into GOLD_MIN_TOKENS."""
+        """The recipe key is inert unless the step turns it into GOLD_MIN_TOKENS. Kept while
+        the floor is 0 because this is the half that has to survive for a future pin bump to
+        be a one-line change -- and because it is what makes vllm-server's refusal loud
+        rather than silent if someone raises the floor too early."""
         step = (
             _RECIPE.parents[3]
             / "configurations"
@@ -288,10 +309,31 @@ class TestItIsStage1V2PlusOnPolicy:
             f"({_params()['CKPT_LADDER']}) demands specific ones"
         )
 
-    def test_the_anchor_is_still_on(self, on):
-        """It matters more here, not less: on-policy training on a student's own
-        output is the regime where a collapse feeds itself."""
-        assert float(_config(on, "train-gold")["gold_config"]["ce_coef"]) > 0
+    def test_the_anchor_is_off_here_too(self, on):
+        """The anchor's stated rationale was STRONGEST in this regime -- on-policy
+        training on a student's own output is where a collapse could feed itself -- and
+        it is still off, because the evidence that retired it is the only evidence there
+        is. The CE sweep ran off-policy, so it says nothing about on-policy directly;
+        what it says is that non-zero CE costs capability in ordered amounts and that the
+        collapse it prevented damaged nothing. This arm starts where the evidence is.
+
+        If the on-policy entropy curve argues otherwise, CE_COEF is one --param plus a
+        CODE_DIR at a patched checkout -- and it must match the off-policy arm it is
+        compared against, which test_it_matches_the_off_policy_arm already enforces."""
+        gold = _config(on, "train-gold")["gold_config"]
+        assert float(gold.get("ce_coef", 0.0)) == 0.0
+        assert gold.get("log_student_entropy", False) is False
+        assert float(gold.get("entropy_guard_drop_frac", 0.0)) == 0.0
+
+    def test_the_two_code_config_overrides_are_the_steps_own_pin(self, on):
+        """train-gold and vllm-server both restate code_config, and with the anchor
+        retired both restate the step's PUBLIC pin rather than a /proj checkout. That is
+        what makes this recipe runnable off BlueVela -- and it is the pairing that goes
+        wrong quietly, since a patched trainer with an unpatched sampler is a floor that
+        never applies rather than a crash."""
+        assert _params()["CODE_DIR"] == ""
+        for name in ("train-gold", "vllm-server"):
+            assert _config(on, name)["code_config"]["code_dir"] == ""
 
     def test_the_effective_batch_is_unchanged_by_the_server_node(self):
         """The server has its own allocation, so GOLD_NUM_NODES still counts trainers
