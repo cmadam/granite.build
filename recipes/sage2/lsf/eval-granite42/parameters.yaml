@@ -13,6 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_TAU: "icr.io/tir-hew-sage2-evals/sage2-evals-tau:1b59d15"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +26,15 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── tau3-bench (tau3-bench, tau3-airline, tau3-retail, tau3-telecom, tau3-banking-knowledge)
+TAU_WORKERS: 16
+# Empty = data/tau2 of the tau2-bench commit pinned in sage2-evals (baked into the image).
+TAU_DATASET: ""
+# The user simulator (and retail's NL judge) default to aws/claude-sonnet-5 on the IBM
+# LiteLLM gateway: PAID, needs SAGE2_USER_API_KEY / SAGE2_JUDGE_API_KEY in the job env and
+# is metered against SAGE2_SPEND_LEDGER. "user_model=self judge_model=self" = no paid API.
+TAU_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
