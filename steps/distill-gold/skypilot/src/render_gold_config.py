@@ -24,10 +24,12 @@ producing an error, and each is handled badly by a shell heredoc:
   phase will reopen.
 
 * The trainer's newer keys must be ABSENT, not false, when unused. ``ce_coef``,
-  ``log_student_entropy`` and the entropy-guard trio only exist in the clone this
-  step pins (``kd_expect_ref``); emitting them unconditionally would make every
-  config here unreadable by any other kd-sandbox checkout, and TRL rejects unknown
-  top-level keys outright. Emitting them only when they are non-default also keeps
+  ``log_student_entropy`` and the entropy-guard trio are NOT at the commit
+  ``code_config`` pins by default; they need a checkout carrying
+  ``patches/ce_anchor_and_entropy_guard.diff``. Emitting them unconditionally would make
+  every config here unreadable by any other checkout, and TRL rejects unknown top-level
+  keys outright -- which is what ``--verify-trainer-accepts-keys`` turns into a refusal
+  that names the patch instead of a failure on a held allocation. Emitting them only when they are non-default also keeps
   the rendered config of every existing recipe byte-identical, which is what
   ``test_off_policy_key_set_is_exact`` asserts.
 
