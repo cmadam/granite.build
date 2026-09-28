@@ -13,6 +13,8 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:c62b2f8"
+SAGE2_IMAGE_IFBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-ifbench:c62b2f8"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +27,14 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── Chat & IF: MMLU-ProX lite (lm-eval), IFBench (NeMo-Skills) ───────
+# WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.
+# "languages=all", "max_tokens=8192" or "answers=gold" (mmlu-prox-lite only).
+MMLU_PROX_LITE_WORKERS: 128
+MMLU_PROX_LITE_OPTIONS: ""
+IFBENCH_WORKERS: 64
+IFBENCH_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"

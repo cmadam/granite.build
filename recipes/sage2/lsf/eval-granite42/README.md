@@ -10,6 +10,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | Target | Metric | Status |
 |---|---|---|
 | `swebench-verified` | pass@1[avg-of-3] resolve rate | implemented |
+| `mmlu-prox-lite` | exact match (custom-extract) | implemented (lm-eval, `SAGE2_IMAGE_LMEVAL`) |
+| `ifbench` | pass@1[avg-of-2] loose accuracy | implemented (NeMo-Skills + IFBench verifiers, `SAGE2_IMAGE_IFBENCH`) |
 | others | see `suites/granite42.yaml` | pending |
 
 ## Running
