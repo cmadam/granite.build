@@ -10,6 +10,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | Target | Metric | Status |
 |---|---|---|
 | `swebench-verified` | pass@1[avg-of-3] resolve rate | implemented |
+| `swebench-pro` | pass@1[avg-of-3] resolve rate | implemented |
+| `swebench-multilingual` | pass@1[avg-of-3] resolve rate | implemented |
 | others | see `suites/granite42.yaml` | pending |
 
 ## Running
