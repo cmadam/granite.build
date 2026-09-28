@@ -10,6 +10,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | Target | Metric | Status |
 |---|---|---|
 | `swebench-verified` | pass@1[avg-of-3] resolve rate | implemented |
+| `gdpval` | Elo (**approximation**: Elo-style score from the LLM-judged win rate vs the expert deliverables, expert = 1000; not GDPval-AA's Elo) | implemented (paid judge) |
+| `profbench` | overall (ProfBench-lite, LLM-judged rubrics) | implemented (paid judge) |
 | others | see `suites/granite42.yaml` | pending |
 
 ## Running
@@ -23,3 +25,8 @@ gb build start -f recipes/sage2/lsf/eval-granite42/build.yaml \
 
 Datasets are the public upstream ones, pinned by commit in sage2-evals. Gated
 datasets need `HF_TOKEN` as a space secret.
+
+`gdpval` and `profbench` call a paid LLM judge (default `aws/claude-sonnet-5` on IBM
+LiteLLM) and need its key in the job as `SAGE2_JUDGE_API_KEY`. Without a key, set
+`GDPVAL_OPTIONS` / `PROFBENCH_OPTIONS` to `judge_model=self` for a smoke run (the
+served model judges itself; results say `judge_is_self`).

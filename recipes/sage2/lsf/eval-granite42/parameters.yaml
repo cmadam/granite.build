@@ -13,6 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_JUDGED: "icr.io/tir-hew-sage2-evals/sage2-evals-judged:6e9906c"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -25,6 +26,23 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── LLM-judged benchmarks (judged image) ─────────────────────────────
+# The judge (default aws/claude-sonnet-5 on IBM LiteLLM) is paid and needs its key in
+# the job as SAGE2_JUDGE_API_KEY. "judge_model=self" in the options judges with the
+# served model instead (key-less smoke runs only).
+
+# ─── GDPval (Elo is an APPROXIMATION: win rate vs expert, not GDPval-AA) ─
+GDPVAL_WORKERS: 4
+# Empty = openai/gdpval at the commit pinned in sage2-evals.
+GDPVAL_DATASET: ""
+GDPVAL_OPTIONS: ""
+
+# ─── ProfBench ────────────────────────────────────────────────────────
+PROFBENCH_WORKERS: 16
+# Empty = nvidia/ProfBench at the commit pinned in sage2-evals.
+PROFBENCH_DATASET: ""
+PROFBENCH_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
