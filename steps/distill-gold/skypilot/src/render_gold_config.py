@@ -36,6 +36,7 @@ renders is a config the trainer can read.
 """
 
 import argparse
+import dataclasses
 import sys
 from typing import Any, Dict
 
@@ -435,11 +436,7 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # replaces it. Build df8512e0 ran the unanchored objective for 8,150 steps and
         # lost 42% of the student's entropy to it.
         **({"ce_coef": float(args.ce_coef)} if args.ce_coef > 0 else {}),
-        **(
-            {"log_student_entropy": True}
-            if args.log_student_entropy
-            else {}
-        ),
+        **({"log_student_entropy": True} if args.log_student_entropy else {}),
         **(
             {
                 "entropy_guard_drop_frac": float(args.entropy_guard_drop_frac),
@@ -453,7 +450,10 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # The two on-policy shaping keys, same rule. lmbda_init is meaningless unless the
         # schedule is linear, so the pair travels together.
         **(
-            {"lmbda_schedule": args.lmbda_schedule, "lmbda_init": float(args.lmbda_init)}
+            {
+                "lmbda_schedule": args.lmbda_schedule,
+                "lmbda_init": float(args.lmbda_init),
+            }
             if args.lmbda_schedule == "linear"
             else {}
         ),
@@ -551,6 +551,81 @@ def check_corpus_tokenizer(args: argparse.Namespace) -> None:
         raise ValueError(str(exc)) from exc
 
 
+# Keys this renderer can emit that upstream trl's GOLDConfig does not define. Every one of
+# them needs the DELIVERED trainer to carry the field, and the delivered trainer is whatever
+# code_config's pin resolves to -- which is not guaranteed to be the tree these keys were
+# written against. See patches/ce_anchor_and_entropy_guard.diff.
+_TRAINER_EXTENSION_KEYS = frozenset(
+    {
+        "ce_coef",
+        "log_student_entropy",
+        "entropy_guard_drop_frac",
+        "entropy_guard_baseline_steps",
+        "entropy_guard_patience",
+        "entropy_guard_action",
+        "lmbda_schedule",
+        "lmbda_init",
+        "min_completion_length",
+    }
+)
+
+
+def check_trainer_accepts(config: Dict[str, Any]) -> None:
+    """Refuse to emit a key the delivered trainer's dataclass does not define.
+
+    THE FAILURE THIS CATCHES COSTS AN ALLOCATION. TrlParser rejects unknown top-level keys
+    outright, so a config naming ce_coef against a trainer without the field dies after
+    accelerate has launched and the teacher has loaded on every node -- and the message names
+    a YAML key, not the reason, so it reads as a recipe typo rather than a trainer that
+    predates the key.
+
+    It is also the SILENT direction that matters: min_completion_length reaches the sampler
+    through run_vllm_serve's GOLD_MIN_TOKENS handling, and where the delivered code has
+    neither the field nor that handling, a floor the recipe asked for simply never applies.
+    The student is then free to emit an immediate EOS and the run collapses into empty
+    completions the teacher scores as if they were rollouts, with nothing in any log saying
+    the floor was dropped.
+
+    Checked against dataclasses.fields rather than a hardcoded list of "patched" commits, so
+    the check cannot drift from the trainer it is about: bump the pin to a tree that carries
+    the fields and this goes quiet on its own.
+
+    Off in this script's own argparse and ON in the step's config, for the same reason
+    check_corpus_tokenizer is: the step delivers the package on every run, while a direct
+    invocation (a unit test rendering a key in isolation) has no package to ask.
+    """
+    requested = sorted(_TRAINER_EXTENSION_KEYS & set(config))
+    if not requested:
+        return
+
+    try:
+        from gb_steps_post_training.distillation.custom_gold_config import (  # noqa: PLC0415
+            CustomGOLDConfig,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            f"this config emits {', '.join(requested)}, which only some trainers accept, but "
+            f"gb_steps_post_training is not importable ({exc}) so that cannot be checked. "
+            "The package reaches this container through code_config's clone, normally exported "
+            "onto PYTHONPATH by the step's run block -- either run this through the step, or "
+            "set gold_config.verify_trainer_accepts_keys false to skip the check deliberately"
+        ) from exc
+
+    known = {f.name for f in dataclasses.fields(CustomGOLDConfig)}
+    missing = [key for key in requested if key not in known]
+    if missing:
+        raise ValueError(
+            f"the delivered trainer's CustomGOLDConfig has no field(s) "
+            f"{', '.join(missing)}, so emitting them would make TrlParser reject this config "
+            "on every node after the allocation is already held. The trainer comes from "
+            "code_config (see the step's step-template.yaml); to use these keys, point "
+            "code_config.code_dir at a checkout carrying "
+            "steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff -- its "
+            "header has the exact patch invocation and the directory remap it needs. To run "
+            "without them, leave the corresponding gold_config keys at their defaults"
+        )
+
+
 def _bool(value: str) -> bool:
     """Parse a YAML-ish boolean from the step's shell-rendered arguments."""
     lowered = str(value).strip().lower()
@@ -630,8 +705,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
         "--entropy-guard-action",
         default="stop",
         help="What a tripped guard does: stop the run at that step, or warn and carry "
-             "on to max_steps. Use warn when the run's purpose is the collapse curve "
-             "itself and a fixed export ladder needs every rung to exist.",
+        "on to max_steps. Use warn when the run's purpose is the collapse curve "
+        "itself and a fixed export ladder needs every rung to exist.",
     )
     p.add_argument(
         "--lmbda-schedule",
@@ -655,6 +730,16 @@ def _parse_args(argv=None) -> argparse.Namespace:
             + ". EMPTY BY DEFAULT, which leaves the standalone loss flags authoritative and "
             "the rendered config unchanged. Naming an arm sets its switches and enforces its "
             "requirements, and disagreeing with a standalone flag is then an error"
+        ),
+    )
+    p.add_argument(
+        "--verify-trainer-accepts-keys",
+        type=_bool,
+        default=False,
+        help=(
+            "check every emitted key that upstream GOLDConfig does not define against the "
+            "delivered CustomGOLDConfig, and refuse rather than letting TrlParser reject the "
+            "config on a held allocation. Needs gb_steps_post_training importable."
         ),
     )
     p.add_argument(
@@ -697,6 +782,10 @@ def main(argv=None) -> int:
         if args.check_corpus_tokenizer:
             check_corpus_tokenizer(args)
         config = build_config(args)
+        # After build_config, because it is the EMITTED key set that matters: a key left at
+        # its default is never emitted and so never needs the trainer to know it.
+        if args.verify_trainer_accepts_keys:
+            check_trainer_accepts(config)
     except ValueError as e:
         print(f"render_gold_config: {e}", file=sys.stderr)
         return 2

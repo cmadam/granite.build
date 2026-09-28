@@ -175,13 +175,17 @@ class TestTheGenerationFloor:
         where the sampling decision is taken, and trl's vllm_serve has no min_tokens
         field, so run_vllm_serve.py patches SamplingParams from GOLD_MIN_TOKENS, which
         the step exports from its own key."""
-        assert int(_config(on, "train-gold")["gold_config"]["min_completion_length"]) > 0
-        assert int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]) > 0
+        assert (
+            int(_config(on, "train-gold")["gold_config"]["min_completion_length"]) > 0
+        )
+        assert (
+            int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]) > 0
+        )
 
     def test_the_two_sides_agree(self, on):
-        assert int(_config(on, "train-gold")["gold_config"]["min_completion_length"]) == (
-            int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"])
-        )
+        assert int(
+            _config(on, "train-gold")["gold_config"]["min_completion_length"]
+        ) == (int(_config(on, "vllm-server")["vllm_config"]["min_completion_length"]))
 
     def test_the_step_exports_it_to_the_server_process(self):
         """The recipe key is inert unless the step turns it into GOLD_MIN_TOKENS."""
@@ -247,14 +251,30 @@ class TestItIsStage1V2PlusOnPolicy:
             "MAX_LENGTH",
             "TARGET_ROWS",
             "GOLD_LEARNING_RATE",
-            "KD_CODE_DIR",
-            "KD_EXPECT_REF",
+            "CODE_DIR",
+            "CODE_EXPECT_REF",
             "NCCL_DEBUG",
             "CORPUS_DIR",
         ],
     )
     def test_it_matches_the_off_policy_arm(self, key):
         assert _params()[key] == _params(_OFFPOLICY)[key], key
+
+    def test_the_trainer_and_the_server_read_the_same_revision(self, on):
+        """On-policy is the arm where this can go wrong quietly. train-gold runs the trainer
+        and vllm-server runs run_vllm_serve out of the SAME package, so two different
+        checkouts would pair a patched trainer with an unpatched sampler -- and the symptom is
+        not a crash, it is a floor that never applies and completions the teacher scores as
+        rollouts. Both override the shared steps pin (see the off-policy arm's test for why
+        that is allowed at all); this asserts they agree."""
+        overrides = {}
+        for name, target in _targets(on).items():
+            for step in target["steps"]:
+                if "code_config" in step.get("config", {}):
+                    overrides[name] = step["config"]["code_config"]
+        assert set(overrides) == {"train-gold", "vllm-server"}, overrides
+        distinct = {tuple(sorted(c.items())) for c in overrides.values()}
+        assert len(distinct) == 1, f"trainer and server disagree: {overrides}"
 
     def test_a_stopping_guard_and_a_fixed_ladder_cannot_both_be_asked_for(self, on):
         """Build d1acf1c0 hit this in the off-policy arm -- guard tripped at step 77 of
@@ -285,7 +305,6 @@ class TestItIsStage1V2PlusOnPolicy:
             * p["GOLD_NUM_GPUS"]
         )
         assert product == 96
-
 
 
 # ─── The generation smoke test ─────────────────────────────────────────────────
@@ -349,6 +368,7 @@ class TestGenSmoke:
                     f"block tag renders to a blank line and ends the command:\n"
                     f"  {line}\n  {lines[i + 1]}"
                 )
+
 
 def test_the_student_default_cannot_silently_train_the_wrong_model():
     """On-policy continues from a good off-policy checkpoint. A plausible-looking
@@ -428,7 +448,9 @@ class TestTheCorpusPin:
         and the server would wait on a check it has nothing to do with."""
         assert "corpus" not in (_targets(pinned)["vllm-server"].get("inputs") or {})
 
-    def test_the_pin_check_is_byte_identical_to_the_off_policy_arm(self, pinned, tmp_path):
+    def test_the_pin_check_is_byte_identical_to_the_off_policy_arm(
+        self, pinned, tmp_path
+    ):
         """Rather than duplicate the off-policy arm's six behavioural tests of the
         script, assert the script is the same script. Those tests then cover this
         recipe too, and a fix applied to one arm cannot silently miss the other."""

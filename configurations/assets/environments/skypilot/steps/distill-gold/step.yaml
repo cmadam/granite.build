@@ -139,10 +139,16 @@ config:
     use_liger_fused_jsd: false
 
     # ── The CE anchor, and the instruments that watch for its absence ────────
-    # All five need a kd_code_dir carrying the ce_anchor_and_entropy_guard patch
-    # (patches/ce_anchor_and_entropy_guard.diff). They are rendered into the
-    # trainer's config ONLY when non-default, so a recipe that leaves them alone
-    # still runs against any kd-sandbox checkout.
+    # All five need the DELIVERED trainer to carry the ce_anchor_and_entropy_guard patch
+    # (patches/ce_anchor_and_entropy_guard.diff, whose header has the invocation and the
+    # directory remap). That trainer now comes from code_config, and the default pin does
+    # NOT carry the patch -- so a recipe using these keys points code_config.code_dir at a
+    # checkout that does, as recipes/granite4-350m/lsf/distill-stage1-v2 does.
+    #
+    # They are rendered into the trainer's config ONLY when non-default, so a recipe that
+    # leaves them alone runs against any checkout. When one does not,
+    # verify_trainer_accepts_keys below is what turns "TrlParser rejected your config after
+    # the allocation was held" into a refusal that names the patch.
     #
     # ce_coef ADDS cross entropy on the corpus tokens to the divergence:
     #   loss = divergence + ce_coef * CE(student, labels)
@@ -189,6 +195,21 @@ config:
     # a mismatch does not error -- it trains on mis-segmented text at full speed with a
     # falling loss.
     check_corpus_tokenizer: false
+    # Check every key this step is about to emit that upstream trl's GOLDConfig does not
+    # define (the CE anchor, the collapse guard, the on-policy shaping pair) against the
+    # DELIVERED trainer's dataclass, and refuse before accelerate launches.
+    #
+    # ON by default, and that default is the point: code_config's pin is not guaranteed to
+    # carry those fields -- at a5d59bc4 it carries lmbda_schedule and not ce_coef -- and the
+    # two ways it goes wrong are both expensive. TrlParser rejects an unknown top-level key
+    # only after the teacher has loaded on every node of a held allocation, and
+    # min_completion_length fails the other way, silently, by never reaching the sampler at
+    # all. Costs one import of a package the run block already puts on PYTHONPATH.
+    #
+    # It only looks at keys that are actually emitted, so a recipe leaving all of them at
+    # their defaults never triggers it. Set false only to render deliberately against a
+    # trainer you know differs.
+    verify_trainer_accepts_keys: true
     # Required for completion masking; the nothink chat template has no
     # {% generation %} tag, so this is what locates the span.
     #
@@ -543,6 +564,7 @@ environment_configs:
               --lmbda-init {{ config.gold_config.lmbda_init | default(0.0) }} \
               --min-completion-length {{ config.gold_config.min_completion_length | default(0) }} \
               --loss-arm "{{ config.gold_config.loss_arm }}" \
+              --verify-trainer-accepts-keys {{ config.gold_config.verify_trainer_accepts_keys | default(true) }} \
               --check-corpus-tokenizer {{ config.gold_config.check_corpus_tokenizer }} \
               --response-template '{{ config.gold_config.response_template }}' \
               --vllm-num-servers {{ config.gold_config.vllm_num_servers }} \

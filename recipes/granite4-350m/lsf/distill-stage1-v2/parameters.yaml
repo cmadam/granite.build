@@ -124,16 +124,20 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # and the guard below have nothing to act on — the keys would render and the trainer
 # would reject the config, which is the loud failure and the one to want.
 #
-# The diff ships at steps/gold-distill/skypilot/patches/ce_anchor_and_entropy_guard.diff
+# The diff ships at steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
 # with its base commit stated, so this checkout can be rebuilt from scratch. Offer it
-# upstream; when it lands, move this back and drop KD_EXPECT_REF.
-KD_CODE_DIR: "/proj/granite-build/g4os/kd-sandbox-gb"
+# upstream; when it lands, point CODE_DIR back at "" and drop CODE_EXPECT_REF.
+CODE_DIR: "/proj/granite-build/g4os/gb-steps-distillation-gb"
 # The full 40-char commit that checkout must be at, and be clean at. Empty would
 # disable the check; it is set here because a run whose objective differs from
 # df8512e0's is worth nothing if the code that implemented the difference is
 # unrecorded. The step fails in seconds on a mismatch or a dirty tree.
-KD_EXPECT_REF: "09deff2bf1892ec572b3df2fe7a77bc639b2e1f8"
-DS_CONFIG: "configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+# EMPTY UNTIL THE CHECKOUT ABOVE EXISTS. Empty disables the HEAD check, which is
+# safe here only because render_gold_config.py refuses outright when the delivered
+# trainer lacks the fields these keys render -- so a checkout without the patch
+# fails loudly either way. Fill it in once built, to get the dirty-tree check too.
+CODE_EXPECT_REF: ""
+DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # The five ported steps read their own code from a separate pinned checkout,
 # declared by each step's code_config (code_dir plus expect_ref) rather than
 # here — so a source bump is one edit in the step, not one per recipe.
@@ -389,7 +393,7 @@ LMBDA: 0.0
 # student thin across modes it cannot afford.
 BETA: 0.5
 # ─── The CE anchor, and the instruments ───────────────────────────────
-# All five need KD_CODE_DIR above. Zeroing CE_COEF and ENTROPY_GUARD_DROP_FRAC
+# All five need CODE_DIR above. Zeroing CE_COEF and ENTROPY_GUARD_DROP_FRAC
 # reproduces df8512e0's objective exactly, which is what makes the control arm a
 # control rather than an approximation.
 #

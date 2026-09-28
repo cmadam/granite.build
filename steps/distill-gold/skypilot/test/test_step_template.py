@@ -518,7 +518,10 @@ class TestCeAnchorFlagsReachTheRenderer:
     )
     def test_each_flag_reads_its_own_key(self, run_script, flag, key):
         pattern = re.compile(
-            re.escape(flag) + r'\s+"?\{\{\s*config\.gold_config\.' + re.escape(key) + r'\b'
+            re.escape(flag)
+            + r'\s+"?\{\{\s*config\.gold_config\.'
+            + re.escape(key)
+            + r"\b"
         )
         assert pattern.search(run_script), f"{flag} is not wired to {key}"
 
