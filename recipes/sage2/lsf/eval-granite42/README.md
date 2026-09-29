@@ -14,6 +14,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | `swebench-multilingual` | pass@1[avg-of-3] resolve rate | implemented |
 | `terminal-bench-2.1` | pass@1[avg-of-8] resolve rate | implemented |
 | `birdbench` | pass@1 execution match | implemented |
+| `tau3-bench` | pass@1 (avg of 3): mean pass^1 of airline, retail, telecom | implemented |
+| `tau3-airline` / `tau3-retail` / `tau3-telecom` / `tau3-banking-knowledge` | pass@1 (pass^1, 4 trials) | implemented |
 | `bfcl-v4` | overall_accuracy accuracy (web search via IBM search MCP) | implemented |
 | `aime25`, `hmmt-feb25` | pass@1[avg-of-4] symbolic correct | implemented (NeMo-Skills, `SAGE2_IMAGE_NEMOSKILLS`) |
 | `gpqa` (Diamond) | pass@1[avg-of-2] symbolic correct | implemented (NeMo-Skills; gated data, needs `HF_TOKEN`) |
@@ -45,3 +47,11 @@ on). With `RULER_128K_OPTIONS=""` the run stops before building data and names b
 
 Datasets are the public upstream ones, pinned by commit in sage2-evals. Gated
 datasets need `HF_TOKEN` as a space secret.
+
+The tau3 targets call a PAID user simulator (and, for retail, an NL-assertion judge):
+`aws/claude-sonnet-5` on the IBM LiteLLM gateway by default, which needs
+`SAGE2_USER_API_KEY` / `SAGE2_JUDGE_API_KEY` in the job env; calls are metered against
+`SAGE2_SPEND_LEDGER` / `SAGE2_SPEND_BUDGET_USD`. `--param TAU_OPTIONS="user_model=self
+judge_model=self"` uses the served model instead (no key, not comparable with published
+numbers). `tau3-bench` runs the three core domains itself, so running it together with
+`tau3-airline`/`-retail`/`-telecom` pays for those simulations twice.
