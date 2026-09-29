@@ -61,6 +61,18 @@ config:
     # How long to wait for /health before giving up. The reference launcher allows
     # 1800s: a cold multi-GB load plus CUDA graph capture is minutes, and on a
     # shared filesystem the first read is the slow one.
+    # Minimum tokens the student must generate before EOS is allowed, enforced on
+    # THIS side of the on-policy loop. 0 = off.
+    #
+    # It has to be set here as well as on the trainer, and that is not redundancy:
+    # distill-gold's min_completion_length only bounds what the TRAINER asks for, while
+    # the sampling decision is taken in this process. trl's vllm_serve has no
+    # min_tokens field, so run_vllm_serve.py monkey-patches SamplingParams from
+    # GOLD_MIN_TOKENS, which this step exports from the value below. Left at 0 while
+    # the trainer sets a floor, the student is free to emit an immediate EOS and the
+    # run collapses into empty completions the teacher then scores as if they were
+    # rollouts.
+    min_completion_length: 0
     health_timeout_seconds: 1800
     health_poll_seconds: 10
     # Ceiling on how long this SERVICE will hold its allocation once healthy.
@@ -131,6 +143,32 @@ environment_configs:
               git -C "$CODE_DIR" checkout --quiet "$REF"
             fi
             export PYTHONPATH="$CODE_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+            # run_vllm_serve.py reads this and raises SamplingParams.min_tokens to it
+            # for every request, which is the only place a floor can be applied: the
+            # trainer's own min_completion_length does not travel with a served
+            # request.
+            export GOLD_MIN_TOKENS="{{ config.vllm_config.min_completion_length | default(0) }}"
+            # And refuse if the delivered server cannot act on it. This export is the whole
+            # mechanism -- there is no other place a floor can be applied -- so against a
+            # revision of run_vllm_serve that does not read the variable it is a no-op that
+            # LOOKS configured: the step logs the floor, the server ignores it, and the run
+            # collapses into immediate-EOS completions the teacher scores as rollouts. At the
+            # pin this step defaults to (a5d59bc4) the handling is absent, which is why this
+            # is a check and not a comment. Grepped rather than imported: run_vllm_serve
+            # execs a server at import time, so asking Python would start one.
+            if [ "$GOLD_MIN_TOKENS" != "0" ]; then
+              SERVE_SRC="$CODE_DIR/src/gb_steps_post_training/distillation/run_vllm_serve.py"
+              if ! grep -q "GOLD_MIN_TOKENS" "$SERVE_SRC" 2>/dev/null; then
+                echo "vllm-server: FATAL: vllm_config.min_completion_length is $GOLD_MIN_TOKENS," >&2
+                echo "  but the delivered $SERVE_SRC does not read GOLD_MIN_TOKENS, so the floor" >&2
+                echo "  would silently never reach SamplingParams.min_tokens and the student could" >&2
+                echo "  emit an immediate EOS on every rollout." >&2
+                echo "  Either point code_config at a checkout whose run_vllm_serve honours it, or" >&2
+                echo "  set min_completion_length 0 and accept that there is no floor." >&2
+                exit 1
+              fi
+            fi
 
             GPUS="${NUM_GPUS_PER_NODE:-8}"
             PORT="{{ config.vllm_config.port }}"

@@ -1,23 +1,36 @@
-# distill-stage1 — off-policy GOLD distillation of the granite-4.0-350m SFT
-# checkpoint towards a granite-4.1-3b teacher, on BlueVela (SkyPilot / LSF).
+# distill-stage1-v2 — off-policy GOLD distillation of the granite-4.0-350m SFT
+# checkpoint towards a granite-4.1-3b teacher, anchored and instrumented, on BlueVela.
 #
-# THE REAL RUN. distill-smoke is this recipe's shape at 64 rows and 2 steps; run it
-# first. The baseline this is measured against is the EXISTING after-SFT eval row,
-# which is why the student is the SFT checkpoint and there is no control arm.
+# SUPERSEDED. READ THE README BEFORE RUNNING THIS.
 #
-# SUPERSEDED BY distill-stage1-v2, which is what to run. This configuration produced
-# build df8512e0: a clean 13h20 run and a model worse on all 30+ benchmarks measured.
+# This recipe was written to fix a broken run. It was not broken. distill-stage1's
+# build df8512e0 read as worse on every benchmark because its EXPORT dropped the
+# model's top-level rope_theta, so vLLM served a 10M-theta model at 10k; the weights
+# were always sound. With that repaired (2026-09-27) the same checkpoint BEATS its own
+# SFT baseline: GSM8K +10.7, ifeval +7.4, Minerva +4.0, MGSM +3.1. The four-coefficient
+# CE sweep then showed the anchor this recipe was built around is monotone-bad on
+# capability. The premise is withdrawn, and with it the reason this file existed.
 #
-# The paragraph that stood here was the smoke recipe's, inherited by copy and never
-# rewritten: it described a plumbing check over 48 rows whose numbers were not a
-# measurement. That was false of this file the moment TARGET_ROWS became 800,000, and
-# three comments further down were false in the same way -- they are corrected below
-# rather than deleted, because each one misdescribes a value that is load-bearing.
+# WHAT TO RUN INSTEAD. For a full epoch, distill-stage1. For "is there a good
+# checkpoint earlier than one epoch", distill-checkpoint-eval with a shorter horizon:
+# --param GOLD_MAX_STEPS / GOLD_SAVE_STEPS / CKPT_LADDER / STUDENT_MODEL are the four
+# knobs, and it puts every rung through the full 27-eval suite rather than divergence
+# reads alone. This recipe's only remaining distinction is that it is cheaper and reads
+# less.
+#
+# WHAT IT IS STILL GOOD FOR: the CE arms of the completed sweep were run from here, and
+# the safety-retention question the sweep left open would be too. CE_COEF and the
+# entropy guard are still wired, at zero — see their comment for the one --param that
+# re-arms them and the patched trainer it needs.
+#
+# The baseline remains the EXISTING after-SFT eval row (sft-epoch2-tokpinned-r1).
+#
+# Run distill-probe and distill-smoke first; they gate this.
 #
 # Override any value with: gb build start --param KEY=VALUE
 
 # ─── Run identification ───────────────────────────────────────────────
-RUN_NAME: "distill-350m-stage1"
+RUN_NAME: "distill-350m-stage1-v2"
 # The shared root every composed path hangs off. Absolute, and that is forced
 # rather than chosen: the eval targets have to name the corpus split, and each
 # target run gets its own GB_BUILD_WORKDIR. Its own directory under gbtest so a
@@ -35,8 +48,7 @@ WORKDIR_ROOT: "/proj/granite-build/g4os/distill"
 # skipped target's stored outputs as bindings: a target with no stored outputs
 # propagates nothing, its consumers never become ready, and the build reports
 # SUCCESS having silently skipped them. That is what build b5f030cd did — it
-# reported SUCCESS with eval-transfer still FAILED and eval-bfcl (the final eval
-# then; since replaced by eval-swebench-verified) never started.
+# reported SUCCESS with eval-transfer still FAILED and eval-bfcl never started.
 #
 # run_metadata.build_id is filled by gbserver per step, and every target in one
 # build fills the same value, so the root stays shared within a build. The Jinja
@@ -48,6 +60,42 @@ WORKDIR_ROOT: "/proj/granite-build/g4os/distill"
 # directory across builds — and expect the artifact collision above.
 BUILD_SUBDIR: "{{ run_metadata.build_id }}"
 SEED: 42
+
+# ─── Reusing an existing corpus ───────────────────────────────────────
+# Empty means "build the corpus in this build", which is what every run before
+# this parameter did: `sources` reservoir-samples the three SFT splits and
+# `corpus` prepares them. Together that is ~50 minutes on the CRITICAL PATH --
+# train-gold cannot start until it finishes -- and it is deterministic. The
+# CE_COEF sweep proved it: the three arms that completed (9dab9130, 8c8ebd63,
+# c20ed3c0) wrote byte-identical sources/train.jsonl, corpus/train.jsonl and
+# corpus/eval.jsonl. A four-arm sweep therefore paid for the same file four times.
+#
+# Set this to an existing corpus directory and `sources` and `corpus` do not run
+# at all; the consumers read that directory DIRECTLY as a `uri` input instead of
+# through a `binding`. Direct is the only form that works across builds:
+#
+#   * gbserver's target reuse is scoped to ONE build id (docs/builds/target-reuse.md
+#     is explicit that cross-build reuse is intentionally unsupported), so it only
+#     ever helps a retry -- and RUN_NAME is in the corpus out_dir, so a per-arm
+#     RUN_NAME changes the definition hash and defeats even that;
+#   * pinning BUILD_SUBDIR instead would make the second build re-register a URI
+#     the first already owns. That is the b5f030cd mode: gbserver refuses the
+#     registration, the target still reports SUCCESS with an EMPTY output list,
+#     and every consumer waits forever for a binding that will never resolve;
+#   * a `binding` names another target's output IN THIS BUILD, so it cannot name a
+#     corpus that a different build produced.
+#
+#   --param CORPUS_DIR=/proj/granite-build/g4os/distill/<run>/<build-id>/corpus
+#
+# The directory must hold train.jsonl, eval.jsonl and corpus_manifest.json.
+#
+# The corpus is DEFINED by the retagged tokenizer and by the prep policies, so a
+# pin taken from a run with a different teacher, a different max_length or a
+# different think/documents policy would train on a corpus this build does not
+# describe -- and nothing downstream would say so. That is the one new silent
+# failure mode pinning introduces, so corpus-pin-check reads the manifest and
+# fails before any allocation is held. It is CPU-only and takes seconds.
+CORPUS_DIR: ""
 
 # ─── The SFT arm ──────────────────────────────────────────────────────
 # Off by default: the shortest path through the pipeline is the one to prove
@@ -64,15 +112,39 @@ INCLUDE_SFT: false
 # ─── Image and trainer code ───────────────────────────────────────────
 # One image for every distillation step (each step's own default is this same
 # image; naming it here makes the pin visible and overridable in one place). The
-# eval-swebench-verified target is deliberately NOT given it — that step runs
-# its own sage2-evals image (SAGE2_IMAGE_SWEBENCH).
+# BFCL target is deliberately NOT given it — that step runs its own harness
+# image.
 # SM90 (H100) build; it will not run on A100.
 IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
-# The GOLD trainer (gb_steps_post_training.distillation.gold and friends) is
-# delivered by distill-gold's own code_config, the same pinned public-repo
-# clone every ported step uses — so a source bump is one edit in the step,
-# not one per recipe.
+# The GOLD trainer: the step's own public pin, which is the default again.
+#
+# EMPTY means the step clones github.com/laminair/gb-steps-distillation at the commit
+# its own code_config pins, which resolves on any environment class that can reach
+# github.com. This recipe used to override it with a local checkout at
+# /proj/granite-build/g4os/gb-steps-distillation-gb carrying
+# patches/ce_anchor_and_entropy_guard.diff, because CE_COEF and the entropy guard need
+# trainer fields the public pin does not define. Both are off now -- see CE_COEF below
+# for the sweep that retired them -- so nothing patch-gated renders, the override has
+# no purpose left, and this recipe runs the same trainer as every other distillation
+# recipe here, on any cluster rather than only on BlueVela.
+#
+# To re-arm either key, point this at a checkout carrying that patch and set
+# CODE_EXPECT_REF to its HEAD; the diff header states its base commit and the directory
+# remap it needs. render_gold_config.py refuses to emit a patch-gated key against a
+# trainer whose CustomGOLDConfig lacks the field, so the wrong combination fails in
+# seconds instead of after the allocation is held.
+CODE_DIR: ""
+# The full 40-char commit CODE_DIR must be at, and be clean at. Consulted ONLY on the
+# CODE_DIR path: the clone path checks out code_config.ref by construction, so there is
+# nothing there for this to catch. Empty is therefore the right value while CODE_DIR is
+# empty, and the value to fill in the moment one is set -- it is what turns a mutable
+# shared checkout back into a recorded provenance, and it brings the dirty-tree check
+# with it.
+CODE_EXPECT_REF: ""
 DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
+# The five ported steps read their own code from a separate pinned checkout,
+# declared by each step's code_config (code_dir plus expect_ref) rather than
+# here — so a source bump is one edit in the step, not one per recipe.
 
 # ─── The pair, the data, and the chat template ────────────────────────
 # granite-4.1-3b, via a PINNED-TOKENIZER copy rather than the model directory.
@@ -212,15 +284,78 @@ DOCUMENTS_POLICY: "keep"
 # every time the subset changes -- and a stale step count is how a run silently
 # covers a quarter of its corpus.
 #
-# One epoch over 800,000 rows at effective batch 96 is ~8,333 steps.
-GOLD_MAX_STEPS: 0
+# One epoch over 800,000 rows at effective batch 96 is ~8,333 steps. v2 does not run
+# one: it runs 2,000 steps, and the epoch count below is inert (max_steps overrides
+# num_train_epochs in the trainer, and the renderer only emits max_steps when > 0).
+#
+# 2,000 because that is what the headroom supports. df8512e0 measured it: initial JSD
+# 0.0825 against a ln2 = 0.693 ceiling, so ~12% of maximum divergence to close, and
+# ~68% of the total realisable gain landed in the first 509 steps. Over the remaining
+# 7,640 the loss moved 2.7% while the student lost 42% of its entropy. An
+# epoch-bounded run therefore spends three quarters of a 13-hour allocation in the
+# region where there is nothing left to learn and sharpening is the only direction
+# left.
+#
+# 300, NOT 2,000, AND THE CONTROL ARM IS WHY. Build bb779f1f ran the unanchored
+# objective for the full 2,000 steps with the guard off, and its per-step entropy puts
+# the entire collapse inside the first ~250:
+#
+#     steps    1-20   0.7136 nats   (baseline)
+#     steps   21-50   0.6925         -3.0%
+#     steps   51-80   0.5778        -19.0%
+#     steps  81-120   0.5013        -29.7%
+#     steps 181-250   0.4701        -34.1%
+#     steps 1981-2000 0.4605        -35.5%   <- 2,000 steps to gain a further 1.4%
+#
+# The transfer metrics agree: JSD 0.0828 -> 0.0705 by step 500 and flat after, forward
+# KL -31% by 500 and flat after, reverse KL never improving at all. So steps 300-2,000
+# were 85% of the allocation buying 1.4% more entropy loss and no divergence movement.
+# 300 covers the steep region (roughly steps 40-120) and the shoulder, at ~30 min on
+# 2x8 H100 instead of ~3.5 h -- which is what makes a CE_COEF sweep affordable.
+#
+# This deliberately reverses distill-stage1-v2's original reasoning ("four times the
+# step-509 knee"). That was written before any arm had been measured; the step-509
+# figure came from df8512e0, whose knee was late because its corpus was larger. The
+# control's own curve is the better authority and it says the knee here is nearer 80.
+GOLD_MAX_STEPS: 300
 GOLD_NUM_TRAIN_EPOCHS: 1.0
-# Every 1000 steps: eight intermediate checkpoints over an 8,333-step run, which
-# turns one end-point number into a learning curve and gives a preemption something
-# to resume from. Each is large -- ZeRO-3 shards carry fp32 optimizer state -- hence
-# the limit.
-GOLD_SAVE_STEPS: 1000
-GOLD_SAVE_TOTAL_LIMIT: 3
+# Which checkpoints get exported, transfer-evaluated and generation-checked. Drives a
+# Jinja loop in build.yaml, so this list IS the target graph: seven rungs means seven
+# export targets, seven eval-transfer targets and seven eval-bfcl targets.
+#
+# WEIGHTED TOWARDS THE DESCENT, because that is the whole object of study. The control
+# loses 19% of its entropy by step 80 and 30% by 120, and the guard trips at 49
+# (unanchored, replayed) to 77 (CE_COEF 0.05) -- so 25/50/75/100 bracket the trip from
+# both sides and 150/200/300 follow the shoulder out. The old 500/1000/1500/2000 put
+# every rung on the plateau, which is why two builds produced no capability reading
+# anywhere in the region where all the movement happens.
+#
+# Every entry must be a multiple of GOLD_SAVE_STEPS, or the export names a
+# checkpoint-N directory the trainer never wrote and the target fails after training
+# has been paid for. The recipe test asserts that, and that the last rung equals
+# GOLD_MAX_STEPS.
+CKPT_LADDER: "25,50,75,100,150,200,300"
+# Every 250 steps, and KEEP THEM ALL. This pair is what made df8512e0
+# unsalvageable: save_steps 250 with save_total_limit 3 retained checkpoint-7750,
+# -8000 and -8150 out of 8,150 — the last 750 steps of a run whose good stopping point
+# was somewhere near step 500. Every checkpoint from the healthy region had been
+# deleted by the time anyone knew there was a healthy region, so the collapse could
+# not be bisected and the run had to be repeated in full.
+#
+# It is exactly backwards for an exploratory run: the checkpoints worth keeping are
+# the EARLY ones. 12 checkpoints at 4.7 G each is ~56 G against 21 T free on
+# /proj/data-eng — a rounding error next to a 16-GPU allocation. The limit is 16
+# rather than 12 so a guard trip's extra save, or a resume, cannot start evicting.
+#
+# 25 rather than 250: at GOLD_MAX_STEPS 300 a 250-step grid would write exactly one
+# scheduled checkpoint. 25 resolves the descent the run exists to measure, and it is
+# what lets CKPT_LADDER put four rungs inside the first 100 steps.
+#
+# save_steps is still finer than CKPT_LADDER on purpose: the ladder decides what gets
+# EVALUATED, this decides what SURVIVES. If the guard trips between two rungs, the
+# 25-step grid is what makes the stopping point recoverable.
+GOLD_SAVE_STEPS: 25
+GOLD_SAVE_TOTAL_LIMIT: 16
 # Effective batch = per_device x grad_accum x nodes x gpus = 2 x 3 x 2 x 8 = 96.
 #
 # 96 rather than the reference's 192: that was tuned for a 3B student at 16384
@@ -261,6 +396,61 @@ LMBDA: 0.0
 # reverse KL's mode-seeking half buys, and forward KL alone would spread a 350M
 # student thin across modes it cannot afford.
 BETA: 0.5
+# ─── The CE anchor and the entropy guard: both off ────────────────────
+# OFF, AND THAT IS A RESULT rather than a default awaiting a value.
+#
+# The CE sweep is complete at four coefficients (0 / 0.05 / 0.15 / 0.40, read at step
+# 25 and step 300, 2026-09-28) and the dose-response is monotone-bad on two suites that
+# share no items. At step 300, as the coefficient rises: ifeval gain
+# +5.57 -> +4.04 -> +2.71 -> +2.56, and HumanEval +1 -> 0 -> -3 -> -9 problems. No
+# pairwise gap in that grid clears its own noise band -- the ORDERING is the finding,
+# and it has no interior optimum. ce015 was the last candidate for a usable middle and
+# it sits exactly where the trend predicts, so further rungs on this axis are not worth
+# GPU-hours.
+#
+# And the collapse the anchor was written to prevent turned out to be harmless.
+# df8512e0 did lose 42% of its student entropy over one epoch; once its export was
+# repaired (the dropped top-level rope_theta, fixed 2026-09-27) that same checkpoint
+# beat its own SFT baseline -- GSM8K +10.7, ifeval +7.4, Minerva +4.0, MGSM +3.1, with
+# HumanEval and BFCL level. The premise these keys were added under, "the objective is
+# wrong", is withdrawn. Longer, unanchored, off-policy is the best recipe on record.
+#
+# THE KEYS STAY, AT ZERO, rather than being deleted. Zero is what lets this recipe run
+# on the step's own public trainer pin: render_gold_config.py emits each of them only
+# when non-default, and emitting any one against a trainer that lacks the field makes
+# TrlParser reject the config on every node after the allocation is already held. And
+# the sweep left one question open -- no CE arm was ever measured for safety, which is
+# the only axis where the unanchored epoch went backwards (SALAD 93.5 -> 90.7, AttaQ
+# -1.2). If that experiment is run, it is --param CE_COEF=<x> plus a CODE_DIR pointing
+# at a patched checkout, and nothing else.
+#
+# loss = JSD(student || teacher) + CE_COEF * CE(student, corpus tokens)
+CE_COEF: 0.0
+# Mean student entropy and reverse KL in the trainer log, every logging_steps.
+#
+# FALSE for pin reasons, not because the metric stopped mattering. It is one of the six
+# patch-gated fields, so leaving this true alone would hold CODE_DIR at a patched
+# checkout for an instrument. The quantity survives without it: distill-eval computes
+# entropy and rkld from a checkpoint with no trainer involvement (see EVAL_METRICS
+# below), and the eval-transfer targets read every checkpoint this recipe exports. What
+# is lost is resolution WITHIN a run, not the measurement.
+LOG_STUDENT_ENTROPY: false
+# 0 disables the guard, and disabling it changes no behaviour: ENTROPY_GUARD_ACTION has
+# been "warn" for as long as there has been a ladder, so the guard has only ever printed
+# the trip step and never ended a run. With the collapse now known not to damage the
+# model there is nothing left for it to warn about, and it is patch-gated like the two
+# keys above.
+ENTROPY_GUARD_DROP_FRAC: 0.0
+# INERT while ENTROPY_GUARD_DROP_FRAC is 0 -- the renderer emits this trio only when the
+# fraction is positive. Left at the values every sweep arm ran with, so re-arming the
+# guard alongside a CE arm is one --param and not a reconstruction.
+ENTROPY_GUARD_BASELINE_STEPS: 20
+ENTROPY_GUARD_PATIENCE: 3
+# "warn" rather than "stop", still, and for the same reason as before: a laddered recipe
+# wants the whole curve, and the trip step is the least useful place to end a run. Inert
+# while the fraction above is 0.
+ENTROPY_GUARD_ACTION: "warn"
+
 # granite's logits_scaling=10 overflows the fused bf16 JSD kernel and yields NaN
 # loss, so false is the setting known to produce a finite loss here. The cost is
 # memory: the non-fused path materialises the [batch, seq, vocab] logit tensor.
@@ -289,17 +479,19 @@ RESPONSE_TEMPLATE: '<|start_of_role|>assistant<|end_of_role|>'
 # than in the optimiser.
 SFT_LEARNING_RATE: "1.0e-05"
 SFT_NUM_TRAIN_EPOCHS: 1
-# Inherited from the smoke tier and NOT sized for this corpus: the SFT arm is off here
-# (INCLUDE_SFT false) and would be a full pass over TARGET_ROWS rows on one GPU if it
-# were switched on.
+# Inherited from the smoke tier and NOT sized for this corpus: the SFT arm is off
+# here (INCLUDE_SFT false) and would be a full pass over 800,000 rows on one GPU if it
+# were switched on. Left as the reference geometry rather than silently rescaled, since
+# the arm this recipe wants is the one that does not run.
 SFT_PER_DEVICE_TRAIN_BATCH_SIZE: 1
 SFT_GRADIENT_ACCUMULATION_STEPS: 8
 SFT_NUM_GPUS: 1
 
 # ─── Export ───────────────────────────────────────────────────────────
-# Empty selects the highest step number. Pin a checkpoint name to export an
-# earlier one.
-EXPORT_CHECKPOINT: ""
+# No EXPORT_CHECKPOINT here, unlike distill-stage1: CKPT_LADDER names every
+# checkpoint to export, so nothing is left to "highest step number" -- which for a
+# guard-stopped run is whatever step the guard happened to fire on, and therefore a
+# different checkpoint in each of the two arms.
 # Which generation prompt the PUBLISHED model hands out when a consumer says
 # nothing about thinking. keep, because this corpus is think-filtered at the
 # SOURCE rather than stripped by prep: the student's labelled spans carry no
@@ -307,10 +499,33 @@ EXPORT_CHECKPOINT: ""
 # compensate for.
 CHAT_TEMPLATE_THINKING: "keep"
 
+# ─── The generation smoke test ────────────────────────────────────────
+# The cheap read that df8512e0 did not have: greedy completions from every exported
+# rung, scored for repetition.
+#
+# What is scored is the fraction of generated lines sitting inside a run of three or
+# more IDENTICAL consecutive lines -- not the adjacent-pair rate the post-mortem
+# quotes (0.4% Java baseline against 20.8% collapsed). The adjacent-pair rate is still
+# reported per rung, because those recorded figures are the only prior art, but it
+# cannot gate: a CORRECT 7-line Java function scores 0.167 on it, since two dedented
+# closing braces are legitimately identical and one collision out of six pairs is 17%.
+# Gating on it would fail healthy checkpoints. Measured on the post-mortem's own two
+# samples, the run-based metric gives 1.00 collapsed against 0.00 correct.
+#
+# 0.15 as the ceiling: generously above zero for the odd genuine triple, far below the
+# 1.00 a collapsed model produces. Only the LAST rung fails the target; earlier rungs
+# above it are findings in the table.
+GEN_SMOKE_MAX_REPETITION: 0.15
+# Long enough for a loop to establish itself and be counted. The collapsed samples
+# repeated a single line ~50 times, so 256 tokens is several times what is needed to
+# see it, and eight prompts at 256 tokens on a 350m model is seconds per rung.
+GEN_SMOKE_NEW_TOKENS: 256
+
 # ─── The transfer evaluations ─────────────────────────────────────────
 # All four metrics in one forward pass. entropy alone would not exercise the
 # teacher-dependent reductions, which are the point of the step.
 EVAL_METRICS: "jsd,kld,rkld,entropy"
+# 8 of the 16 held-out rows. Proving the wiring, not producing a measurement.
 # 256, the step's own default: this is a real read, not a plumbing check. Drawn with
 # the seed rather than taken as a prefix.
 EVAL_MAX_SAMPLES: 256
@@ -322,19 +537,18 @@ EVAL_DTYPE: "bfloat16"
 MAX_INCOMPLETE_FRACTION: 0.25
 EVAL_NUM_GPUS: 1
 
-# ─── Sage2 ────────────────────────────────────────────────────────────
-# The eval-swebench-verified target (space://steps/sage2-swebench-verified; runtime
-# github.com/laminair/sage2-evals).
-# The sage2-evals swebench image on ICR, pinned to a sage2-evals commit.
-SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
-# Empty = the full dataset (all 500 instances) and the benchmark's own repeat
-# count (3, for pass@1[avg-of-3]).
-SAGE2_LIMIT: ""
-SAGE2_REPEATS: ""
-SWEBENCH_WORKERS: 8
-# Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
-SWEBENCH_DATASET: ""
-SWEBENCH_OPTIONS: ""
+# ─── BFCL ─────────────────────────────────────────────────────────────
+# ONE category, not "all": the full suite is hours of generation and this recipe
+# is asking whether the harness accepts the exported model at all. Expect a poor
+# score — the model underneath it has taken two optimizer steps.
+BFCL_TEST_CATEGORIES: "simple"
+BFCL_EVAL_NAME: "bfclv3"
+# The harness's own model handler name, which is what selects the prompt format.
+# NOT the run name: an unrecognised handler makes BFCL fall back and score a
+# differently-formatted prompt.
+BFCL_MODEL_ID: "ibm-granite/granite-4"
+BFCL_NUM_GPUS: 1
+BFCL_GPU_MEMORY_UTILIZATION: "0.5"
 
 # ─── Topology and resources ───────────────────────────────────────────
 # TWO nodes. Off-policy GOLD is pure data parallelism -- no vLLM server, no weight
@@ -370,16 +584,16 @@ CLUSTER: "bluevela"
 QUEUE: "normal"
 
 # ─── NCCL / distributed diagnostics ───────────────────────────────────
-# Empty, and that cost a run. This is a TWO-node allocation, so cross-node collectives
-# are exactly what there is to diagnose: build 8f02b739 hung at step 219 in the ZeRO-3
-# parameter all-gather and left no INIT,NET trace to take to the cluster admins, so it
-# had to be cancelled and relaunched with --param NCCL_DEBUG=INFO at the cost of 45-60
-# minutes of redone sources + align + corpus. distill-stage1-v2 defaults it to INFO.
-# The comment that stood here claimed a single node and no collectives to diagnose.
+# INFO, on by default rather than remembered at launch.
 #
-# Monitoring stays on (hard-wired in the build): with it off a deadlock does not fail,
-# it hangs holding the allocation and produces nothing to read.
-NCCL_DEBUG: ""
+# Build 8f02b739 hung at step 219 in the ZeRO-3 parameter all-gather
+# (_ALLGATHER_BASE, NumelOut=256,901,120) across two racks, and left NO trace to take
+# to the cluster admins because NCCL_DEBUG was empty. It had to be cancelled and
+# relaunched with the flag, paying 45-60 minutes of redone sources + align + corpus.
+# A 2-node run is exactly the shape that hang needs, so the trace is not optional
+# here. NCCL_DEBUG_SUBSYS below bounds the volume to ring/channel setup and the
+# network plane.
+NCCL_DEBUG: "INFO"
 NCCL_DEBUG_SUBSYS: "INIT,NET"
 # 10 minutes, not the reference hour: a smoke run wants a fast failure.
 NCCL_TIMEOUT_MS: 600000

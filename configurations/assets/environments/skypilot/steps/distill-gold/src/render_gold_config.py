@@ -23,11 +23,22 @@ producing an error, and each is handled badly by a shell heredoc:
   heredoc inside a YAML literal block — and it is exactly the seam the on-policy
   phase will reopen.
 
+* The trainer's newer keys must be ABSENT, not false, when unused. ``ce_coef``,
+  ``log_student_entropy`` and the entropy-guard trio are NOT at the commit
+  ``code_config`` pins by default; they need a checkout carrying
+  ``patches/ce_anchor_and_entropy_guard.diff``. Emitting them unconditionally would make
+  every config here unreadable by any other checkout, and TRL rejects unknown top-level
+  keys outright -- which is what ``--verify-trainer-accepts-keys`` turns into a refusal
+  that names the patch instead of a failure on a held allocation. Emitting them only when they are non-default also keeps
+  the rendered config of every existing recipe byte-identical, which is what
+  ``test_off_policy_key_set_is_exact`` asserts.
+
 Dumping with the same library the trainer parses with also means a config that
 renders is a config the trainer can read.
 """
 
 import argparse
+import dataclasses
 import sys
 from typing import Any, Dict
 
@@ -326,6 +337,56 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
             f"({args.total_nodes}); every node would serve and none would train"
         )
 
+    # The CE anchor and the collapse guard. Validated here rather than left to the
+    # trainer's __post_init__ because a bad value there surfaces after accelerate has
+    # launched, the teacher has loaded and a 2-node allocation is already held.
+    if args.ce_coef < 0:
+        raise ValueError(f"ce_coef must be >= 0; got {args.ce_coef}")
+    if not 0.0 <= args.entropy_guard_drop_frac < 1.0:
+        raise ValueError(
+            "entropy_guard_drop_frac must be in [0.0, 1.0); got "
+            f"{args.entropy_guard_drop_frac}"
+        )
+    if args.entropy_guard_drop_frac > 0 and not args.log_student_entropy:
+        raise ValueError(
+            "entropy_guard_drop_frac > 0 needs log_student_entropy true: the guard reads "
+            "the entropy that flag computes, and without it the guard never arms — which "
+            "looks exactly like a run that never collapsed"
+        )
+    if args.entropy_guard_baseline_steps < 1:
+        raise ValueError("entropy_guard_baseline_steps must be >= 1")
+    if args.entropy_guard_patience < 1:
+        raise ValueError("entropy_guard_patience must be >= 1")
+    if args.entropy_guard_action not in ("stop", "warn"):
+        raise ValueError(
+            "entropy_guard_action must be 'stop' or 'warn'; got "
+            f"{args.entropy_guard_action!r}"
+        )
+
+    # The lmbda ramp and the generation floor are on-policy-only. At lmbda 0 the student
+    # never generates, so both would be silently inert rather than wrong — which is the
+    # class of mistake this renderer exists to turn into an error.
+    if args.lmbda_schedule not in ("constant", "linear"):
+        raise ValueError(
+            f"lmbda_schedule must be 'constant' or 'linear'; got {args.lmbda_schedule!r}"
+        )
+    if args.lmbda_schedule == "linear":
+        if not 0.0 <= args.lmbda_init <= 1.0:
+            raise ValueError(
+                "lmbda_schedule linear needs lmbda_init in [0.0, 1.0]; got "
+                f"{args.lmbda_init}"
+            )
+        if not online:
+            raise ValueError(
+                "lmbda_schedule linear ramps towards on-policy sampling, so it needs a "
+                "vLLM server; set vllm_num_servers > 0 or leave the schedule constant"
+            )
+    if args.min_completion_length > 0 and not online:
+        raise ValueError(
+            "min_completion_length bounds the student's vLLM rollout, so it does nothing "
+            "off-policy; set vllm_num_servers > 0 or leave it 0"
+        )
+
     config: Dict[str, Any] = {
         "model_name_or_path": args.model_name_or_path,
         "teacher_model_name_or_path": args.teacher_model_name_or_path,
@@ -372,6 +433,37 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # chat template carries no {% generation %} tag, so without this the
         # trainer cannot tell prompt from completion.
         "response_template": _decode_escapes(args.response_template),
+        # Emitted only when asked for — see the fourth bullet in the module docstring.
+        # ce_coef ADDS cross entropy to the divergence; it is not use_ce_loss, which
+        # replaces it. Build df8512e0 ran the unanchored objective for 8,150 steps and
+        # lost 42% of the student's entropy to it.
+        **({"ce_coef": float(args.ce_coef)} if args.ce_coef > 0 else {}),
+        **({"log_student_entropy": True} if args.log_student_entropy else {}),
+        **(
+            {
+                "entropy_guard_drop_frac": float(args.entropy_guard_drop_frac),
+                "entropy_guard_baseline_steps": args.entropy_guard_baseline_steps,
+                "entropy_guard_patience": args.entropy_guard_patience,
+                "entropy_guard_action": args.entropy_guard_action,
+            }
+            if args.entropy_guard_drop_frac > 0
+            else {}
+        ),
+        # The two on-policy shaping keys, same rule. lmbda_init is meaningless unless the
+        # schedule is linear, so the pair travels together.
+        **(
+            {
+                "lmbda_schedule": args.lmbda_schedule,
+                "lmbda_init": float(args.lmbda_init),
+            }
+            if args.lmbda_schedule == "linear"
+            else {}
+        ),
+        **(
+            {"min_completion_length": args.min_completion_length}
+            if args.min_completion_length > 0
+            else {}
+        ),
     }
 
     # The arm's flags, and ONLY the ones not already emitted above. A flag that is also a
@@ -461,6 +553,81 @@ def check_corpus_tokenizer(args: argparse.Namespace) -> None:
         raise ValueError(str(exc)) from exc
 
 
+# Keys this renderer can emit that upstream trl's GOLDConfig does not define. Every one of
+# them needs the DELIVERED trainer to carry the field, and the delivered trainer is whatever
+# code_config's pin resolves to -- which is not guaranteed to be the tree these keys were
+# written against. See patches/ce_anchor_and_entropy_guard.diff.
+_TRAINER_EXTENSION_KEYS = frozenset(
+    {
+        "ce_coef",
+        "log_student_entropy",
+        "entropy_guard_drop_frac",
+        "entropy_guard_baseline_steps",
+        "entropy_guard_patience",
+        "entropy_guard_action",
+        "lmbda_schedule",
+        "lmbda_init",
+        "min_completion_length",
+    }
+)
+
+
+def check_trainer_accepts(config: Dict[str, Any]) -> None:
+    """Refuse to emit a key the delivered trainer's dataclass does not define.
+
+    THE FAILURE THIS CATCHES COSTS AN ALLOCATION. TrlParser rejects unknown top-level keys
+    outright, so a config naming ce_coef against a trainer without the field dies after
+    accelerate has launched and the teacher has loaded on every node -- and the message names
+    a YAML key, not the reason, so it reads as a recipe typo rather than a trainer that
+    predates the key.
+
+    It is also the SILENT direction that matters: min_completion_length reaches the sampler
+    through run_vllm_serve's GOLD_MIN_TOKENS handling, and where the delivered code has
+    neither the field nor that handling, a floor the recipe asked for simply never applies.
+    The student is then free to emit an immediate EOS and the run collapses into empty
+    completions the teacher scores as if they were rollouts, with nothing in any log saying
+    the floor was dropped.
+
+    Checked against dataclasses.fields rather than a hardcoded list of "patched" commits, so
+    the check cannot drift from the trainer it is about: bump the pin to a tree that carries
+    the fields and this goes quiet on its own.
+
+    Off in this script's own argparse and ON in the step's config, for the same reason
+    check_corpus_tokenizer is: the step delivers the package on every run, while a direct
+    invocation (a unit test rendering a key in isolation) has no package to ask.
+    """
+    requested = sorted(_TRAINER_EXTENSION_KEYS & set(config))
+    if not requested:
+        return
+
+    try:
+        from gb_steps_post_training.distillation.custom_gold_config import (  # noqa: PLC0415
+            CustomGOLDConfig,
+        )
+    except ImportError as exc:
+        raise ValueError(
+            f"this config emits {', '.join(requested)}, which only some trainers accept, but "
+            f"gb_steps_post_training is not importable ({exc}) so that cannot be checked. "
+            "The package reaches this container through code_config's clone, normally exported "
+            "onto PYTHONPATH by the step's run block -- either run this through the step, or "
+            "set gold_config.verify_trainer_accepts_keys false to skip the check deliberately"
+        ) from exc
+
+    known = {f.name for f in dataclasses.fields(CustomGOLDConfig)}
+    missing = [key for key in requested if key not in known]
+    if missing:
+        raise ValueError(
+            f"the delivered trainer's CustomGOLDConfig has no field(s) "
+            f"{', '.join(missing)}, so emitting them would make TrlParser reject this config "
+            "on every node after the allocation is already held. The trainer comes from "
+            "code_config (see the step's step-template.yaml); to use these keys, point "
+            "code_config.code_dir at a checkout carrying "
+            "steps/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff -- its "
+            "header has the exact patch invocation and the directory remap it needs. To run "
+            "without them, leave the corresponding gold_config keys at their defaults"
+        )
+
+
 def _bool(value: str) -> bool:
     """Parse a YAML-ish boolean from the step's shell-rendered arguments."""
     lowered = str(value).strip().lower()
@@ -517,6 +684,46 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--beta", type=float, default=0.0)
     p.add_argument("--use-liger-fused-jsd", type=_bool, default=False)
     p.add_argument(
+        "--ce-coef",
+        type=float,
+        default=0.0,
+        help="Additive CE anchor weight; 0 omits the key and leaves the objective pure.",
+    )
+    p.add_argument(
+        "--log-student-entropy",
+        type=_bool,
+        default=False,
+        help="Log mean student entropy and reverse KL every logging_steps.",
+    )
+    p.add_argument(
+        "--entropy-guard-drop-frac",
+        type=float,
+        default=0.0,
+        help="Stop when entropy falls this fraction below baseline; 0 disables the guard.",
+    )
+    p.add_argument("--entropy-guard-baseline-steps", type=int, default=20)
+    p.add_argument("--entropy-guard-patience", type=int, default=3)
+    p.add_argument(
+        "--entropy-guard-action",
+        default="stop",
+        help="What a tripped guard does: stop the run at that step, or warn and carry "
+        "on to max_steps. Use warn when the run's purpose is the collapse curve "
+        "itself and a fixed export ladder needs every rung to exist.",
+    )
+    p.add_argument(
+        "--lmbda-schedule",
+        default="constant",
+        help="constant, or linear to ramp lmbda from --lmbda-init up to --lmbda.",
+    )
+    p.add_argument("--lmbda-init", type=float, default=0.0)
+    p.add_argument(
+        "--min-completion-length",
+        type=int,
+        default=0,
+        help="vLLM min_tokens for the student's rollout; >0 blocks the immediate-EOS "
+        "mode collapse. On-policy only.",
+    )
+    p.add_argument(
         "--loss-arm",
         default="",
         help=(
@@ -525,6 +732,16 @@ def _parse_args(argv=None) -> argparse.Namespace:
             + ". EMPTY BY DEFAULT, which leaves the standalone loss flags authoritative and "
             "the rendered config unchanged. Naming an arm sets its switches and enforces its "
             "requirements, and disagreeing with a standalone flag is then an error"
+        ),
+    )
+    p.add_argument(
+        "--verify-trainer-accepts-keys",
+        type=_bool,
+        default=False,
+        help=(
+            "check every emitted key that upstream GOLDConfig does not define against the "
+            "delivered CustomGOLDConfig, and refuse rather than letting TrlParser reject the "
+            "config on a held allocation. Needs gb_steps_post_training importable."
         ),
     )
     p.add_argument(
@@ -567,6 +784,10 @@ def main(argv=None) -> int:
         if args.check_corpus_tokenizer:
             check_corpus_tokenizer(args)
         config = build_config(args)
+        # After build_config, because it is the EMITTED key set that matters: a key left at
+        # its default is never emitted and so never needs the trainer to know it.
+        if args.verify_trainer_accepts_keys:
+            check_trainer_accepts(config)
     except ValueError as e:
         print(f"render_gold_config: {e}", file=sys.stderr)
         return 2

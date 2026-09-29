@@ -70,6 +70,27 @@ config:
     # already carries torch 2.8.0, transformers 5.8.0, tokenizers 0.22.1 and
     # safetensors 0.7.0, confirmed by direct measurement on a real GPU node.
     setup_command: ""
+  # ── Per-checkpoint artifact emission ──────────────────────────────────────
+  # OFF by default, and that default is the contract: with it off this step emits
+  # exactly one artifact, `checkpoint`, at the end of the run — which is what every
+  # single-checkpoint recipe binds and what they all did before this existed.
+  #
+  # ON, a background watcher on rank 0 polls the checkpoint directory during training
+  # and emits `checkpoint_<N>` per HF checkpoint-<N> dir as soon as it is completely
+  # written. A recipe that declares matching `checkpoint_<N>` outputs can then export
+  # and evaluate rung N while the run is still training, instead of after it — see
+  # recipes/granite4-350m/lsf/distill-checkpoint-eval, where that turns ~36 GPU-h of
+  # eval from a serial tail into work overlapped with a 13-hour epoch.
+  #
+  # The emitted ids are a CONTRACT with the recipe: a rung whose checkpoint dir the
+  # trainer never writes is an artifact never emitted, and a target bound to it waits
+  # forever with no error. Hence the zero-emission guard in run: below, and hence the
+  # recipe tests that assert every rung is a multiple of save_steps.
+  emit_checkpoint_artifacts: false
+  # How often that watcher polls. Lower detects a new checkpoint sooner and costs a
+  # directory listing; the log-scrape interval of the monitor is the other half of
+  # the latency, since an emitted line is only seen when the logs are next pulled.
+  checkpoint_watch_interval_seconds: 60
   gold_config:
     # ── Code and image ──────────────────────────────────────────────────────
     # DeepSpeed ZeRO-3 accelerate config, relative to code_config's clone.
@@ -137,6 +158,46 @@ config:
     beta: 0.0
     # granite's logits_scaling=10 overflows the fused bf16 JSD kernel -> NaN loss.
     use_liger_fused_jsd: false
+
+    # ── The CE anchor, and the instruments that watch for its absence ────────
+    # All five need the DELIVERED trainer to carry the ce_anchor_and_entropy_guard patch
+    # (patches/ce_anchor_and_entropy_guard.diff, whose header has the invocation and the
+    # directory remap). That trainer now comes from code_config, and the default pin does
+    # NOT carry the patch -- so a recipe using these keys points code_config.code_dir at a
+    # checkout that does, as recipes/granite4-350m/lsf/distill-stage1-v2 does.
+    #
+    # They are rendered into the trainer's config ONLY when non-default, so a recipe that
+    # leaves them alone runs against any checkout. When one does not,
+    # verify_trainer_accepts_keys below is what turns "TrlParser rejected your config after
+    # the allocation was held" into a refusal that names the patch.
+    #
+    # ce_coef ADDS cross entropy on the corpus tokens to the divergence:
+    #   loss = divergence + ce_coef * CE(student, labels)
+    # It is not the trainer's use_ce_loss, which REPLACES the divergence. Without an
+    # anchor the objective has no opinion about real text, so an already-SFT'd
+    # student — one that already matches the teacher closely — can only improve by
+    # sharpening, and sharpening ends in repetition loops. Additive rather than a
+    # convex mix because JSD runs ~0.07 here against CE ~1, so a convex 50/50 is
+    # ~20x CE-dominated. Both terms are logged, so the ratio is a reading.
+    ce_coef: 0.0
+    # Logs mean student entropy and reverse KL (nats, supervised positions) every
+    # logging_steps. The train loss is blind to collapse — it moved 2.7% across the
+    # 7,640 steps in which df8512e0's student lost 42% of its entropy.
+    log_student_entropy: false
+    # Stop when entropy falls this fraction below a baseline measured over the first
+    # entropy_guard_baseline_steps. 0 disables. Stops gracefully: the checkpoint is
+    # saved, the process exits 0, and export/eval still run, so a tripped guard is a
+    # finding rather than a failed build. Requires log_student_entropy.
+    entropy_guard_drop_frac: 0.0
+    entropy_guard_baseline_steps: 20
+    entropy_guard_patience: 3
+    # What a trip DOES. "stop" ends the run there; "warn" reports it, checkpoints it
+    # and continues to max_steps. Build d1acf1c0 is the argument for having the choice:
+    # the guard stopped it at step 77 of 2000, correctly by its own rule, and in doing
+    # so destroyed the checkpoint curve the run existed to measure and left its four
+    # fixed export rungs naming steps that never happened. Where max_steps already
+    # bounds the waste, the trip is worth a reading rather than a stop.
+    entropy_guard_action: "stop"
     # The objective as a validated PRESET, instead of nine booleans a build may combine
     # freely. EMPTY BY DEFAULT and empty means unchanged: the flags above stay
     # authoritative, every existing recipe renders exactly the config it rendered before,
@@ -155,6 +216,21 @@ config:
     # a mismatch does not error -- it trains on mis-segmented text at full speed with a
     # falling loss.
     check_corpus_tokenizer: false
+    # Check every key this step is about to emit that upstream trl's GOLDConfig does not
+    # define (the CE anchor, the collapse guard, the on-policy shaping pair) against the
+    # DELIVERED trainer's dataclass, and refuse before accelerate launches.
+    #
+    # ON by default, and that default is the point: code_config's pin is not guaranteed to
+    # carry those fields -- at a5d59bc4 it carries lmbda_schedule and not ce_coef -- and the
+    # two ways it goes wrong are both expensive. TrlParser rejects an unknown top-level key
+    # only after the teacher has loaded on every node of a held allocation, and
+    # min_completion_length fails the other way, silently, by never reaching the sampler at
+    # all. Costs one import of a package the run block already puts on PYTHONPATH.
+    #
+    # It only looks at keys that are actually emitted, so a recipe leaving all of them at
+    # their defaults never triggers it. Set false only to render deliberately against a
+    # trainer you know differs.
+    verify_trainer_accepts_keys: true
     # Required for completion masking; the nothink chat template has no
     # {% generation %} tag, so this is what locates the span.
     #
@@ -212,6 +288,15 @@ config:
     last_message_only: false
     clip_alpha: 0.1
     opd_importance_sampling: false
+    # constant, or linear to ramp lmbda from lmbda_init up to lmbda across training —
+    # off-policy early, where the corpus signal is, on-policy later, where the
+    # student's own degenerate regions are. Both need a vLLM server, so the renderer
+    # refuses linear at vllm_num_servers 0 rather than leaving it inert.
+    lmbda_schedule: "constant"
+    lmbda_init: 0.0
+    # vLLM min_tokens for the student's rollout. >0 blocks the immediate-EOS mode
+    # collapse. For vllm_mode server the SERVER must agree, via GOLD_MIN_TOKENS.
+    min_completion_length: 0
 
 outputs:
   optional:
@@ -460,6 +545,94 @@ environment_configs:
             # by the (now unconditional) source-delivery block: the trainer and the
             # rest of this collection are the same checkout, so there is nothing
             # left to record separately here.
+            {% set _true = [true, "true", "True", "1", 1] -%}
+            {% if config.emit_checkpoint_artifacts in _true %}
+            # ── Per-checkpoint artifact emission ────────────────────────────
+            # Rendered only when emit_checkpoint_artifacts is on, so the
+            # single-checkpoint recipes get byte-identical script to before.
+            #
+            # HF Trainer writes each save into ${CKPT_DIR}/checkpoint-<N>, where
+            # <N> is the optimizer step. A downstream export/eval target can
+            # start against rung N the moment it is written rather than after the
+            # whole run, but only if something says so mid-run — the final
+            # artifact at the bottom of this script is emitted once, at the end.
+            # So: a background loop globs the dir and emits one artifact line per
+            # newly completed checkpoint, which the monitor's periodic log
+            # retrieval scrapes while the job is still RUNNING.
+            #
+            # The emitted id is checkpoint_<N> and it MUST match the output names
+            # the recipe declares on this target.
+            CKPT_GLOB="checkpoint-"
+            CKPT_WATCH_INTERVAL="{{ config.checkpoint_watch_interval_seconds | default(60) }}"
+            # Completeness sentinels: a checkpoint is emitted only once ALL of
+            # these exist. Trainer._save_checkpoint writes in a fixed order —
+            # save_model (config, weights, tokenizer) -> optimizer/scheduler ->
+            # rng_state -> state.save_to_json(trainer_state.json) — so requiring
+            # the weights, the last tokenizer file AND trainer_state.json brackets
+            # the entire write sequence. A plain non-empty check would race it and
+            # hand a half-written model to an export that has already allocated.
+            # Sharded weights (not this 350m pair) would need
+            # model.safetensors.index.json here too.
+            CKPT_SENTINELS="model.safetensors tokenizer.json trainer_state.json"
+            # One marker file per emitted checkpoint. On disk rather than in a
+            # shell variable because emit_new_checkpoints also runs inside the
+            # backgrounded watcher subshell, whose variables never propagate back
+            # to this shell — the markers are the two halves' only shared state,
+            # and the final guard counts them.
+            EMITTED_DIR="$(mktemp -d)"
+
+            emit_new_checkpoints() {
+              for ckpt in "$CKPT_DIR"/${CKPT_GLOB}*; do
+                [ -d "$ckpt" ] || continue
+                base="$(basename "$ckpt")"
+                step="${base#${CKPT_GLOB}}"
+                marker="$EMITTED_DIR/$base"
+                [ -e "$marker" ] && continue
+                complete=1
+                for sentinel in $CKPT_SENTINELS; do
+                  [ -f "$ckpt/$sentinel" ] || { complete=0; break; }
+                done
+                [ "$complete" -eq 1 ] || continue
+                touch "$marker"
+                echo "GB_ARTIFACT_ID:checkpoint_${step} GB_ARTIFACT_PATH:${ckpt}"
+              done
+            }
+
+            watch_checkpoints() {
+              while true; do
+                emit_new_checkpoints
+                sleep "$CKPT_WATCH_INTERVAL"
+              done
+            }
+
+            WATCH_PID=""
+            cleanup_watcher() {
+              if [ -n "$WATCH_PID" ] && kill -0 "$WATCH_PID" 2>/dev/null; then
+                kill "$WATCH_PID" 2>/dev/null || true
+                wait "$WATCH_PID" 2>/dev/null || true
+                WATCH_PID=""
+              fi
+            }
+
+            # RANK 0 ONLY, for the same reason the final artifact line below is
+            # rank-guarded: the executor streams every node's stdout into one
+            # driver log, so an unguarded marker would register the same
+            # checkpoint N times. The watcher is started just before the trainer.
+            if [ "$NODE_RANK" = "0" ]; then
+              # EXIT-time cleanup on every path — success, trainer failure, or
+              # signal — so the loop cannot outlive the script and keep emitting.
+              trap 'cleanup_watcher; rm -rf "$EMITTED_DIR"' EXIT
+              mkdir -p "$CKPT_DIR"
+              watch_checkpoints &
+              WATCH_PID=$!
+              echo "distill-gold: watching $CKPT_DIR/${CKPT_GLOB}* every ${CKPT_WATCH_INTERVAL}s (pid $WATCH_PID)"
+            fi
+            {% endif %}
+
+            # The trainer's commit is already recorded above as distill_code_commit,
+            # by the (now unconditional) source-delivery block: the trainer and the
+            # rest of this collection are the same checkout, so there is nothing
+            # left to record separately here.
 
             # Rendered per node (each has its own container filesystem) but into
             # a shared path, so the content must be identical on every node — it
@@ -490,7 +663,17 @@ environment_configs:
               --lmbda {{ config.gold_config.lmbda }} \
               --beta {{ config.gold_config.beta }} \
               --use-liger-fused-jsd {{ config.gold_config.use_liger_fused_jsd }} \
+              --ce-coef {{ config.gold_config.ce_coef | default(0.0) }} \
+              --log-student-entropy {{ config.gold_config.log_student_entropy | default(false) }} \
+              --entropy-guard-drop-frac {{ config.gold_config.entropy_guard_drop_frac | default(0.0) }} \
+              --entropy-guard-baseline-steps {{ config.gold_config.entropy_guard_baseline_steps | default(20) }} \
+              --entropy-guard-patience {{ config.gold_config.entropy_guard_patience | default(3) }} \
+              --entropy-guard-action "{{ config.gold_config.entropy_guard_action | default('stop') }}" \
+              --lmbda-schedule "{{ config.gold_config.lmbda_schedule | default('constant') }}" \
+              --lmbda-init {{ config.gold_config.lmbda_init | default(0.0) }} \
+              --min-completion-length {{ config.gold_config.min_completion_length | default(0) }} \
               --loss-arm "{{ config.gold_config.loss_arm }}" \
+              --verify-trainer-accepts-keys {{ config.gold_config.verify_trainer_accepts_keys | default(true) }} \
               --check-corpus-tokenizer {{ config.gold_config.check_corpus_tokenizer }} \
               --response-template '{{ config.gold_config.response_template }}' \
               --vllm-num-servers {{ config.gold_config.vllm_num_servers }} \
@@ -575,6 +758,33 @@ environment_configs:
               --output_dir "$CKPT_DIR" \
               --use_vllm={{ 'True' if config.gold_config.vllm_num_servers | int > 0 else 'False' }} \
               $VLLM_ARGS
+
+            {% if config.emit_checkpoint_artifacts in _true %}
+            # The trainer has exited. Stop the watcher, then sweep once more for
+            # anything written between its last poll and that exit — including the
+            # final checkpoint, which on a run bounded by an epoch rather than by
+            # save_steps is written at a step no save grid names.
+            if [ "$NODE_RANK" = "0" ]; then
+              cleanup_watcher
+              emit_new_checkpoints
+
+              # Fail LOUDLY on zero, because the alternative failure is silent:
+              # a recipe's checkpoint_<N> outputs would never be produced, every
+              # export/eval target bound to them would stay unready, and the build
+              # would hang with no error to read. Count the markers, not a shell
+              # variable — see EMITTED_DIR above.
+              EMITTED_COUNT="$(find "$EMITTED_DIR" -mindepth 1 -maxdepth 1 -type f 2>/dev/null | wc -l)"
+              if [ "$EMITTED_COUNT" -eq 0 ]; then
+                echo "distill-gold: FATAL: no checkpoint dirs matched '${CKPT_DIR}/${CKPT_GLOB}*'." >&2
+                echo "  emit_checkpoint_artifacts is on, so a recipe is bound to" >&2
+                echo "  checkpoint_<N> ids that will now never arrive. Either the run" >&2
+                echo "  never reached save_steps, or the trainer's checkpoint dir" >&2
+                echo "  naming changed — align CKPT_GLOB and the recipe's ladder." >&2
+                exit 1
+              fi
+              echo "distill-gold: emitted $EMITTED_COUNT per-checkpoint artifact(s)"
+            fi
+            {% endif %}
 
             # Rank 0 only: the executor streams every node's output into one
             # driver log, so an unguarded marker would register N artifacts.
