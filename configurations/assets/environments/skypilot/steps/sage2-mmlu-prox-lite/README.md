@@ -30,10 +30,10 @@ steps:
 | `served_model_name` | basename of `model_path` | Name vLLM serves under. |
 | `output_dir` | `output` | Relative to `$GB_BUILD_WORKDIR`. |
 | `limit` | `""` (11 x 588) | **Smoke knob:** first N examples ordered by (question_id, language), so a small N covers every language. |
-| `repeats` | `""` (1) | Repeats of the whole run (the tasks are greedy). |
+| `repeats` | `""` (1) | Repeats of the whole run (each samples afresh at temperature 1.0). |
 | `workers` | `64` | Concurrent requests to vLLM. |
 | `dataset` / `dataset_revision` | `""` | Override the data pinned in sage2-evals (`li-lab/MMLU-ProX-Lite` at a fixed commit). |
-| `options` | `""` | Space-separated `key=value` benchmark options: `languages` (`ibm`, `all` or a comma list), `temperature`, `top_p`, `max_tokens`, `thinking=off`, `max_retries`, `request_timeout`, `answers=gold`. |
+| `options` | `""` | Space-separated `key=value` benchmark options: `languages` (`ibm`, `all` or a comma list), `temperature`, `top_p`, `max_tokens`, `stop` (`task`, `none` or a comma list of up to 4 percent-encoded strings, e.g. `stop=%3C/s%3E,Q:`), `thinking=off`, `max_retries`, `request_timeout`, `answers=gold`. |
 | `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `""` | vLLM. |
 | `sandbox_cache` | `""` | Unused: this benchmark runs no sandbox. |
 | `hf_home` | `""` | Overrides `HF_HOME`. |
@@ -41,9 +41,12 @@ steps:
 GPUs, queue and memory come from the target's `launcher_config.resources`. The step
 declares none. The data is public; no token is needed.
 
-Generation follows the lm-eval task configs: greedy, `max_gen_toks: 2048` and the
-task's stop strings. The options above override them, and `results.json` records the
-overrides.
+Generation uses the Granite 4.2 card's thinking-mode settings: temperature 1.0, top_p
+0.95, 8192 max tokens, thinking on, and the task's stop strings. NeMo Evaluator's
+lm-eval chat protocol (2048 tokens, near-greedy) truncates nearly every thinking trace;
+`max_tokens=2048 temperature=0.0000001 top_p=0.9999999` reproduces it. The options
+above override these settings, and `results.json` records the generation kwargs each
+language ran with.
 
 A request that still fails after its retries scores as wrong and is counted in
 `statuses`. A rerun into the same `output_dir` resends only the requests that are not

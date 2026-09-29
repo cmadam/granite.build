@@ -40,7 +40,7 @@ config:
     # language, ordered by (question_id, language), so a small N covers every language
     # and two smoke runs are comparable. Empty = all 11 x 588.
     limit: ""
-    # Repeats of the whole run. Empty = benchmark default (1; the tasks are greedy).
+    # Repeats of the whole run. Empty = benchmark default (1).
     repeats: ""
     # Concurrent requests to vLLM (lm-eval num_concurrent).
     workers: "64"
@@ -50,7 +50,10 @@ config:
     dataset_revision: ""
     # Space-separated key=value benchmark options passed as --option, e.g.
     # "languages=all" (or a comma list; default: the 11 Granite languages),
-    # "temperature=0.6 top_p=0.95 max_tokens=8192" (default: the task's greedy, 2048),
+    # "temperature=0.6 top_p=0.95 max_tokens=16384" (default: the Granite 4.2 card's
+    # thinking-mode 1.0 / 0.95 / 8192),
+    # "stop=none" or "stop=%3C/s%3E,Q:" (percent-encoded, comma-separated, at most 4;
+    # default "task": the task's own stop strings),
     # "thinking=off" (chat_template_kwargs.enable_thinking=false),
     # "answers=gold" (reference answers through the same extraction and scoring;
     # model_path may be "none", no GPU needed).
