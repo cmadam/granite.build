@@ -13,7 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
-SAGE2_IMAGE_TBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-tbench:952082c"
+SAGE2_IMAGE_TBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-tbench:22d1d30"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
