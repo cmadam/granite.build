@@ -15,6 +15,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 SAGE2_IMAGE_BFCL: "icr.io/tir-hew-sage2-evals/sage2-evals-bfcl:952082c"
 SAGE2_IMAGE_BIRD: "icr.io/tir-hew-sage2-evals/sage2-evals-bird:952082c"
 SAGE2_IMAGE_IFBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-ifbench:952082c"
+SAGE2_IMAGE_JUDGED: "icr.io/tir-hew-sage2-evals/sage2-evals-judged:952082c"
 SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:949fcb0"
 SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:15746f5"
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:ea7c503"
@@ -72,6 +73,23 @@ TAU_DATASET: ""
 # LiteLLM gateway: PAID, needs SAGE2_USER_API_KEY / SAGE2_JUDGE_API_KEY in the job env and
 # is metered against SAGE2_SPEND_LEDGER. "user_model=self judge_model=self" = no paid API.
 TAU_OPTIONS: ""
+
+# ─── LLM-judged benchmarks (judged image) ─────────────────────────────
+# The judge (default aws/claude-sonnet-5 on IBM LiteLLM) is paid and needs its key in
+# the job as SAGE2_JUDGE_API_KEY. "judge_model=self" in the options judges with the
+# served model instead (key-less smoke runs only).
+
+# ─── GDPval (Elo is an APPROXIMATION: win rate vs expert, not GDPval-AA) ─
+GDPVAL_WORKERS: 4
+# Empty = openai/gdpval at the commit pinned in sage2-evals.
+GDPVAL_DATASET: ""
+GDPVAL_OPTIONS: ""
+
+# ─── ProfBench ────────────────────────────────────────────────────────
+PROFBENCH_WORKERS: 16
+# Empty = nvidia/ProfBench at the commit pinned in sage2-evals.
+PROFBENCH_DATASET: ""
+PROFBENCH_OPTIONS: ""
 
 # ─── NeMo-Skills: AIME25, HMMT Feb25, GPQA, MMLU-Pro, Arena-Hard-V2 ───
 # WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.

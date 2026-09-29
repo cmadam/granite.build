@@ -17,6 +17,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | `tau3-bench` | pass@1 (avg of 3): mean pass^1 of airline, retail, telecom | implemented |
 | `tau3-airline` / `tau3-retail` / `tau3-telecom` / `tau3-banking-knowledge` | pass@1 (pass^1, 4 trials) | implemented |
 | `bfcl-v4` | overall_accuracy accuracy (web search via IBM search MCP) | implemented |
+| `gdpval` | Elo (**approximation**: Elo-style score from the LLM-judged win rate vs the expert deliverables, expert = 1000; not GDPval-AA's Elo) | implemented (paid judge) |
+| `profbench` | overall (ProfBench-lite, LLM-judged rubrics) | implemented (paid judge) |
 | `aime25`, `hmmt-feb25` | pass@1[avg-of-4] symbolic correct | implemented (NeMo-Skills, `SAGE2_IMAGE_NEMOSKILLS`) |
 | `gpqa` (Diamond) | pass@1[avg-of-2] symbolic correct | implemented (NeMo-Skills; gated data, needs `HF_TOKEN`) |
 | `livecodebench-v6` | pass@1[avg-of-2] accuracy | implemented |
@@ -55,3 +57,8 @@ The tau3 targets call a PAID user simulator (and, for retail, an NL-assertion ju
 judge_model=self"` uses the served model instead (no key, not comparable with published
 numbers). `tau3-bench` runs the three core domains itself, so running it together with
 `tau3-airline`/`-retail`/`-telecom` pays for those simulations twice.
+
+`gdpval` and `profbench` call a paid LLM judge (default `aws/claude-sonnet-5` on IBM
+LiteLLM) and need its key in the job as `SAGE2_JUDGE_API_KEY`. Without a key, set
+`GDPVAL_OPTIONS` / `PROFBENCH_OPTIONS` to `judge_model=self` for a smoke run (the
+served model judges itself; results say `judge_is_self`).
