@@ -8,6 +8,15 @@ RULER commits; RULER's source data are baked into the image and checked by sha25
 each task through NeMo-Skills' generation and RULER match, and writes one
 `results.json`.
 
+Thinking is on by default, a departure from NeMo-Skills' RULER, which budgets
+30-128 answer tokens with the answer prefix prefilled. Each task gets a thinking
+budget on top of its answer budget, the chat data format (no prefill), and only the
+content after vLLM's reasoning parser is scored. results.json records the mode,
+budgets and scoring source. The 128k samples plus the budget need more than 131072 tokens, more
+than granite-4.2-3b supports (no rope scaling). The run then stops and names the
+options: `sample_length=<131072 - budget>` (shorter samples, a departure) or
+`enable_thinking=false` (NeMo-Skills' RULER exactly).
+
 The code is the external [sage2-evals](https://github.com/laminair/sage2-evals) runtime,
 shipped as a prebuilt image (the `nemoskills` family). Nothing is built from this step.
 
@@ -28,8 +37,8 @@ steps:
 | `repeats` | `""` (1) | Independent generations per sample. |
 | `workers` | `32` | Concurrent requests to vLLM. |
 | `dataset` / `dataset_revision` | `""` | A prepared RULER setup dir overrides the in-job generation. |
-| `options` | `""` | Space-separated `key=value` benchmark options: `tasks` (comma-separated subset, for debugging), `tokenizer`, `enable_thinking`, `temperature`, `top_p`, `top_k`, `max_tokens`, `ns.<key>=<value>`, `answers=gold`. |
-| `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `131072` | vLLM. The run stops if the served context is shorter. |
+| `options` | `""` | Space-separated `key=value` benchmark options: `tasks` (comma-separated subset, for debugging), `tokenizer`, `enable_thinking`, `thinking_budget`, `sample_length`, `temperature`, `top_p`, `top_k`, `max_tokens`, `ns.<key>=<value>`, `answers=gold`. |
+| `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `131072` | vLLM. The run stops if the served context is shorter than a sample plus the thinking budget. |
 | `sandbox_cache` | `/proj/granite-build/g4os/sage2/enroot-cache` | Unused here (shared config contract). |
 | `hf_home` | `""` | Overrides `HF_HOME`. |
 

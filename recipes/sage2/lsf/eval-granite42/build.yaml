@@ -108,7 +108,7 @@ granite.build:
               limit: "$${SAGE2_LIMIT}"
               repeats: "$${SAGE2_REPEATS}"
               workers: "$${RULER_WORKERS}"
-              options: "$${RULER_OPTIONS}"
+              options: "$${RULER_OPTIONS} $${RULER_128K_OPTIONS}"
               tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
               max_model_len: "131072"
               hf_home: "$${HF_HOME}"
@@ -139,7 +139,7 @@ granite.build:
               workers: "$${RULER_WORKERS}"
               options: "$${RULER_OPTIONS}"
               tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
-              max_model_len: "65536"
+              max_model_len: "131072"
               hf_home: "$${HF_HOME}"
             launcher_config:
               resources:

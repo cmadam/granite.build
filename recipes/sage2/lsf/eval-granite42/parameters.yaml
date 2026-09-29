@@ -34,9 +34,16 @@ SCICODE_WORKERS: 64
 SCICODE_OPTIONS: ""
 
 # ─── RULER 128k / 64k (NeMo-Skills) ───────────────────────────────────
-# Data are generated in the job for MODEL_PATH's tokenizer.
+# Data are generated in the job for MODEL_PATH's tokenizer. Thinking is on by default
+# (a thinking budget on top of ns's answer budgets; scored after the reasoning parser),
+# and both targets serve at 131072.
 RULER_WORKERS: 32
 RULER_OPTIONS: ""
+# ruler-128k only. A 128k sample plus the thinking budget exceeds granite-4.2-3b's
+# 131072 context, and the run stops until one of these is chosen: "sample_length=N"
+# (N = 131072 - thinking budget; shorter samples, a departure) or
+# "enable_thinking=false" (ns's RULER exactly).
+RULER_128K_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"

@@ -4,9 +4,17 @@ Scores a checkpoint on **RULER at 64k** (Sage2 metric: accuracy, NeMo-Skills'
 `ruler_score`, the mean over RULER's 13 tasks at 65536 tokens). The job generates
 the tasks for the model's own tokenizer with NeMo-Skills' RULER prepare (pinned ns and
 RULER commits; RULER's source data are baked into the image and checked by sha256),
-100 samples per task. It serves the model with vLLM at `max_model_len` 65536, runs
+100 samples per task. It serves the model with vLLM at `max_model_len` 131072, runs
 each task through NeMo-Skills' generation and RULER match, and writes one
 `results.json`.
+
+Thinking is on by default, a departure from NeMo-Skills' RULER, which budgets
+30-128 answer tokens with the answer prefix prefilled. Each task gets a thinking
+budget on top of its answer budget, the chat data format (no prefill), and only the
+content after vLLM's reasoning parser is scored. results.json records the mode,
+budgets and scoring source. The 64k samples plus the budget need more than 65536 tokens, hence
+131072 (granite-4.2-3b's native maximum). `enable_thinking=false` is
+NeMo-Skills' RULER exactly.
 
 The code is the external [sage2-evals](https://github.com/laminair/sage2-evals) runtime,
 shipped as a prebuilt image (the `nemoskills` family). Nothing is built from this step.
@@ -28,8 +36,8 @@ steps:
 | `repeats` | `""` (1) | Independent generations per sample. |
 | `workers` | `32` | Concurrent requests to vLLM. |
 | `dataset` / `dataset_revision` | `""` | A prepared RULER setup dir overrides the in-job generation. |
-| `options` | `""` | Space-separated `key=value` benchmark options: `tasks` (comma-separated subset, for debugging), `tokenizer`, `enable_thinking`, `temperature`, `top_p`, `top_k`, `max_tokens`, `ns.<key>=<value>`, `answers=gold`. |
-| `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `65536` | vLLM. The run stops if the served context is shorter. |
+| `options` | `""` | Space-separated `key=value` benchmark options: `tasks` (comma-separated subset, for debugging), `tokenizer`, `enable_thinking`, `thinking_budget`, `sample_length`, `temperature`, `top_p`, `top_k`, `max_tokens`, `ns.<key>=<value>`, `answers=gold`. |
+| `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `131072` | vLLM. The run stops if the served context is shorter than a sample plus the thinking budget. |
 | `sandbox_cache` | `/proj/granite-build/g4os/sage2/enroot-cache` | Unused here (shared config contract). |
 | `hf_home` | `""` | Overrides `HF_HOME`. |
 

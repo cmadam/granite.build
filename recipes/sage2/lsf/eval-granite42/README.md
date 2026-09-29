@@ -26,7 +26,10 @@ gb build start -f recipes/sage2/lsf/eval-granite42/build.yaml \
 ```
 
 `ruler-*` targets generate their data in the job for `MODEL_PATH`'s tokenizer and
-serve at the full context (`max_model_len` 131072 / 65536).
+serve at 131072: with thinking on (the default) a 64k sample plus the thinking budget
+needs more than 65536. At 128k the sample plus the budget does not fit in 131072, so
+`ruler-128k` stops until `RULER_128K_OPTIONS` chooses `sample_length=<131072 - budget>`
+(shorter samples) or `enable_thinking=false` (NeMo-Skills' RULER exactly).
 
 Datasets are the public upstream ones, pinned by commit in sage2-evals. Gated
 datasets need `HF_TOKEN` as a space secret.

@@ -16,8 +16,16 @@ version: 0.1.0
 # WHAT RUNS. `sage2-evals run ruler-64k` generates RULER's 13 tasks at 65536 tokens
 # for the model's tokenizer with NVIDIA NeMo-Skills' RULER prepare (pinned ns and RULER
 # commits, source data baked into the image), serves model_path with vLLM inside the
-# job at max_model_len 65536, runs each task through ns's generation and RULER match,
+# job at max_model_len 131072, runs each task through ns's generation and RULER match,
 # and writes one results.json (schema: sage2_evals/results.py).
+#
+# THINKING (default on; a departure from ns/RULER, recorded in results.json). ns's RULER
+# budgets are for non-reasoning output (tokens_to_generate 30-128, answer prefix
+# prefilled). With thinking on, sage2-evals uses ns's chat data format (no prefill),
+# gives each task a thinking budget on top of its answer budget, and scores only the
+# content after vLLM's reasoning parser. A 64k sample plus that budget needs more than
+# 65536 tokens of context, so this step serves at 131072 (granite-4.2-3b's native
+# maximum). "enable_thinking=false" restores ns's RULER exactly (65536 suffices).
 #
 # CUSTOM, not EVAL: gbcommon's StepType has no EVAL member (see bfcl-eval's template).
 type: custom
@@ -46,14 +54,17 @@ config:
     dataset: ""
     dataset_revision: ""
     # Space-separated key=value benchmark options passed as --option, e.g.
-    # "tasks=vt,cwe" (a subset, for debugging), "tokenizer=<path>", "enable_thinking=false",
-    # "ns.<key>=<value>" (raw ns overrides) or "answers=gold" (serves the expected answers:
-    # checks data and scoring without a GPU; model_path must still name the tokenizer).
+    # "tasks=vt,cwe" (a subset, for debugging), "tokenizer=<path>", "enable_thinking=false"
+    # (ns's RULER exactly), "thinking_budget=<tokens>", "sample_length=<tokens>" (shorter
+    # samples: a departure, recorded), "ns.<key>=<value>" (raw ns overrides) or
+    # "answers=gold" (serves the expected answers: checks data and scoring without a GPU;
+    # model_path must still name the tokenizer).
     options: ""
-    # vLLM. A full-length sample needs the whole context.
+    # vLLM. A full-length sample needs the whole context, plus the thinking budget
+    # when thinking is on; the run stops if the served context is shorter.
     tensor_parallel_size: "1"
     gpu_memory_utilization: "0.9"
-    max_model_len: "65536"
+    max_model_len: "131072"
     # Unused by this benchmark (no enroot sandboxes); kept for the shared contract.
     sandbox_cache: "/proj/granite-build/g4os/sage2/enroot-cache"
     # Empty leaves the image's HF cache default alone.

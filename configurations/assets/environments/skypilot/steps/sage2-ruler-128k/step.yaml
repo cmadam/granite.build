@@ -19,6 +19,16 @@ version: 0.1.0
 # job at max_model_len 131072, runs each task through ns's generation and RULER match,
 # and writes one results.json (schema: sage2_evals/results.py).
 #
+# THINKING (default on; a departure from ns/RULER, recorded in results.json). ns's RULER
+# budgets are for non-reasoning output (tokens_to_generate 30-128, answer prefix
+# prefilled). With thinking on, sage2-evals uses ns's chat data format (no prefill),
+# gives each task a thinking budget on top of its answer budget, and scores only the
+# content after vLLM's reasoning parser. A 128k sample plus that budget needs more than
+# 131072 tokens: more than granite-4.2-3b has (max_position_embeddings 131072, no rope
+# scaling). The run then stops before building data and names the options: shorter
+# samples ("sample_length=<131072 - budget>", a departure) or "enable_thinking=false"
+# (ns's RULER exactly). The choice is the recipe's (RULER_128K_OPTIONS).
+#
 # CUSTOM, not EVAL: gbcommon's StepType has no EVAL member (see bfcl-eval's template).
 type: custom
 config:
@@ -46,11 +56,14 @@ config:
     dataset: ""
     dataset_revision: ""
     # Space-separated key=value benchmark options passed as --option, e.g.
-    # "tasks=vt,cwe" (a subset, for debugging), "tokenizer=<path>", "enable_thinking=false",
-    # "ns.<key>=<value>" (raw ns overrides) or "answers=gold" (serves the expected answers:
-    # checks data and scoring without a GPU; model_path must still name the tokenizer).
+    # "tasks=vt,cwe" (a subset, for debugging), "tokenizer=<path>", "enable_thinking=false"
+    # (ns's RULER exactly), "thinking_budget=<tokens>", "sample_length=<tokens>" (shorter
+    # samples: a departure, recorded), "ns.<key>=<value>" (raw ns overrides) or
+    # "answers=gold" (serves the expected answers: checks data and scoring without a GPU;
+    # model_path must still name the tokenizer).
     options: ""
-    # vLLM. A full-length sample needs the whole context.
+    # vLLM. A full-length sample needs the whole context, plus the thinking budget
+    # when thinking is on; the run stops if the served context is shorter.
     tensor_parallel_size: "1"
     gpu_memory_utilization: "0.9"
     max_model_len: "131072"
