@@ -12,8 +12,8 @@ OUTPUT_ROOT: "/proj/granite-build/g4os/sage2/runs"
 HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
+SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:15746f5"
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
-SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:952082c"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -43,6 +43,25 @@ MMLU_PRO_WORKERS: 128
 MMLU_PRO_OPTIONS: ""
 ARENA_HARD_V2_WORKERS: 32
 ARENA_HARD_V2_OPTIONS: ""
+
+# ─── LiveCodeBench v6 / SciCode (NeMo-Skills) ─────────────────────────
+LIVECODEBENCH_WORKERS: 64
+LIVECODEBENCH_OPTIONS: ""
+SCICODE_WORKERS: 64
+SCICODE_OPTIONS: ""
+
+# ─── RULER 128k / 64k (NeMo-Skills) ───────────────────────────────────
+# Data are generated in the job for MODEL_PATH's tokenizer. Thinking is on by default
+# (a thinking budget on top of ns's answer budgets; scored after the reasoning parser),
+# and both targets serve at 131072.
+RULER_WORKERS: 32
+RULER_OPTIONS: ""
+# ruler-128k only. A 128k sample plus the thinking budget exceeds granite-4.2-3b's
+# 131072 context, so the thinking run cannot score full-length samples. PLACEHOLDER so
+# the target runs end to end: thinking off (ns's RULER exactly). The experiment config
+# is still open; the alternative is "sample_length=N" (N = 131072 - thinking budget;
+# shorter samples with thinking on, a departure). "" makes the run stop and name both.
+RULER_128K_OPTIONS: "enable_thinking=false"
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"
