@@ -13,7 +13,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
-SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:952082c"
+SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:e8a3b84"
 SAGE2_IMAGE_IFBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-ifbench:952082c"
 
 # ─── Scale ────────────────────────────────────────────────────────────
