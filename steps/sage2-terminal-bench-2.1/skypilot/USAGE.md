@@ -37,8 +37,13 @@ needed. Tasks need outbound internet (package installs in the tests).
 
 `agent=oracle` runs each task's reference solution instead of a model (set
 `model_path: none`). Use it to validate the images, the sandbox and the tests on a new
-cluster. Tasks that can't run on the enroot sandbox are excluded from the score;
-`results.json` records `n`, `n_total` and `excluded` (task: reason).
+cluster.
+
+Tasks that can't run on the enroot sandbox are excluded from the score, so `n` is
+87 of the 89 tasks. `configure-git-webserver` and `git-multibranch` run sshd and
+clone over ssh to localhost:22. On the shared host network that reaches the node's
+own sshd instead. The score is not directly comparable with an 89-task leaderboard
+number. `results.json` records `n`, `n_total` (89) and `excluded` (task: reason).
 
 ## Output
 
