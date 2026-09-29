@@ -13,6 +13,8 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | `swebench-pro` | pass@1[avg-of-3] resolve rate | implemented |
 | `swebench-multilingual` | pass@1[avg-of-3] resolve rate | implemented |
 | `terminal-bench-2.1` | pass@1[avg-of-8] resolve rate | implemented |
+| `birdbench` | pass@1 execution match | implemented |
+| `bfcl-v4` | overall_accuracy accuracy (web search via IBM search MCP) | implemented |
 | `aime25`, `hmmt-feb25` | pass@1[avg-of-4] symbolic correct | implemented (NeMo-Skills, `SAGE2_IMAGE_NEMOSKILLS`) |
 | `gpqa` (Diamond) | pass@1[avg-of-2] symbolic correct | implemented (NeMo-Skills; gated data, needs `HF_TOKEN`) |
 | `livecodebench-v6` | pass@1[avg-of-2] accuracy | implemented |
