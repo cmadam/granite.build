@@ -12,6 +12,8 @@ OUTPUT_ROOT: "/proj/granite-build/g4os/sage2/runs"
 HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
+SAGE2_IMAGE_IFBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-ifbench:952082c"
+SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:949fcb0"
 SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:15746f5"
 SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
 
@@ -62,6 +64,14 @@ RULER_OPTIONS: ""
 # is still open; the alternative is "sample_length=N" (N = 131072 - thinking budget;
 # shorter samples with thinking on, a departure). "" makes the run stop and name both.
 RULER_128K_OPTIONS: "enable_thinking=false"
+
+# ─── Chat & IF: MMLU-ProX lite (lm-eval), IFBench (NeMo-Skills) ───────
+# WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.
+# "languages=all", "max_tokens=8192" or "answers=gold" (mmlu-prox-lite only).
+MMLU_PROX_LITE_WORKERS: 128
+MMLU_PROX_LITE_OPTIONS: ""
+IFBENCH_WORKERS: 64
+IFBENCH_OPTIONS: ""
 
 # ─── Infrastructure ───────────────────────────────────────────────────
 CLUSTER: "bluevela"

@@ -15,7 +15,9 @@ The runtime is [sage2-evals](https://github.com/laminair/sage2-evals). Run
 | `livecodebench-v6` | pass@1[avg-of-2] accuracy | implemented |
 | `scicode` | pass@1[avg-of-2] subtask accuracy | implemented |
 | `mmlu-pro` | symbolic correct | implemented (NeMo-Skills) |
+| `mmlu-prox-lite` | exact match (custom-extract) | implemented (lm-eval, `SAGE2_IMAGE_LMEVAL`) |
 | `arena-hard-v2` | win rate | implemented (NeMo-Skills; judge `aws/claude-sonnet-5`, not the official GPT-4.1, no style control; needs `SAGE2_JUDGE_API_KEY`) |
+| `ifbench` | pass@1[avg-of-2] loose accuracy | implemented (NeMo-Skills + IFBench verifiers, `SAGE2_IMAGE_IFBENCH`) |
 | `ruler-128k` | accuracy | implemented |
 | `ruler-64k` | accuracy | implemented |
 
