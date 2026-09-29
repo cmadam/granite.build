@@ -12,7 +12,7 @@ OUTPUT_ROOT: "/proj/granite-build/g4os/sage2/runs"
 HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 
 # ─── Images (sage2-evals, `make publish-image EXTRA=<family>`) ────────
-SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:38ff52f"
+SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:ea7c503"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
