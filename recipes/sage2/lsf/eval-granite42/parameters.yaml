@@ -89,7 +89,8 @@ GDPVAL_OPTIONS: ""
 PROFBENCH_WORKERS: 16
 # Empty = nvidia/ProfBench at the commit pinned in sage2-evals.
 PROFBENCH_DATASET: ""
-PROFBENCH_OPTIONS: ""
+# Favored: the judge at max effort (results.json records the request it sent).
+PROFBENCH_OPTIONS: "judge_reasoning_effort=max judge_thinking=adaptive judge_effort=max"
 
 # ─── NeMo-Skills: AIME25, HMMT Feb25, GPQA, MMLU-Pro, Arena-Hard-V2 ───
 # WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.
