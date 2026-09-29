@@ -15,11 +15,18 @@
 # limitations under the License.
 
 import asyncio
+import errno
 import re
 from pathlib import Path
 
-from gbserver.types.errors import LogMonitoringFailedException
-from gbserver.utils.unwrap_errors import unwrap_errors
+from gbserver.types.errors import LogMonitoringFailedException, WorkloadFailedException
+from gbserver.utils.unwrap_errors import (
+    format_failure_reason,
+    format_oserror,
+    get_readable_error_message,
+    remote_stacktrace,
+    unwrap_errors,
+)
 from gbserver.utils.utils import (
     K8S_LABEL_VALUE_MAX_LENGTH,
     get_common_ancestor,
@@ -277,6 +284,180 @@ assert 0 > 0
         except BaseException as e:
             readable_error = unwrap_errors(e)
             assert readable_error == expected_err
+
+    def test_format_failure_reason_single_line(self):
+        # build_id="" so unwrap_errors returns "workload failed: " + str(e)
+        # without attempting a cloud-log fetch.
+        e = WorkloadFailedException(
+            "[RetryHandler launch_id 2c26a9c0] LSF job 1636559 failed: "
+            "Job 1636559 failed with return code 1 (LSF state EXIT)"
+        )
+        reason = format_failure_reason(e)
+        assert reason.startswith("workload failed: ")
+        assert "LSF job 1636559 failed" in reason
+        assert "(LSF state EXIT)" in reason
+        assert "\n" not in reason
+        assert "Traceback" not in reason
+        assert "Exception Details:" not in reason
+
+    def test_format_failure_reason_unwraps_exception_group(self):
+        # A WorkloadFailedException wrapped through TaskGroups (BaseExceptionGroup)
+        # plus a sibling CancelledError -- the reason must resolve to the real
+        # failure, single-line, no traceback.
+        wfe = WorkloadFailedException("[RetryHandler] LSF job 42 failed: boom")
+        eg = BaseExceptionGroup("unhandled errors in a TaskGroup", [wfe])
+        reason = format_failure_reason(eg)
+        assert reason == "workload failed: [RetryHandler] LSF job 42 failed: boom"
+        assert "\n" not in reason
+        assert "Traceback" not in reason
+
+    def test_get_readable_error_message_keeps_details_block(self):
+        # Guard for Fix A: the PR-facing body must still carry the collapsible
+        # Full Stack Trace <details> block (only the runner LOG duplication was
+        # removed, not the PR body).
+        err_stack = 'Traceback (most recent call last):\n  File "x", line 1\nBoom'
+        body = get_readable_error_message(
+            e=WorkloadFailedException("[RetryHandler] LSF job 42 failed: boom"),
+            err_stack=err_stack,
+        )
+        assert "### Full Stack Trace" in body
+        assert "<details>" in body
+        assert err_stack in body
+        assert "workload failed:" in body
+
+    def test_oserror_reason_names_errno_and_path(self):
+        # An EROFS OSError must render errno, strerror, and the path so the
+        # PR-facing reason names which mount was read-only.
+        e = OSError(errno.EROFS, "Read-only file system", "/proj/data-eng/builds")
+        for out in (format_oserror(e), unwrap_errors(e)):
+            assert "Errno 30" in out
+            assert "Read-only file system" in out
+            assert "/proj/data-eng/builds" in out
+
+    def test_oserror_without_errno_or_path_falls_back(self):
+        # OSError subclasses with no diagnostic info (e.g. TimeoutError) should
+        # read naturally, not get an "OSError" prefix bolted on.
+        e = TimeoutError("operation timed out")
+        assert format_oserror(e) == "operation timed out"
+        assert unwrap_errors(e) == "operation timed out"
+
+    def test_oserror_from_remote_server_has_no_path_to_report(self):
+        # Regression guard for the real bluevela/SLURM failure: SkyPilot's API
+        # server raises OSError(errno, strerror) with no filename, so
+        # format_oserror has nothing beyond str(e) to add. The path must come
+        # from the server-side traceback instead (see remote_stacktrace).
+        e = OSError(errno.EROFS, "Read-only file system")
+        assert format_oserror(e) == "[Errno 30] Read-only file system"
+
+    def test_remote_stacktrace_returns_server_traceback(self):
+        # SkyPilot attaches the API server's traceback as a `stacktrace` str.
+        e = OSError(errno.EROFS, "Read-only file system")
+        setattr(e, "stacktrace", 'File "/sky/provision.py", line 1\nOSError: ...')
+        out = remote_stacktrace(e)
+        assert out is not None
+        assert "/sky/provision.py" in out
+
+    def test_remote_stacktrace_absent_or_blank_returns_none(self):
+        # A locally-raised exception has no `stacktrace`; a blank one carries no
+        # information. Both must return None so callers skip the extra log line.
+        assert remote_stacktrace(OSError(errno.EROFS, "Read-only file system")) is None
+        blank = OSError("boom")
+        setattr(blank, "stacktrace", "   \n ")
+        assert remote_stacktrace(blank) is None
+        wrong_type = OSError("boom")
+        setattr(wrong_type, "stacktrace", object())
+        assert remote_stacktrace(wrong_type) is None
+
+    def test_readable_message_appends_remote_traceback(self):
+        # A tb-less remote exception makes err_stack a single bare line; the
+        # <details> block must still carry the server traceback naming the path.
+        e = OSError(errno.EROFS, "Read-only file system")
+        server_tb = 'File "/sky/backend.py", line 9, in _sync\nOSError: [Errno 30] ...'
+        setattr(e, "stacktrace", server_tb)
+        body = get_readable_error_message(
+            e=e, err_stack="OSError: [Errno 30] Read-only file system\n"
+        )
+        assert "Traceback from the remote API server" in body
+        assert "/sky/backend.py" in body
+
+    def test_readable_message_no_duplicate_remote_traceback(self):
+        # When err_stack already contains the server traceback, don't repeat it.
+        e = OSError(errno.EROFS, "Read-only file system")
+        server_tb = 'File "/sky/backend.py", line 9, in _sync'
+        setattr(e, "stacktrace", server_tb)
+        body = get_readable_error_message(e=e, err_stack=f"prefix {server_tb} suffix")
+        assert "Traceback from the remote API server" not in body
+
+    def test_readable_message_without_remote_traceback_unchanged(self):
+        # Locally-raised exceptions must not gain the remote-traceback section.
+        e = OSError(errno.EROFS, "Read-only file system", "/proj/builds")
+        body = get_readable_error_message(e=e, err_stack="Traceback...\nOSError: x")
+        assert "Traceback from the remote API server" not in body
+
+    # -- chain traversal -----------------------------------------------------
+    # By the time a failure reaches a reporting layer it is wrapped: the
+    # production trace read "RunFailed -> ValueError: failed during loading
+    # artifacts" over the original OSError. Looking only at the outermost
+    # exception skipped the server traceback exactly where it was needed.
+
+    @staticmethod
+    def _remote_oserror():
+        e = OSError(errno.EROFS, "Read-only file system")
+        setattr(e, "stacktrace", 'File "/sky/backend.py", line 9\nOSError: ...')
+        return e
+
+    def test_remote_stacktrace_walks_cause(self):
+        try:
+            try:
+                raise self._remote_oserror()
+            except OSError as inner:
+                raise ValueError("failed during loading artifacts") from inner
+        except ValueError as wrapped:
+            assert remote_stacktrace(wrapped) is not None
+            body = get_readable_error_message(e=wrapped, err_stack="ValueError: x\n")
+            assert "Traceback from the remote API server" in body
+            assert "/sky/backend.py" in body
+
+    def test_remote_stacktrace_walks_implicit_context(self):
+        # `raise X` inside an except block sets __context__, not __cause__.
+        try:
+            try:
+                raise self._remote_oserror()
+            except OSError:
+                raise ValueError("implicit context")
+        except ValueError as wrapped:
+            assert remote_stacktrace(wrapped) is not None
+
+    def test_remote_stacktrace_walks_exception_group(self):
+        # The TaskGroup path delivers failures inside a group.
+        group = ExceptionGroup("tg", [ValueError("sibling"), self._remote_oserror()])
+        assert remote_stacktrace(group) is not None
+
+    def test_remote_stacktrace_walks_group_nested_in_cause(self):
+        try:
+            try:
+                raise ExceptionGroup("tg", [self._remote_oserror()])
+            except ExceptionGroup as eg:
+                raise RuntimeError("outer") from eg
+        except RuntimeError as wrapped:
+            assert remote_stacktrace(wrapped) is not None
+
+    def test_remote_stacktrace_tolerates_context_cycle(self):
+        # __context__ can form a cycle; the walk must terminate.
+        a = ValueError("a")
+        b = ValueError("b")
+        a.__context__ = b
+        b.__context__ = a
+        assert remote_stacktrace(a) is None
+
+    def test_remote_stacktrace_none_anywhere_in_chain(self):
+        try:
+            try:
+                raise OSError(errno.EROFS, "Read-only file system")
+            except OSError as inner:
+                raise ValueError("wrapped") from inner
+        except ValueError as wrapped:
+            assert remote_stacktrace(wrapped) is None
 
 
 # Kubernetes label value validation regex (from the API server rules):

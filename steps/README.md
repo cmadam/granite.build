@@ -233,14 +233,20 @@ Defined once in [`common.mk`](common.mk) and shared by every step:
   (`$(VENV_DIR)`, default `.venv` at the repo root): `make test` activates it
   automatically and fails fast with a pointer to `make venv` if it is missing.
   Override `VENV_DIR` if your virtualenv lives elsewhere.
+  Runs pytest with `$(PYTEST_CAPTURE)`, default `-s`, matching the repo-root
+  Makefile. **Do not drop `-s` for a SkyPilot build test.** Under pytest's capture the
+  SkyPilot SDK's `click.secho(cluster_name)` flushes a stdout fd that has been replaced,
+  and a *second* `sky launch` in the same pytest process then fails during provisioning
+  with `OSError: [Errno 9] Bad file descriptor`. A single-launch test survives by luck, so
+  the failure appears only in multi-target fixtures and looks intermittent.
 * **`test-setup`** — optional per-step hook that stands up the infrastructure a
-  step's tests need (e.g. a local SLURM + MinIO cluster). It is a **separate
+  step's tests need (e.g. a local Docker SLURM cluster). It is a **separate
   target, deliberately not a prerequisite of `test`**, so the (often slow) infra
   bring-up runs only when you ask: run `make test-setup` **once**, then iterate
   with `make test`. `common.mk` supplies a no-op default; a step opts in by
   setting `HAS_TEST_SETUP := true` **before** the `include` and defining its own
   `test-setup` target after it — typically delegating to the repo-root Makefile,
-  e.g. `test-setup: ; $(MAKE) -C $(REPO_ROOT) slurm-setup minio-setup` (the
+  e.g. `test-setup: ; $(MAKE) -C $(REPO_ROOT) slurm-setup` (the
   `HAS_TEST_SETUP` flag makes `common.mk` skip its default, avoiding an
   "overriding recipe" warning). `REPO_ROOT` is provided by `common.mk`.
 * **`clean`** — remove the generated `$(SPACE_DIR)/`.
@@ -264,6 +270,7 @@ Defined once in [`common.mk`](common.mk) and shared by every step:
 | `DEFAULT_ENVIRONMENT` | *(empty)*                             | if set, written as `variables.DEFAULT_ENVIRONMENT` in `space.yaml` |
 | `TEST_DIR`        | `test`                                    | dir of Python tests run by `make test` |
 | `PYTHON`          | `python3`                                 | interpreter used to run tests    |
+| `PYTEST_CAPTURE`  | `-s`                                      | output-capture flag for `make test`; `-s` is **required** for SkyPilot build tests (see the note under `test`) |
 | `VENV_DIR`        | `.venv` at the repo root                  | virtualenv `make test` activates before running pytest |
 | `HAS_TEST_SETUP`  | *(unset)*                                 | set to `true` (before the include) when the step defines its own `test-setup` target |
 | `STEP_ENV`        | the Makefile's own dir name (e.g. `skypilot`) | step's environment segment, used by `publish-step` |

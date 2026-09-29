@@ -37,10 +37,21 @@ Kubernetes supports autostop, but per-step `cleanup_skypilot()` already runs `sk
 `idle_minutes_to_autostop` (default 10) is a safety net for crashed processes; set `0` for near-immediate
 autostop or `null` to disable.
 
+> **`sbatch_options` is a no-op on Kubernetes.** The per-step `sbatch_options`
+> field ([skypilot.md](skypilot.md#config-overrides-docker-sbatch_options)) is a
+> **SLURM-only** knob; SkyPilot exposes no per-task equivalent on Kubernetes, so
+> a value set here is ignored (a WARNING is logged). Bound job runtime inside the
+> `run:` command or via a Kubernetes-level policy instead.
+
 ### `shared_workdir`
 
 For cross-step state, point `shared_workdir` at a path backed by a **ReadWriteMany PVC** mounted on
 every worker (e.g. `/mnt/shared`). See [skypilot.md](skypilot.md#shared_workdir).
+
+Kubernetes has no host/container split to worry about: the step's image **is** the pod, and the PVC is
+attached as a pod volume, so it is already the container's filesystem. There is no separate `workdir`
+mount to configure (unlike SLURM) — mounting the RWX PVC at your `shared_workdir` path makes the per-run
+workdir visible to every step, bare or containerized.
 
 ## Example `environment.yaml`
 

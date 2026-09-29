@@ -100,6 +100,76 @@ When unset, gbserver-managed caches fall back to `~/.cache/gbserver/<store>` on 
 works when consecutive steps land on the same machine. Example paths per backend: `slurm: /shared`
 (NFS/Lustre/GPFS), `k8s: /mnt/shared` (RWX PVC), `aws: /mnt/efs` (EFS/FSx).
 
+#### Containerized steps must also see the shared workdir *inside* the container
+
+`shared_workdir` being present on the worker is enough for a **bare** step — it runs directly on the
+host and sees the filesystem. A step that sets an `image_id` is different: its `run` executes inside a
+container whose filesystem is **not** the host's, so the per-run workdir (the step's CWD) must *also*
+be visible inside that container. When it isn't, the launcher's `cd "$GB_BUILD_WORKDIR"` lands in the
+container's ephemeral writable layer, the step writes its output there, and that layer is discarded at
+teardown — a later step (e.g. the auto-queued `hfpush`) then fails with `<path> does not exist`.
+
+How the shared filesystem is exposed to a container differs by backend:
+
+- **SLURM** — the enroot container mounts only the account home, ccache, and the SkyPilot `workdir`;
+  set `workdir` to an ancestor of `shared_workdir`. See
+  [skypilot-slurm.md](skypilot-slurm.md#workdir-containerized-steps).
+- **LSF** — the shared-FS roots (`/proj`, `/opt/share`) are bind-mounted *identity* into the container
+  automatically, so a `shared_workdir` under one of them just works. See
+  [skypilot-lsf.md](skypilot-lsf.md#file_mounts-inside-enroot-containers).
+- **Kubernetes** — the step image *is* the pod, so a PVC attached as a pod volume is already the
+  container's filesystem (no host/container split). See
+  [skypilot-kubernetes.md](skypilot-kubernetes.md#shared_workdir).
+- **AWS** — EFS/FSx is mounted on the VM; a bare step sees it directly, a containerized step needs the
+  mount visible inside the container. See [skypilot-aws.md](skypilot-aws.md#shared_workdir).
+
+### `shared_filesystem`
+
+`shared_workdir` above assumes the operator has *already* mounted a shared filesystem on every worker.
+`shared_filesystem` closes that gap on **Skypilot/aws only**: gbserver mounts a BYO, pre-provisioned
+EFS filesystem on each worker at launch (at `mount_point`), so cross-step state flows across the
+separate EC2 instances SkyPilot allocates per step with no manual mount step. `shared_filesystem`
+defines **only the mount** — it does *not* imply a workdir. When `shared_filesystem` is set,
+`shared_workdir` is **required** and must be an absolute path equal to `mount_point` or a subdirectory
+of it; it defines where the workdir lives on the mount (and, per
+[#404](https://github.com/ibm-granite/granite.build/issues/404), its path prefix will later select
+which filesystem once multiple are supported). `EnvironmentConfig` validation rejects a
+`shared_filesystem` with no `shared_workdir`, or a `shared_workdir` outside `mount_point`.
+
+```yaml
+config:
+  default_cloud: aws
+  shared_workdir: /mnt/gb-shared/gbroot   # Required with shared_filesystem; must be mount_point or a subdir of it.
+  shared_filesystem:
+    provider: efs                 # Only `efs` today (BYO, pre-provisioned — gbserver does not create it).
+    mount_point: /mnt/gb-shared   # Where the FS is mounted on each worker.
+    efs:
+      file_system_id: fs-0abc123
+      region: us-east-1           # Must match the region the workers launch in (mount targets are AZ-scoped).
+      tls: true
+      # cleanup_zone: us-east-1a  # Optional. Pin the teardown VM to a mount-target AZ.
+```
+
+- **Provider `efs`** — a bring-your-own, pre-provisioned EFS filesystem (with mount targets per worker
+  AZ and an SG allowing NFS 2049). gbserver mounts it; it never creates or deletes the filesystem. See
+  the [provisioning runbook](skypilot-aws.md#runbook-provision-a-shared-efs-filesystem).
+- **Bare *and* containerized steps** — the mount reaches inside a step's container too, via SkyPilot's
+  default container capabilities, so both step shapes see the same per-run workdir. See
+  [skypilot-aws.md](skypilot-aws.md#shared_filesystem-auto-mounting-efs).
+- **`1777` root requirement** — the EFS root must be `chmod 1777` (sticky, like `/tmp`) so a non-root
+  step can `mkdir` its per-run workdir; gbserver creates each per-run dir `1777` as well. This is a
+  one-time bootstrap on the filesystem (see the runbook).
+- **`GB_LOCAL_SCRATCH`** — the shared FS is the durable **hand-off medium** between steps, not fast
+  scratch. Each step also gets an instance-local `GB_LOCAL_SCRATCH` dir on the worker's NVMe; **stage
+  hot paths (checkpoints, working scratch) there** and copy only the durable result back to the shared
+  workdir, so per-byte EFS throughput charges stay on the hand-off, not on churn.
+- **hf cache** — when `shared_filesystem` is enabled, drop `cache_path: /tmp/hf_cache` and
+  `inline: true` from the hf assetstore (use `config: {}`) so `hfpull` runs as its own step and caches
+  to `${mount_point}/hf_cache`; otherwise it caches instance-locally and the model never reaches EFS.
+
+Full AWS admin runbook, container internals, and GC/cost guidance:
+[skypilot-aws.md](skypilot-aws.md#shared_filesystem-auto-mounting-efs).
+
 ## `step.yaml` — launcher and monitor types
 
 | `type` | Method | Notes |
@@ -142,15 +212,20 @@ environment_configs:
 
           # ---- sky config overrides (SkyPilot's task-level `config:`) ----
           docker:                 # Optional. Deep-merged into sky.Resources._cluster_config_overrides.
-            run_options:          # Only the `docker` section is passed through per-step; other SkyPilot
-              - "--shm-size=8g"   # config sections belong in the env-level `cloud_config` block.
+            run_options:          # The `docker` and (SLURM-only) `sbatch_options` sections are passed
+              - "--shm-size=8g"   # through per-step; other SkyPilot config belongs in env `cloud_config`.
+          sbatch_options:         # Optional, SLURM-only. #SBATCH directives (no `--`), forwarded verbatim.
+            time: "4:00:00"       # e.g. --time=4:00:00, --qos=high. No-op on aws/k8s/lsf (WARNING).
+            qos: high             # NOTE: SkyPilot-managed keys (gres, mem, cpus-per-task, partition,
+                                  # nodes, ...) are silently dropped — use resources.accelerators etc.
+                                  # See skypilot-slurm.md#sbatch_options--slurm-sbatch-directives.
 
           # ---- sky.Task ----
           setup: |                # Optional. Run once at cluster bring-up (cached across reuse).
             pip install foo bar
           run: |                  # Required. The actual job each launch. CWD is the per-run workdir
             echo "GB_ARTIFACT_ID:my_out GB_ARTIFACT_PATH:/tmp/out.json"   # (or $HOME).
-          envs:                   # Optional. Extra env vars. Merged AFTER env-level secrets and
+          envs:                   # Optional. Extra env vars. Merged AFTER declared secrets and
             FOO: bar              # BEFORE config.launcher_config.envs. GB_* vars are auto-injected.
           file_mounts:            # Optional. Two forms (see "file_mounts" below):
             /remote/path: /local/path          # String → local-to-remote copy (set_file_mounts).
@@ -236,14 +311,22 @@ cloud-agnostic steps leave `resources` empty and let the build.yaml supply them.
 
 > `compute_config` is read only partially by this launcher (unlike K8s/LSF) — see the dedicated note below.
 
-#### `config` overrides (`docker`)
+#### `config` overrides (`docker`, `sbatch_options`)
 
 SkyPilot tasks accept a top-level `config:` block that overrides `~/.sky/config.yaml` per request; on
-`sky.Resources` this is `_cluster_config_overrides`. gbserver exposes **only the `docker` section** of
-it, as a launcher-level `docker:` key — e.g. `docker.run_options` to pass extra `docker run` flags
-(`--shm-size`, `--gpus`, `--ipc=host`). It merges `launcher_config.docker` with
-`config.launcher_config.docker` (build.yaml wins). Broader SkyPilot config (kubernetes, aws, nvidia,
-etc.) is not per-step — set it once at the env level via `cloud_config` (see "Inline config").
+`sky.Resources` this is `_cluster_config_overrides`. gbserver exposes two sections of it per step:
+
+- **`docker`** — a launcher-level `docker:` key — e.g. `docker.run_options` to pass extra `docker run`
+  flags (`--shm-size`, `--gpus`, `--ipc=host`). It merges `launcher_config.docker` with
+  `config.launcher_config.docker` (build.yaml wins).
+- **`sbatch_options`** (**SLURM-only**) — a map of SLURM `#SBATCH` directive names (no `--`) forwarded
+  verbatim to the job (`time`, `gres`, `qos`, `account`, …). Merged **per key** across env
+  (`environment.yaml` `config.sbatch_options`) → step.yaml → build.yaml (highest last). A no-op on
+  aws/kubernetes/lsf (a WARNING is logged). See
+  [skypilot-slurm.md](skypilot-slurm.md#sbatch_options--slurm-sbatch-directives).
+
+Broader SkyPilot config (kubernetes, aws, nvidia, etc.) is not per-step — set it once at the env level
+via `cloud_config` (see "Inline config").
 
 #### `file_mounts`
 
@@ -296,11 +379,34 @@ relative destinations fall back to SkyPilot's default (`~/sky_workdir/…`).
 
 #### `envs`, `post_launch_task`, `idle_minutes_to_autostop`
 
-- `envs` — extra environment variables for the job, merged after env-level secrets and before
+- `envs` — extra environment variables for the job, merged after declared secrets and before
   `config.launcher_config.envs`; the auto-injected `GB_*` vars (below) always win.
 - `post_launch_task.run` — commands run on the host over SSH *after* the job starts (e.g. launching an
   evaluator sidecar). A failure is logged and emitted as a `MESSAGE_EVENT` but does not fail the step.
 - `idle_minutes_to_autostop` — per-step override of the env-level autostop; ignored on `slurm`/`lsf`.
+
+### Step `config` blocks read by SkyPilot
+
+Mirroring `config.lsf` / `config.k8s`, a step declares its SkyPilot secrets under `config.skypilot`:
+
+```yaml
+config:
+  skypilot:
+    secrets:
+      secret_names_to_use_as_env_variable:
+        - env_name: MY_TOKEN        # Env var injected into the launched task.
+          secret_name: my_secret    # Space/user secret to read; falls back to env_name.
+```
+
+Only the secrets listed here are injected as task env vars — **least-privilege**, matching LSF and
+K8s. The full space/user secret bag is **not** dumped into the task (an earlier behavior). A declared
+secret that is absent from the resolved secret bag fails the launch fast with a `ValueError` (the
+secret *value* is never included in the message). This applies to both the unmanaged `Skypilot`
+launcher and `Skypilot_managed`.
+
+> **Migration note:** custom SkyPilot steps that implicitly relied on an undeclared secret being
+> present as an env var must now declare it here. Built-in asset steps are unaffected — they receive
+> their tokens via explicit launcher `envs` (e.g. `HF_TOKEN`), not the secret bag.
 
 ### Auto-injected environment variables
 
@@ -313,7 +419,7 @@ Added on top of (and overriding) anything in `envs`:
 | `GB_TARGETRUN_ID` | The enclosing target run id, when present. |
 | `GB_BUILD_ID` | The build id, when present. |
 | `GB_SHARED_WORKDIR` | The env-level `shared_workdir` path, when set. |
-| `<env secrets>` | All secrets resolved from the env's `secret_refs`, merged before launcher `envs`. |
+| `<declared secrets>` | Only the secrets a step declares in `config.skypilot.secrets.secret_names_to_use_as_env_variable` (see below), merged before launcher `envs`. |
 
 ### `skypilot_monitor` config
 
@@ -415,5 +521,5 @@ not copied into the pod; if the `run:` script needs files, use `file_mounts` or 
 ## See also
 
 - Cloud pages: [SLURM](skypilot-slurm.md) · [LSF](skypilot-lsf.md) · [Kubernetes](skypilot-kubernetes.md) · [AWS](skypilot-aws.md)
-- [Local SLURM setup](setup/skypilot-slurm-setup.md) — Docker SLURM + MinIO for local testing
+- [Local SLURM setup](setup/skypilot-slurm-setup.md) — Docker SLURM + local S3 for local testing
 - [Environments overview](README.md) and the shared [event_configs schema](README.md#event_configs--log-line-parsing-rules)

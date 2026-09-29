@@ -143,6 +143,7 @@ CONFIGURATIONS_STANDALONE_SPACE_SUBPATH = Path("spaces") / "local"
 
 
 ENV_VAR_TRUNCATE_LENGTH = ENV_VAR_PREFIX + "_TRUNCATE_LENGTH"
+ENV_VAR_LOG_RECORD_MAX_CHARS = ENV_VAR_PREFIX + "_LOG_RECORD_MAX_CHARS"
 # The env var for admin table prefix, to cascade it to child processes (especiallly for rest-server multiworker)
 # Once we migrate to env-based SQL schemas we won't need it.
 ENV_VAR_GBSERVER_ADMIN_TABLE_PREFIX = ENV_VAR_PREFIX + "_ADMIN_TABLE_PREFIX"
@@ -165,6 +166,11 @@ ENV_VAR_SKYPILOT_PROVISION_MAX_ATTEMPTS = (
 ENV_VAR_SKYPILOT_PROVISION_BACKOFF_MAX = (
     ENV_VAR_PREFIX + "_SKYPILOT_PROVISION_BACKOFF_MAX"
 )
+ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S = ENV_VAR_PREFIX + "_SKYPILOT_SSH_PROBE_TIMEOUT_S"
+ENV_VAR_SKYPILOT_HOST_SSH_LOGIN_TIMEOUT_S = (
+    ENV_VAR_PREFIX + "_SKYPILOT_HOST_SSH_LOGIN_TIMEOUT_S"
+)
+ENV_VAR_SKYPILOT_HOST_SSH_ATTEMPTS = ENV_VAR_PREFIX + "_SKYPILOT_HOST_SSH_ATTEMPTS"
 ENV_VAR_METADATA_STORAGE = ENV_VAR_PREFIX + "_METADATA_STORAGE"
 ENV_VAR_UI_DIR = ENV_VAR_PREFIX + "_UI_DIR"
 ENV_VAR_AUTH_MODE = ENV_VAR_PREFIX + "_AUTH_MODE"
@@ -602,6 +608,11 @@ GBSERVER_METRICS_AUTH_TOKEN = os.getenv(ENV_VAR_GBSERVER_METRICS_AUTH_TOKEN, "")
 # Metrics
 DEFAULT_LOG_LEVEL = os.getenv(ENV_VAR_DEFAULT_LOG_LEVEL, "info").lower()
 GBSERVER_TRUNCATE_LENGTH = int(os.getenv(ENV_VAR_TRUNCATE_LENGTH, "-1"), base=10)
+# Cap for text escaped into one log record (see escape_for_one_record): the log
+# pipeline ingests one record per line, so multi-line bodies are escaped, not split.
+GBSERVER_LOG_RECORD_MAX_CHARS = int(
+    os.getenv(ENV_VAR_LOG_RECORD_MAX_CHARS, "20000"), base=10
+)
 # Cap on simultaneous SkyPilot cluster bring-ups. Each launch opens a fresh
 # SSH session to the cloud's login node; LSF-backed clouds in particular
 # trip MaxAuthTries on sshd when many evals fan out at once. Default 4 is
@@ -620,6 +631,24 @@ GBSERVER_SKYPILOT_PROVISION_MAX_ATTEMPTS = int(
 )
 GBSERVER_SKYPILOT_PROVISION_BACKOFF_MAX = int(
     os.getenv(ENV_VAR_SKYPILOT_PROVISION_BACKOFF_MAX, "30"), base=10
+)
+# Overall timeout for the `ssh` reachability probe gating an HPC (slurm/lsf)
+# SkyPilot launch. Mirrors GBSERVER_LSF_SSH_PROBE_TIMEOUT_S: SkyPilot's own SSH
+# bounds only the TCP leg, not the banner/login phase, so a wedged login node
+# otherwise surfaces as an opaque precheck ValueError. One probe per launch (not a
+# sweep), so this is the whole cost. 0 disables.
+GBSERVER_SKYPILOT_SSH_PROBE_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_SKYPILOT_SSH_PROBE_TIMEOUT_S, "30"), base=10
+)
+# Bounds the banner/login phase of the post-launch host SSH (sidecar tasks), which
+# ConnectTimeout (TCP leg only) leaves unbounded.
+GBSERVER_SKYPILOT_HOST_SSH_LOGIN_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_SKYPILOT_HOST_SSH_LOGIN_TIMEOUT_S, "30"), base=10
+)
+# Connect attempts for that SSH. Only the login phase retries; the payload never
+# re-runs (it may not be idempotent).
+GBSERVER_SKYPILOT_HOST_SSH_ATTEMPTS = int(
+    os.getenv(ENV_VAR_SKYPILOT_HOST_SSH_ATTEMPTS, "3"), base=10
 )
 DEFAULT_GH_REQUEST_TIMEOUT = int(
     os.getenv(ENV_VAR_GBSERVER_DEFAULT_GH_REQUEST_TIMEOUT, "60"), base=10
@@ -812,6 +841,79 @@ GBSERVER_LSF_RETRY_ADJUDICATION_TIMEOUT = int(
     ),
     base=10,
 )
+# Time budget (seconds) for establishing an SSH tunnel to an LSF login node,
+# sweeping all nodes with backoff before failing the build. Login nodes can be
+# unreachable for hours. Governs both setup and mid-build reconnect. Default 4h.
+GBSERVER_LSF_SSH_CONNECT_BUDGET_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_CONNECT_BUDGET_S", "14400"), base=10
+)
+# Base delay (seconds) for the backoff between SSH-establish sweeps.
+GBSERVER_LSF_SSH_CONNECT_BASE_BACKOFF_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_CONNECT_BASE_BACKOFF_S", "2"), base=10
+)
+# Cap (seconds) on the per-sweep backoff so a long outage keeps a steady cadence.
+GBSERVER_LSF_SSH_CONNECT_MAX_BACKOFF_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_CONNECT_MAX_BACKOFF_S", "60"), base=10
+)
+# Per-SSH-attempt timeouts (asyncssh), inside one establish attempt of the sweep
+# above. Empirically (ssh -vv) connect+banner+auth take ~1s on bluevela even when
+# "slow"; the real delay is server-side session/exec setup AFTER auth, bounded by
+# COMMAND_TIMEOUT below. So login/connect timeouts are not the fix — they only
+# bound a genuinely-degraded node before failover.
+# login_timeout: banner+kex+auth ("Login timeout expired"). The reachability probe
+# has its own bound (PROBE_TIMEOUT below), independent of this.
+GBSERVER_LSF_SSH_LOGIN_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_LOGIN_TIMEOUT_S", "30"), base=10
+)
+# connect_timeout: TCP connect leg only (~instant on bluevela).
+GBSERVER_LSF_SSH_CONNECT_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_CONNECT_TIMEOUT_S", "10"), base=10
+)
+# command_timeout (asyncssh conn.run(timeout=...)): THE fix. Bounds the slow
+# server-side session/exec setup (~28s, up to a minute under load) before a
+# command produces output. On expiry asyncssh raises TimeoutError (retried by
+# run_remote_with_retries) instead of hanging. 120s = observed delay + margin.
+GBSERVER_LSF_SSH_COMMAND_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_COMMAND_TIMEOUT_S", "120"), base=10
+)
+# Keepalive: drop a session whose server stops answering transport probes.
+# interval * count_max ≈ dead-session detection (~30s).
+GBSERVER_LSF_SSH_KEEPALIVE_INTERVAL_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_KEEPALIVE_INTERVAL_S", "10"), base=10
+)
+GBSERVER_LSF_SSH_KEEPALIVE_COUNT_MAX = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_KEEPALIVE_COUNT_MAX", "3"), base=10
+)
+# Overall timeout for the plain-`ssh` reachability probe (__is_ssh_node_reachable),
+# which gates tunnel establishment. Kept SMALL and dedicated (not command_timeout):
+# _get_reachable_ssh_node probes every node in turn with no per-sweep deadline, so
+# a large per-probe cap would let one sweep run N * cap and blow a caller's budget
+# (e.g. bkill's 300s). A wedged node fails over in ~this long; a healthy one
+# answers well within it even with slow session setup.
+GBSERVER_LSF_SSH_PROBE_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_SSH_PROBE_TIMEOUT_S", "30"), base=10
+)
+# Establish budget: how long the synchronous file APIs sweep candidate login nodes
+# for a tunnel before returning 503. Short because they run behind an HTTPS route
+# (HAProxy server-timeout 600s, k8s/chart/values.yaml) for an interactive caller;
+# keep well under 600s.
+GBSERVER_LSF_FILE_API_SSH_BUDGET_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_FILE_API_SSH_BUDGET_S", "45"), base=10
+)
+# File-API command timeout: same session-setup leniency as the runner's
+# COMMAND_TIMEOUT but a shorter max, since the caller is interactive (not a patient
+# batch runner). Waits out the ~28s setup with margin, stays well under 600s.
+GBSERVER_LSF_FILE_API_COMMAND_TIMEOUT_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_FILE_API_COMMAND_TIMEOUT_S", "60"), base=10
+)
+# Establish budget for a best-effort bkill during cleanup: bkill must reach a
+# login node to run the kill, so it reconnects via the robust path — but with a
+# short budget, not the runner's multi-hour one (teardown can't block for hours; a
+# leaked job is better surfaced fast). 5 min spans a few real attempts across the
+# nodes, then gives up and logs the skip.
+GBSERVER_LSF_BKILL_SSH_BUDGET_S = int(
+    os.getenv(ENV_VAR_PREFIX + "_LSF_BKILL_SSH_BUDGET_S", "300"), base=10
+)
 # Used by the build framework monitoring to allow the consumption of all the events
 GBSERVER_MONITORING_GRACE_PERIOD = int(
     os.getenv(ENV_VAR_PREFIX + "_MONITORING_GRACE_PERIOD", "30"), base=10
@@ -828,6 +930,13 @@ GBSERVER_CLEANUP_MAX_RETRIES = int(
 # Base delay (seconds) between cleanup retries (exponential backoff: delay * 2^attempt)
 GBSERVER_CLEANUP_RETRY_BASE_DELAY = int(
     os.getenv(ENV_VAR_PREFIX + "_CLEANUP_RETRY_BASE_DELAY", "10"), base=10
+)
+# How long a build may sit PENDING with no live runner before the BuildWatcher re-arms
+# it (drops it from the seen-list to re-dispatch next poll). Only a cheap, guarded
+# re-dispatch, not a failure, so a short cycle is fine; a healthy dispatch has a live
+# thread in the same poll, so this never fires on it. Floored at 1. Default 3 min.
+GBSERVER_STUCK_BUILD_TIMEOUT_SECONDS = max(
+    1, int(os.getenv(ENV_VAR_PREFIX + "_STUCK_BUILD_TIMEOUT", "180"), base=10)
 )
 USE_LESS_COMPUTE_ON_DRY_RUN = (
     os.getenv(ENV_VAR_USE_LESS_COMPUTE_ON_DRY_RUN, "True").lower() == "true"

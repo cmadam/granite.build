@@ -88,6 +88,7 @@ standalone = [
 ]
 # Tier 2: Third-party open-source — installable from PyPI, testable in GH Actions
 thirdparty = [
+    "asyncssh",	# SSH tunnel util (also in [ibm]); here so non-ibm CI can test it
     "docker>=7.0.0",
     "kubernetes<36.0.0",	# Avoids missing watch import created in kubernetes==36.0.0
     "skypilot[kubernetes,slurm,aws] @ git+https://github.com/cmadam/skypilot.git@gb-sky-v1-stable",  # Integration branch (granite-build): LSF cloud driver + LSF multi-node (per-host dispatch + rank manifest, driver-side task executor, head-only cluster setup, EXEC_HOST via JSON, enroot_mounts/nccl_tuning_file propagation, cpus/span[ptile]) + thinkahead AWS host-AMI-override + LsfCommandRunner rsync timeout fix + slurm env resolution without `which`. Back on the tag now that feature/lsf-multinode has merged (fork PR #2), which is what the exact-SHA pin was waiting for; the alias covers the multi-node work, so compute_config.num_nodes > 1 on the lsf cloud still resolves sky.skylet.executor.lsf, which gbserver refuses a multi-node launch without. gb-sky-v1-stable is a moving alias for the recommended v1-line commit (re-pointed as the fork advances, like a docker minor tag); a breaking jump gets a new tag. Fresh installs re-resolve it; cached clones need `git fetch --tags --force`.
@@ -278,7 +279,7 @@ markers = [
     "slow: tests that run for longer",
     "hf_integration: tests that perform real integration with HuggingFace Hub",
     "live: opt specific services into live mode (e.g. @pytest.mark.live('storage', 'github'))",
-    "skypilot_integration: tests exercising a real SkyPilot environment end-to-end (e.g. the local SLURM + MinIO fixture via make integration-test, or a cloud backend such as aws when credentials are present); each test gates itself on the infrastructure it needs",
+    "skypilot_integration: tests exercising a real SkyPilot environment end-to-end (e.g. the local SLURM fixture via make integration-test, or a cloud backend such as aws when credentials are present); each test gates itself on the infrastructure it needs",
     "extended: slow / real-infra tests; run only in the extended suite (make extended-tests). The Mode-2 step build tests under test/steps/ (published-step tests copied by a step's `make publish`) are auto-marked with this by test/steps/conftest.py, so they run in extended-tests and from VSCode but stay out of the quick/PR selections.",
 ]
 testpaths = ["test/unit", "test/integration", "test/e2e"]

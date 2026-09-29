@@ -26,7 +26,7 @@
 #                 the step's Python tests in $(TEST_DIR)/ (adjacent to src/,
 #                 organised in per-cluster subdirs; not bundled)
 #   test-setup    OPTIONAL per-step hook: stand up any infrastructure the step's
-#                 tests need (e.g. a local SLURM + MinIO cluster). Run it once
+#                 tests need (e.g. a local Docker SLURM cluster). Run it once
 #                 before `make test`; it is deliberately NOT a prerequisite of
 #                 `test`. common.mk supplies a no-op default; a step overrides it
 #                 (see HAS_TEST_SETUP below)
@@ -41,7 +41,7 @@
 #                `test-setup` target (below the include). common.mk then skips its
 #                no-op default so there is no "overriding recipe" warning. A step
 #                with test infrastructure sets this and delegates to the repo-root
-#                Makefile, e.g.  test-setup:  $(MAKE) -C $(REPO_ROOT) slurm-setup minio-setup
+#                Makefile, e.g.  test-setup:  $(MAKE) -C $(REPO_ROOT) slurm-setup
 #
 # Whether a step builds a custom image is auto-detected: if a Dockerfile sits
 # next to the including Makefile, `image`/`publish-image` are real and the
@@ -139,6 +139,18 @@ TEMPLATE = step-template.yaml
 # interpreter used to run its Python tests via `make test`. Overridable.
 TEST_DIR ?= test
 PYTHON   ?= python3
+
+# Output capture flag for `make test`, matching the repo-root Makefile's
+# PYTEST_CAPTURE default. `-s` (no capture) is REQUIRED for the SkyPilot build
+# tests, not merely convenient for reading logs: under pytest's capture, the
+# SkyPilot SDK's `click.secho(cluster_name)` flushes a stdout fd that has been
+# replaced, and a SECOND `sky launch` in the same pytest process then dies with
+# `OSError: [Errno 9] Bad file descriptor` during provisioning. A single-launch
+# test happens to survive, so the failure only shows up in multi-target fixtures
+# (e.g. dpk's tokenize -> validate handoff), which made it look intermittent.
+# Override empty (`make test PYTEST_CAPTURE=`) to let pytest capture output when
+# debugging a test that does not launch SkyPilot.
+PYTEST_CAPTURE ?= -s
 
 # Repo-root virtualenv that `make test` activates before running pytest. The step
 # tests import gbserver/libgbtest (and their deps), which live in the repo's
@@ -522,18 +534,18 @@ test: space image
 	fi; \
 	echo "[$(STEP_NAME)] activating venv $(VENV_DIR)"; \
 	. "$(VENV_DIR)/bin/activate"; \
-	PYTHONPATH="$(SRC_DIR)$${PYTHONPATH:+:$$PYTHONPATH}" $(PYTHON) -m pytest $(TEST_DIR)
+	PYTHONPATH="$(SRC_DIR)$${PYTHONPATH:+:$$PYTHONPATH}" $(PYTHON) -m pytest $(PYTEST_CAPTURE) $(TEST_DIR)
 
 # ---- Optional pre-test setup hook ------------------------------------------
 # `test-setup` is where a step brings up the infrastructure its tests need (a
-# local SLURM + MinIO cluster, a mock service, seed data, ...). It is a SEPARATE
+# local Docker SLURM cluster, a mock service, seed data, ...). It is a SEPARATE
 # target — deliberately NOT a prerequisite of `test` — so the (often slow) infra
 # bring-up runs only when you ask for it: run `make test-setup` once, then iterate
 # with `make test`.
 #
 # A step opts in by setting `HAS_TEST_SETUP := true` BEFORE the include and
 # defining its own `test-setup` target after it (typically delegating to the
-# repo-root Makefile, e.g. `$(MAKE) -C $(REPO_ROOT) slurm-setup minio-setup`).
+# repo-root Makefile, e.g. `$(MAKE) -C $(REPO_ROOT) slurm-setup`).
 # When HAS_TEST_SETUP is not `true`, common.mk supplies the no-op default below
 # so `make test-setup` is always a valid, harmless target; the guard also avoids
 # a "overriding recipe for target 'test-setup'" warning when a step defines one.

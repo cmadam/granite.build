@@ -252,6 +252,7 @@ class TargetRun(Run):
         assert isinstance(self_entity, Target)
         return EntityRunMetadata(
             build_id=self.build_id,
+            build_config_name=getattr(self_entity, "build_config_name", ""),
             username=self_entity.username,
             type=type(self_entity).__name__,
             target_name=self_entity.name,

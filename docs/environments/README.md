@@ -79,6 +79,81 @@ assetstores:            # Asset stores accessible from this environment (see bel
 `config:` is a free-form dict interpreted by the environment class. The per-type pages document each
 type's `config:` block.
 
+### Per-step-type config defaults (`config.steps.<type>`)
+
+`config:` may carry an optional `steps:` map that sets **per-step-type defaults** for top-level step
+`config` keys. This lets a single environment steer different step types differently — without editing
+any `build.yaml` — for **any** environment class (Bash, Docker, K8s, Lsf, Skypilot, …); it is not
+specific to one type.
+
+Each key under `steps:` is a **step-type slug** — the *last path segment* of the step URI. So
+`space://steps/hfpull` is `hfpull`, `space://steps/hfpush` is `hfpush`, `space://steps/command` is
+`command`, and so on. Its value is a small map of top-level `config` keys applied only to steps of that
+type.
+
+> **Slugs resolve within this environment.** A slug names a step type **relative to the environment
+> this `environment.yaml` belongs to** — it is not a global identifier. The same last-path-segment
+> slug can name different step implementations in different environment families (e.g. `hfpull`
+> exists under `builtins/steps/{k8s,lsf,skypilot}/`, and step names such as `hello`/`sage-eval` recur
+> across families). Because `config.steps` is scoped to one environment, such reuse is unambiguous
+> here: a slug matches only the step of that type resolved for *this* environment, so a multi-backend
+> space's like-named steps in other environments are never affected by this map.
+
+```yaml
+config:
+  cluster: slurm-docker
+  zone: normal            # env-wide default (any top-level config key works here)
+  steps:
+    hfpull:  { zone: io }
+    hfpush:  { zone: io }
+    command: { zone: gpu-mid }
+```
+
+> **The default/base step's slug is `gbstep`.** A target step that omits `step_uri` (or leaves it
+> empty) defaults to the built-in base step at `…/builtins/steps/gbstep`, so its slug — the last path
+> segment — is **`gbstep`**, not the name of any `space://steps/<type>` step. To steer those
+> default steps, key the override on `gbstep`:
+>
+> ```yaml
+> config:
+>   steps:
+>     gbstep: { zone: gpu-mid }   # applies to steps that omit step_uri
+> ```
+>
+> A `config.steps.<slug>` key that matches **no** step type in the build is **silently ignored** (the
+> miss is only logged at `DEBUG`). If an override isn't taking effect, confirm the key equals the step
+> URI's last path segment — `gbstep` for the default base step, `command`/`hfpull`/… for an explicit
+> `space://steps/<type>`.
+
+This feature adds `config.steps.<type>.<key>` (layer 2 below) and seeds it — for **every** environment
+class — into the matching step's merged `config`, beneath `step_default.yaml`. A step *listed* under
+`config.steps` therefore resolves that key across the following layers, **lowest priority first — a
+later layer overrides an earlier one**:
+
+1. `environment.yaml` `config.steps.<type>.<key>` — the per-step-type default (**this feature**).
+2. `step_default.yaml`.
+3. `step.yaml`.
+4. `build.yaml` — wins.
+
+In the example above (`zone` is used only as a concrete key — the mechanism applies to any top-level
+`config` key), a `command` step with no `zone` of its own picks up `gpu-mid` and `hfpull`/`hfpush` pick
+up `io` — yet a `zone` set in that step's `step.yaml` or the target's `build.yaml` still wins over all
+of them.
+
+> **Env-wide default for *unlisted* steps is environment-specific.** The env-wide `config.<key>` (e.g.
+> `zone: normal` above) is the environment's default for that key. Whether a step that is **not** listed
+> under `config.steps` still inherits it depends on the environment — it is not a guarantee of this
+> shared mechanism. Where an environment supports that fallback, it is documented in that environment's
+> own page (for SkyPilot SLURM see
+> [skypilot-slurm.md](skypilot-slurm.md#cluster--zone)). To steer a specific step type on **any**
+> environment class, list it under `config.steps.<type>`.
+
+> **Phase-1 scope.** Only **top-level `config` keys** (such as `zone` and `cluster`) are honored under
+> `config.steps.<type>` today. Per-step `resources` overrides — which live under
+> `environment_configs.<Class>.launchers.<name>.config.resources` rather than at the top level — are
+> **not** yet resolved per step type; that is a planned Phase-2 follow-up. Set resource overrides at
+> the step or build layer for now.
+
 ### Sharing step implementations across environments
 
 Steps are resolved relative to the active environment (see
@@ -271,6 +346,43 @@ config:
     workspace_dir: ""
     output_dir: ""
 ```
+
+### Secrets as environment variables
+
+Every environment that supports secret injection reads the **same** declarative allow-list, so the
+block's *shape* carries across compute backends — place it under the matching per-cloud key
+(`config.k8s`, `config.lsf`, or `config.skypilot`). One caveat: when `secret_name` is **omitted** the
+secret key each backend looks up is *not* identical (K8s lowercases it; LSF/SkyPilot use `env_name`
+**verbatim** — see **Delivery differs by environment** below), so a target that must run on more than
+one backend should set `secret_name` explicitly to match the space secret's actual key:
+
+```yaml
+config:
+  <k8s|lsf|skypilot>:               # The per-environment key for the target's environment type.
+    secrets:
+      secret_names_to_use_as_env_variable:
+        - env_name: HF_TOKEN        # Environment variable exposed to the workload.
+          secret_name: huggingface_token  # Space secret to read. Optional — see the default below.
+```
+
+Only the secrets a step **declares** here are injected — **least-privilege**; the full secret bag is
+never dumped. A declared secret that is absent from the resolved secret bag **fails the launch fast**
+with a `ValueError` (the secret *value* is never included in the message).
+
+**Delivery differs by environment:**
+
+- **LSF and SkyPilot** resolve the value in the build server and inject it as a task/job environment
+  variable. When `secret_name` is omitted it defaults to `env_name` **verbatim**.
+- **K8s** never materializes the value in the build server: it passes the secret *name* to Helm as a
+  `valueFrom.secretKeyRef` and the kubelet mounts the value into the pod at runtime. The pod env var
+  uses the `env_name` **verbatim** (portable with LSF/SkyPilot). When `secret_name` is omitted the
+  Secret **data-key** defaults to the **lowercased** `env_name` — the long-standing K8s convention,
+  since the space Secret stores each value under its lowercased key.
+
+K8s additionally supports `secret_names_to_use_as_pull_secret` (image pull secrets), which has no
+analogue on the other backends. See [k8s.md](k8s.md), [lsf.md](lsf.md), and [skypilot.md](skypilot.md)
+for the per-environment specifics, and [Custom code steps](../steps/custom-code-steps.md#secrets-as-environment-variables)
+for a worked example.
 
 ## See also
 

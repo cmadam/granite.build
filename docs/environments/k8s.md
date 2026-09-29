@@ -226,8 +226,11 @@ config:
         - my_dockerconfig_secret    # Secret name whose value is a dockerconfigjson; creates an image
                                     # pull secret in the namespace.
       secret_names_to_use_as_env_variable:
-        - env_name: HF_TOKEN        # Env var injected into the pod.
-          secret_name: huggingface_token  # Space secret to read; falls back to env_name.lower().
+        - env_name: HF_TOKEN        # Env var injected into the pod via secretKeyRef (the kubelet
+                                    # mounts the value; the build server never resolves it). The pod
+                                    # env-var name is the verbatim env_name (portable with LSF/SkyPilot).
+          secret_name: huggingface_token  # Space secret name; the Secret data-key defaults to the
+                                    # lowercased env_name (here hf_token) when omitted.
     app_wrapper_config:
       warmupGracePeriodDuration: 30m  # Passed through to the Helm chart values.
       retryLimit: 2
