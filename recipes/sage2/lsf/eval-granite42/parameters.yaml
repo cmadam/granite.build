@@ -15,7 +15,7 @@ HF_HOME: "/proj/granite-build/g4os/sage2/hf-home"
 SAGE2_IMAGE_IFBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-ifbench:952082c"
 SAGE2_IMAGE_LMEVAL: "icr.io/tir-hew-sage2-evals/sage2-evals-lmeval:949fcb0"
 SAGE2_IMAGE_NEMOSKILLS: "icr.io/tir-hew-sage2-evals/sage2-evals-nemoskills:15746f5"
-SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:c3ea588"
+SAGE2_IMAGE_SWEBENCH: "icr.io/tir-hew-sage2-evals/sage2-evals-swebench:ea7c503"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 # Empty = full dataset and each benchmark's own repeat count.
@@ -28,6 +28,19 @@ SWEBENCH_WORKERS: 8
 # Empty = SWE-bench/SWE-bench_Verified at the commit pinned in sage2-evals.
 SWEBENCH_DATASET: ""
 SWEBENCH_OPTIONS: ""
+
+# ─── SWE Bench Pro ────────────────────────────────────────────────────
+SWEBENCH_PRO_WORKERS: 8
+# Empty = ScaleAI/SWE-bench_Pro (V2, 642 tasks) at the commit pinned in sage2-evals.
+SWEBENCH_PRO_DATASET: ""
+# e.g. "subset=hard" (HARD-51) or "patch=gold".
+SWEBENCH_PRO_OPTIONS: ""
+
+# ─── SWE Bench Multilingual ───────────────────────────────────────────
+SWEBENCH_ML_WORKERS: 8
+# Empty = SWE-bench/SWE-bench_Multilingual at the commit pinned in sage2-evals.
+SWEBENCH_ML_DATASET: ""
+SWEBENCH_ML_OPTIONS: ""
 
 # ─── NeMo-Skills: AIME25, HMMT Feb25, GPQA, MMLU-Pro, Arena-Hard-V2 ───
 # WORKERS = concurrent requests to vLLM. OPTIONS as in each step's README, e.g.
