@@ -42,10 +42,10 @@ cluster.
 Tasks that can't run on the enroot sandbox are excluded from the score.
 `results.json` records `n`, `n_total` (89) and `excluded` (task: reason).
 
-Proposed, not yet approved: exclude `configure-git-webserver` and `git-multibranch`,
-making `n` 87 of the 89 tasks. Both run sshd and clone over ssh to localhost:22,
-which on the shared host network reaches the node's own sshd (their oracle fails
-on BlueVela). With the exclusion the score is not directly comparable with an
+Approved (2026-09-29): `configure-git-webserver` and `git-multibranch` are excluded,
+so the score is out of 87 of the 89 tasks. Both run sshd and clone over ssh to
+localhost:22, which on the shared host network reaches the node's own sshd (their
+oracle fails on BlueVela). The score is therefore not directly comparable with an
 89-task leaderboard number.
 
 ## Output
