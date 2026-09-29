@@ -10,7 +10,7 @@ whose value is the mean over languages.
 
 "(IBM)" is read as the 11 Granite 4.x languages MMLU-ProX has: en, de, es, fr, ja, pt,
 ar, cs, it, ko and zh. Dutch is on Granite's list but MMLU-ProX has no Dutch. That gives
-11 x 658 questions. Neither the model card nor the blog defines the subset, so
+11 x 588 test questions. Neither the model card nor the blog defines the subset, so
 `languages=` changes it.
 
 The code is the external [sage2-evals](https://github.com/laminair/sage2-evals) runtime,
@@ -29,7 +29,7 @@ steps:
 | `model_path` | `""` (required) | Local HF checkpoint dir, usually `{{ bindings.model.binding.path }}`. |
 | `served_model_name` | basename of `model_path` | Name vLLM serves under. |
 | `output_dir` | `output` | Relative to `$GB_BUILD_WORKDIR`. |
-| `limit` | `""` (11 x 658) | **Smoke knob:** first N examples ordered by (question_id, language), so a small N covers every language. |
+| `limit` | `""` (11 x 588) | **Smoke knob:** first N examples ordered by (question_id, language), so a small N covers every language. |
 | `repeats` | `""` (1) | Repeats of the whole run (the tasks are greedy). |
 | `workers` | `64` | Concurrent requests to vLLM. |
 | `dataset` / `dataset_revision` | `""` | Override the data pinned in sage2-evals (`li-lab/MMLU-ProX-Lite` at a fixed commit). |

@@ -38,7 +38,7 @@ config:
     output_dir: "output"
     # SMOKE KNOB: score only the first N examples, an example being one question in one
     # language, ordered by (question_id, language), so a small N covers every language
-    # and two smoke runs are comparable. Empty = all 11 x 658.
+    # and two smoke runs are comparable. Empty = all 11 x 588.
     limit: ""
     # Repeats of the whole run. Empty = benchmark default (1; the tasks are greedy).
     repeats: ""
