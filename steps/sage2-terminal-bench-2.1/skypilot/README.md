@@ -48,6 +48,15 @@ localhost:22, which on the shared host network reaches the node's own sshd (thei
 oracle fails on BlueVela). The score is therefore not directly comparable with an
 89-task leaderboard number.
 
+Known upstream failures (not pinned or patched; the oracle fails on these too):
+
+- `build-pov-ray`: the task's download of the POV-Ray source is refused with a
+  Cloudflare HTTP 403.
+- `build-cython-ext`: the oracle installs `planarity` unpinned and gets 1.0.0, whose
+  `networkx_graph()` no longer sets node `pos`. That makes
+  `test_reconstructed_space_curve` fail with `KeyError: 'pos'`. With
+  `planarity<1.0` (0.6) the same test passes (checked on BlueVela, job 1960123).
+
 ## Output
 
 `sage2_results` (dataset): the `results.json` file. Declare it on the target:
