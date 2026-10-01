@@ -68,21 +68,29 @@ config:
           bsub_options:
             G: grp_granite_dot_build
             M: 64G
-            # EXCLUDE A BROKEN HOST. p2-r03-n1 accepts a GPU allocation and then
+            # EXCLUDE BROKEN HOSTS. p2-r03-n1 accepts a GPU allocation and then
             # fails inside torch at cuda_init with "CUDA unknown error": 3 runs,
             # 3 failures (builds 7853d33b and b5f030cd), against 0 failures on
             # every other host across several hundred runs. In b5f030cd the same
             # distill-eval step succeeded on p3-r27-n2 and failed here two
-            # minutes later. REMOVE THIS once the node is repaired.
+            # minutes later. p5-r03-n1, p4-r31-n2 and p6-r06-n2 are excluded on
+            # the same grounds. p5-r02-n1 is a CPU-only node with no /opt/nvme, so
+            # the provisioner's `mkdir -p /opt/nvme/$USER` (tmpdir and
+            # use_local_nvme above) exits 1 before the job starts: 8 of 8 attempts
+            # there failed on builds f856247d and feeaaa3f, 2026-09-29, while the
+            # same corpus-pin-check succeeded on p6-r12-n3. Each host is listed
+            # TWICE, short name and FQDN (see below). DROP A HOST FROM THE LIST
+            # once the node is repaired.
             #
             # -R is the one accumulating bsub flag (provision/lsf/instance.py:150),
             # so this is ANDed with the derived span[] requirement rather than
             # replacing it.
             #
-            # Both spellings, because which one LSF matches on could not be
-            # checked from here (no LSF client on the API server host) and a name
-            # that matches no host makes the exclusion a silent no-op. If a job
-            # still lands on p2-r03-n1, the name form is what to look at.
+            # Both spellings per host, because which one LSF matches on could
+            # not be checked from here (no LSF client on the API server host) and
+            # a name that matches no host makes the exclusion a silent no-op. If
+            # a job still lands on an excluded host, the name form is what to
+            # look at.
             # NO surrounding double quotes and NO spaces, both load-bearing.
             # sky/templates/lsf-ray.yml.j2:75 emits each bsub_options entry as
             # `{{key}}: "{{val}}"`, so a value carrying its own double quotes
@@ -91,7 +99,7 @@ config:
             # job was submitted). And instance.py emits the directive UNQUOTED as
             # `#BSUB -R <val>`, so a space would end the argument early — hence `&&`
             # with no spaces around it, which LSF's select grammar accepts.
-            R: "select[hname!='p2-r03-n1'&&hname!='p2-r03-n1.bluevela.rmf.ibm.com']"
+            R: "select[hname!='p2-r03-n1'&&hname!='p2-r03-n1.bluevela.rmf.ibm.com'&&hname!='p5-r03-n1'&&hname!='p5-r03-n1.bluevela.rmf.ibm.com'&&hname!='p4-r31-n2'&&hname!='p4-r31-n2.bluevela.rmf.ibm.com'&&hname!='p6-r06-n2'&&hname!='p6-r06-n2.bluevela.rmf.ibm.com'&&hname!='p5-r02-n1'&&hname!='p5-r02-n1.bluevela.rmf.ibm.com']"
           queue_configs:
             preemptable:
               bsub_options:
