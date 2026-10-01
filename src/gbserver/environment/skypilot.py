@@ -85,6 +85,30 @@ else:
     sky = None  # type: ignore[assignment]
 
 
+def _reload_skypilot_client_config() -> None:
+    """Make this process's SkyPilot client re-read ``~/.sky/config.yaml``.
+
+    Writing the file is not enough on its own. The SkyPilot client loads the
+    file ONCE, when ``sky`` is imported -- which is gbserver startup, via this
+    module -- and every later request carries that in-memory copy to the API
+    server as ``override_skypilot_config``, which the server applies over its
+    own. So without a reload, an edited environment.yaml ``cloud_config`` (an LSF
+    ``bsub_options`` host exclusion, say) reached the file on the next build but
+    never reached a job until gbserver was restarted. Worse, a restart loaded
+    whatever the PREVIOUS process had last written, so the first build after it
+    still sent the pre-edit value.
+
+    Swaps the client's global config in one assignment under SkyPilot's own file
+    lock, so a concurrent build's request sees either the old or the new config,
+    never a partial one. No-op when SkyPilot is not installed.
+    """
+    if sky is None:
+        return
+    from sky.client import sdk as sky_sdk
+
+    sky_sdk.reload_config()
+
+
 def _get_step_skypilot_config(config: Optional[Dict]) -> StepSkypilotConfig:
     """Parse the step's ``config.skypilot`` section into a typed model.
 
@@ -1373,6 +1397,13 @@ class Skypilot(Environment):
         ``~/.aws/credentials``. No-op when neither is present. Idempotent via an
         instance flag, so retry relaunches are free.
 
+        After writing ``cloud_config`` it reloads this process's SkyPilot client
+        config (:func:`_reload_skypilot_client_config`), which is what makes an
+        edited environment.yaml take effect on the next build without a
+        gbserver restart. An Environment instance is cached per build thread,
+        so this runs once per build: a retry WITHIN a build keeps the config the
+        build started with.
+
         The SSH config is deliberately NOT materialized here: it is merged
         per-launch by :meth:`_prepare_ssh_for_launch`, which also handles the
         test-only ControlMaster socket reset for the cloud actually being
@@ -1397,6 +1428,8 @@ class Skypilot(Environment):
             )
             name = self.config.name if self.config else "unknown"
             materialize(name, None, cloud_config, aws, self.secrets or {})
+            if cloud_config:
+                _reload_skypilot_client_config()
         self._inline_configs_done = True
 
     async def _materialize_ssh_for_launch(
