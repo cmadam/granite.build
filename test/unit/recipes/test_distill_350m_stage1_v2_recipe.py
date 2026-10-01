@@ -429,6 +429,7 @@ class TestTheTrainerPin:
         patch = (
             _RECIPE.parents[3]
             / "steps"
+            / "distill"
             / "distill-gold"
             / "skypilot"
             / "patches"

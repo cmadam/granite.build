@@ -46,7 +46,7 @@ granite.build:
         cluster_name:
           uri: "mem://gold-onpolicy-vllm-cluster"
       steps:
-        - step_uri: space://steps/vllm-server
+        - step_uri: space://steps/distill/vllm-server
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -101,7 +101,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill-gold
+        - step_uri: space://steps/distill/distill-gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}

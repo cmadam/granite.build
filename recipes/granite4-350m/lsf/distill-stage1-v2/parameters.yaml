@@ -227,7 +227,7 @@ SHUFFLE_SEED: 42
 #
 # The markers emit nothing, so the rendered output is byte-identical to the
 # unmarked template. That is asserted, not assumed:
-# steps/distill-tokenizer-align/skypilot/test/test_granite_role_template.py renders
+# steps/distill/distill-tokenizer-align/skypilot/test/test_granite_role_template.py renders
 # both over nine conversation shapes and diffs them.
 #
 # BEFORE THE FIRST RUN: diff this against /proj/granite-build/g4os/chat_template.jinja,

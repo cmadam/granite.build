@@ -217,6 +217,7 @@ class TestTheGenerationFloor:
             / "environments"
             / "skypilot"
             / "steps"
+            / "distill"
             / "vllm-server"
             / "step.yaml"
         ).read_text(encoding="utf-8")
