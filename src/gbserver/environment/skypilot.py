@@ -130,6 +130,57 @@ def _get_step_skypilot_config(config: Optional[Dict]) -> StepSkypilotConfig:
 
 _DEFAULT_POLL_INTERVAL_SECONDS = 300
 
+# When a job-status poll keeps failing, how long before the cluster is declared
+# gone and torn down. Time, not a count: a count shrinks with the poll interval,
+# and at a 30 s interval three failures were a ~90 s SSH blip -- which is what
+# killed healthy BlueVela training runs. Both are overridable per step through the
+# monitor config (``poll_failure_grace_seconds`` / ``poll_failure_max_seconds``).
+_MIN_POLL_FAILURES = 3
+_DEFAULT_POLL_FAILURE_GRACE_SECONDS = 900
+# For LSF clusters the grace is followed by a direct `bjobs` check, and a job LSF
+# still reports as alive -- or one LSF cannot be asked about -- is kept until this
+# ceiling. Bounded, because a cluster SkyPilot can no longer see is one this
+# monitor can never report on.
+_DEFAULT_POLL_FAILURE_MAX_SECONDS = 7200
+# How often that `bjobs` check may run while the failures last.
+_LSF_PROBE_INTERVAL_SECONDS = 300
+# LSF states of a job that still holds (or is waiting for) its allocation.
+_LSF_ALIVE_STATES = frozenset({"RUN", "PEND", "WAIT", "PSUSP", "USUSP", "SSUSP"})
+
+
+def _lsf_job_alive(lsf_cluster: str, cluster_name: str) -> Optional[bool]:
+    """Ask LSF directly whether the job behind a SkyPilot cluster is alive.
+
+    SkyPilot names the LSF job ``<cluster_name>-<user hash>``, so the job is
+    found by name with a trailing wildcard. Runs one ``bjobs`` on the login node
+    over the same ``~/.lsf/config`` entry SkyPilot's LSF cloud uses.
+
+    :returns: ``True`` if LSF has an unfinished job for the cluster, ``False`` if
+        it has none, ``None`` if LSF could not be asked (SSH down, bad config).
+    """
+    try:
+        from sky.adaptors import lsf as lsf_adaptor
+        from sky.provision.lsf import utils as lsf_utils
+
+        cfg = lsf_utils.get_lsf_ssh_config().lookup(lsf_cluster)
+        client = lsf_adaptor.LsfClient(
+            cfg["hostname"],
+            int(cfg.get("port", 22)),
+            cfg["user"],
+            lsf_utils.get_identity_file(cfg),
+            ssh_proxy_command=cfg.get("proxycommand"),
+            ssh_proxy_jump=cfg.get("proxyjump"),
+            identities_only=lsf_utils.get_identities_only(cfg),
+        )
+        states = client.get_jobs_state_by_name(f"{cluster_name}-*")
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(
+            "Could not ask LSF (%s) about cluster %s: %s", lsf_cluster, cluster_name, e
+        )
+        return None
+    return any(state in _LSF_ALIVE_STATES for state in states)
+
+
 # Dedicated thread pool for the blocking SkyPilot provisioning submits that a
 # cancel may *orphan* — the shielded sky.launch / sky.jobs.launch /
 # sky.stream_and_get calls whose futures _abort_shielded_request abandons when
@@ -1351,6 +1402,9 @@ class Skypilot(Environment):
     ) -> None:
         self._cluster_names: Dict[str, str] = {}  # launch_id -> cluster_name
         self._job_ids: Dict[str, int] = {}  # launch_id -> sky job_id
+        # launch_id -> LSF cluster name (the ~/.lsf/config host), for lsf launches
+        # only: what the poll loop asks `bjobs` before tearing a cluster down.
+        self._lsf_clusters: Dict[str, str] = {}
         # launch_id -> relaunch attempt number. 0 (or absent) is the initial
         # launch; retry_workload bumps it so each relaunch provisions a fresh,
         # uniquely-named cluster instead of reusing the draining original.
@@ -2555,6 +2609,9 @@ class Skypilot(Environment):
             self._cluster_names[launch_id] = cluster_name
             if job_id is not None:
                 self._job_ids[launch_id] = job_id
+            infra_parts = (infra or "").split("/")
+            if cloud_group == "lsf" and len(infra_parts) > 1 and infra_parts[1]:
+                self._lsf_clusters[launch_id] = infra_parts[1]
 
             logger.info(
                 "SkyPilot cluster %s launched: job_id=%s launch_id=%s",
@@ -3026,7 +3083,21 @@ class Skypilot(Environment):
         )
         last_status = None
         consecutive_poll_failures = 0
-        max_poll_failures = 3
+        # monotonic time of the first failure in the current run of failures
+        first_poll_failure_at: Optional[float] = None
+        last_lsf_probe_at: Optional[float] = None
+        failure_grace = _coerce_float(
+            kwargs.get("poll_failure_grace_seconds"),
+            _DEFAULT_POLL_FAILURE_GRACE_SECONDS,
+        )
+        failure_ceiling = max(
+            failure_grace,
+            _coerce_float(
+                kwargs.get("poll_failure_max_seconds"),
+                _DEFAULT_POLL_FAILURE_MAX_SECONDS,
+            ),
+        )
+        lsf_cluster = self._lsf_clusters.get(launch_id)
 
         # Live log streaming state (only used in ``stream`` mode)
         log_stream_task: Optional[asyncio.Task] = None
@@ -3051,6 +3122,8 @@ class Skypilot(Environment):
                 statuses = await asyncio.to_thread(sky.get, request_id)
                 status = statuses.get(job_id) if statuses else None
                 consecutive_poll_failures = 0
+                first_poll_failure_at = None
+                last_lsf_probe_at = None
             except Exception as e:
                 logger.error(
                     "Error polling SkyPilot job %s on %s: %s",
@@ -3060,15 +3133,53 @@ class Skypilot(Environment):
                 )
                 poll_failed = True
                 consecutive_poll_failures += 1
-                if (
-                    "does not exist" in str(e)
-                    or consecutive_poll_failures >= max_poll_failures
-                ):
+                now = time.monotonic()
+                if first_poll_failure_at is None:
+                    first_poll_failure_at = now
+                failing_for = now - first_poll_failure_at
+                # "does not exist" is NOT conclusive on its own: SkyPilot's record
+                # of a cluster can vanish while the job behind it keeps running,
+                # and one such poll used to tear a healthy run down.
+                gone = (
+                    consecutive_poll_failures >= _MIN_POLL_FAILURES
+                    and failing_for >= failure_grace
+                )
+                if gone and lsf_cluster and failing_for < failure_ceiling:
+                    # The grace is over; ask LSF itself before tearing anything
+                    # down. Only a definite "no such job" is final early.
+                    if (
+                        last_lsf_probe_at is None
+                        or now - last_lsf_probe_at >= _LSF_PROBE_INTERVAL_SECONDS
+                    ):
+                        last_lsf_probe_at = now
+                        alive = await asyncio.to_thread(
+                            _lsf_job_alive, lsf_cluster, cluster_name
+                        )
+                        lsf_verdict = {
+                            True: "alive",
+                            False: "gone",
+                            None: "unknown",
+                        }[alive]
+                        logger.warning(
+                            "SkyPilot job %s on %s unreachable for %.0fs "
+                            "(%d polls); LSF says the job is %s.",
+                            job_id,
+                            cluster_name,
+                            failing_for,
+                            consecutive_poll_failures,
+                            lsf_verdict,
+                        )
+                        gone = alive is False
+                    else:
+                        gone = False
+                if gone:
                     logger.warning(
-                        "Cluster %s is gone (preempted or terminated) after %d consecutive poll failures. "
-                        "Treating as FAILED for launch_id %s.",
+                        "Cluster %s is gone (preempted or terminated) after %d "
+                        "consecutive poll failures over %.0fs. Treating as FAILED "
+                        "for launch_id %s.",
                         cluster_name,
                         consecutive_poll_failures,
+                        failing_for,
                         launch_id,
                     )
                     status = sky.JobStatus.FAILED
@@ -3540,6 +3651,7 @@ class Skypilot(Environment):
             logger.error("Failed to tear down SkyPilot cluster %s: %s", cluster_name, e)
         finally:
             self._cluster_names.pop(launch_id, None)
+            self._lsf_clusters.pop(launch_id, None)
             self._job_ids.pop(launch_id, None)
             self._launch_kwargs.pop(launch_id, None)
             self._relaunch_attempts.pop(launch_id, None)
