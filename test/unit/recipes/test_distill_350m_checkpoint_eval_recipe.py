@@ -667,3 +667,25 @@ def test_retries_reuse_what_already_succeeded(built):
     training target, re-running the graph from scratch is not a recovery strategy."""
     retries = built["granite.build"]["retries"]
     assert retries["target_reuse_enabled"] is True
+
+
+def test_resume_and_ib_hca_are_off_by_default_and_reach_the_step(tmp_path):
+    step = _config(_render(tmp_path), "train-gold")
+    assert step["resume_from_checkpoint_dir"] == ""
+    assert step["resume_emit_seeded"] is True
+    assert step["gold_config"]["nccl_ib_hca"] == ""
+
+    src = "/proj/x/builds/b/runs/r/checkpoints/distill-350m-ckpt-eval_node2"
+    step = _config(
+        _render(
+            tmp_path,
+            RESUME_FROM_CHECKPOINT_DIR=src,
+            NCCL_IB_HCA="^=mlx5_1,mlx5_6,mlx5_8",
+            RESUME_EMIT_SEEDED="false",
+            CKPT_LADDER="2000,2500",
+        ),
+        "train-gold",
+    )
+    assert step["resume_from_checkpoint_dir"] == src
+    assert step["gold_config"]["nccl_ib_hca"] == "^=mlx5_1,mlx5_6,mlx5_8"
+    assert step["resume_emit_seeded"] is False

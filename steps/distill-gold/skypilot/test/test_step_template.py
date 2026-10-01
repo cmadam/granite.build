@@ -246,6 +246,7 @@ class TestRendererInvocation:
         "nccl_debug_subsys",
         "nccl_timeout_ms",
         "nccl_enable_monitoring",
+        "nccl_ib_hca",
     }
     # 2. TRAINER_CLI_ONLY — handed to gold.py on its command line, NOT written
     #    into the rendered config. That mirrors the one launcher that has actually
@@ -690,3 +691,254 @@ class TestPerCheckpointArtifacts:
         final = run_script.index("GB_ARTIFACT_ID:checkpoint GB_ARTIFACT_PATH:")
         sweep = run_script.index("cleanup_watcher\n  emit_new_checkpoints")
         assert sweep < final
+
+
+class TestResumeFromCheckpointDir:
+    """Seeding this run's checkpoint dir from an earlier run's, so gold.py's own
+    auto-resume finds something. GB_BUILD_WORKDIR is new per build and per retry,
+    so without this a relaunch -- or a retry -- always restarts at step 0.
+
+    The block is EXECUTED against temporary directories rather than matched as text:
+    what matters is which checkpoints land, how, and when the step refuses.
+    """
+
+    _WORLD = 16  # 2 nodes x 8 GPUs, the recipe's topology
+
+    @staticmethod
+    def _render(**overrides):
+        from jinja2 import Template
+
+        step = yaml.safe_load(_STEP.read_text())
+        script = step["environment_configs"]["Skypilot"]["launchers"]["gold"]["config"][
+            "run"
+        ]
+        config = dict(step["config"])
+        config.update(overrides)
+        return Template(script).render(config=config)
+
+    @classmethod
+    def _seed_block(cls, src):
+        rendered = cls._render(resume_from_checkpoint_dir=str(src))
+        start = rendered.index('RESUME_SRC="')
+        end = rendered.index("# Rendered per node", start)
+        return rendered[start:end]
+
+    @classmethod
+    def _checkpoint(cls, root, step, complete=True, shards=None):
+        ckpt = root / f"checkpoint-{step}"
+        (ckpt / f"global_step{step}").mkdir(parents=True)
+        names = ["model.safetensors", "tokenizer.json"]
+        if complete:
+            names.append("trainer_state.json")
+        for name in names:
+            (ckpt / name).write_text(name)
+        for rank in range(cls._WORLD if shards is None else shards):
+            shard = f"bf16_zero_pp_rank_{rank}_mp_rank_00_optim_states.pt"
+            (ckpt / f"global_step{step}" / shard).write_text("x")
+        return ckpt
+
+    def _run(self, tmp_path, src, rank="0", nodes="2"):
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        script = "set -eu\n" + self._seed_block(src)
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "NODE_RANK": rank,
+                "NODES": nodes,
+                "GPUS": "8",
+                "VLLM_SERVERS": "0",
+                "CKPT_DIR": str(dst),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+        return result, dst
+
+    def test_it_is_off_by_default(self, step):
+        assert step["config"]["resume_from_checkpoint_dir"] == ""
+        assert "RESUME_SRC" not in self._render()
+
+    def test_it_is_not_a_trainer_key(self, step):
+        """A step key, not gold_config: it names a path the step resolves, and the
+        renderer's flag partition would otherwise demand a --resume-... flag."""
+        assert "resume_from_checkpoint_dir" not in step["config"]["gold_config"]
+
+    def test_seeding_happens_before_the_watcher_and_the_trainer(self):
+        rendered = self._render(
+            resume_from_checkpoint_dir="/src", emit_checkpoint_artifacts=True
+        )
+        seeded = rendered.index('touch "$RESUME_SEEDED"')
+        assert seeded < rendered.index("watch_checkpoints &")
+        assert seeded < rendered.index("accelerate launch")
+
+    def test_the_rendered_block_is_valid_shell(self):
+        result = subprocess.run(
+            ["bash", "-n"],
+            input=self._render(resume_from_checkpoint_dir="/src"),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+
+    def test_complete_checkpoints_are_hardlinked_and_incomplete_skipped(self, tmp_path):
+        src = tmp_path / "src"
+        for step in (500, 1000, 1500):
+            self._checkpoint(src, step)
+        self._checkpoint(src, 2000, complete=False)
+        (src / "train_manifest.json").write_text("{}")
+
+        result, dst = self._run(tmp_path, src)
+
+        assert result.returncode == 0, result.stderr
+        assert sorted(p.name for p in dst.iterdir() if not p.name.startswith(".")) == [
+            "checkpoint-1000",
+            "checkpoint-1500",
+            "checkpoint-500",
+        ]
+        weights = "checkpoint-1500/model.safetensors"
+        assert (dst / weights).stat().st_ino == (src / weights).stat().st_ino
+        # Numeric, not lexical: "checkpoint-500" sorts after "checkpoint-1500".
+        assert "resumes from checkpoint-1500" in result.stdout
+        assert "skipping incomplete checkpoint-2000" in result.stdout
+        assert (dst / ".resume-seeded").exists()
+        assert "GB_STEP_METADATA_KEY:resumed_from" in result.stdout
+
+    def test_the_source_is_left_untouched_when_the_seed_is_deleted(self, tmp_path):
+        """save_total_limit rotation deletes whole checkpoint dirs from this run."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 500)
+        result, dst = self._run(tmp_path, src)
+        assert result.returncode == 0, result.stderr
+        subprocess.run(["rm", "-rf", str(dst / "checkpoint-500")], check=True)
+        assert (src / "checkpoint-500" / "model.safetensors").read_text() == (
+            "model.safetensors"
+        )
+
+    def test_a_missing_source_fails_loudly(self, tmp_path):
+        result, _ = self._run(tmp_path, tmp_path / "nope")
+        assert result.returncode == 1
+        assert "is not a directory" in result.stderr
+
+    def test_no_complete_checkpoint_fails_rather_than_restarting(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 500, complete=False)
+        result, dst = self._run(tmp_path, src)
+        assert result.returncode == 1
+        assert "no complete checkpoint-*" in result.stderr
+        assert not (dst / ".resume-seeded").exists()
+
+    def test_a_different_world_size_is_refused(self, tmp_path):
+        """16 ZeRO shards cannot be loaded by 8 ranks."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 1500)
+        result, dst = self._run(tmp_path, src, nodes="1")
+        assert result.returncode == 1
+        assert "holds 16 ZeRO optimizer shards" in result.stderr
+        assert "trains on 8 ranks" in result.stderr
+        assert not (dst / ".resume-seeded").exists()
+
+    def test_a_worker_waits_for_rank_zero_and_does_not_seed(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 500)
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        dst.mkdir(parents=True)
+        (dst / ".resume-seeded").touch()
+        result, _ = self._run(tmp_path, src, rank="1")
+        assert result.returncode == 0, result.stderr
+        assert "resume seed present" in result.stdout
+        assert not (dst / "checkpoint-500").exists()
+
+
+class TestNcclIbHcaOverride:
+    """An optional per-run NCCL_IB_HCA, for dropping a flaky IB rail."""
+
+    @staticmethod
+    def _render(value):
+        from jinja2 import Template
+
+        step = yaml.safe_load(_STEP.read_text())
+        script = step["environment_configs"]["Skypilot"]["launchers"]["gold"]["config"][
+            "run"
+        ]
+        config = dict(step["config"])
+        config["gold_config"] = dict(config["gold_config"], nccl_ib_hca=value)
+        return Template(script).render(config=config)
+
+    def test_empty_leaves_the_tuning_file_in_charge(self, step, launcher):
+        assert step["config"]["gold_config"]["nccl_ib_hca"] == ""
+        assert "NCCL_IB_HCA" not in self._render("")
+        # Never a launcher env: an empty value there would enable every HCA.
+        assert "NCCL_IB_HCA" not in launcher["envs"]
+
+    def test_set_is_exported_before_the_trainer(self):
+        rendered = self._render("^=mlx5_1,mlx5_6,mlx5_8")
+        export = rendered.index('export NCCL_IB_HCA="^=mlx5_1,mlx5_6,mlx5_8"')
+        assert export < rendered.index("accelerate launch")
+
+
+class TestResumeEmitSeeded:
+    """resume_emit_seeded=false: seeded rungs are pre-marked, so only checkpoints
+    this run writes are announced. Executed, not matched."""
+
+    @staticmethod
+    def _render(**overrides):
+        from jinja2 import Template
+
+        step = yaml.safe_load(_STEP.read_text())
+        script = step["environment_configs"]["Skypilot"]["launchers"]["gold"]["config"][
+            "run"
+        ]
+        config = dict(step["config"], emit_checkpoint_artifacts=True)
+        config.update(overrides)
+        return Template(script).render(config=config)
+
+    def _emitted(self, tmp_path, emit_seeded):
+        rendered = self._render(
+            resume_from_checkpoint_dir="/src", resume_emit_seeded=emit_seeded
+        )
+        # The watcher setup through the function definitions, then one sweep after
+        # a checkpoint the "trainer" wrote.
+        start = rendered.index('CKPT_GLOB="checkpoint-"')
+        end = rendered.index("watch_checkpoints() {")
+        sentinels = ("model.safetensors", "tokenizer.json", "trainer_state.json")
+        ckpt_dir = tmp_path / "ckpts"
+        for step in (500, 1500):
+            d = ckpt_dir / f"checkpoint-{step}"
+            d.mkdir(parents=True)
+            for name in sentinels:
+                (d / name).write_text("x")
+        new = ckpt_dir / "checkpoint-2000"
+        script = (
+            "set -eu\n"
+            + rendered[start:end]
+            + f"mkdir -p {new}\n"
+            + "".join(f"touch {new}/{n}\n" for n in sentinels)
+            + "emit_new_checkpoints\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env={"PATH": "/usr/bin:/bin", "CKPT_DIR": str(ckpt_dir)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return re.findall(r"GB_ARTIFACT_ID:(checkpoint_\d+)", result.stdout)
+
+    def test_default_re_emits_the_seeded_rungs(self, step, tmp_path):
+        assert step["config"]["resume_emit_seeded"] is True
+        assert sorted(self._emitted(tmp_path, True)) == [
+            "checkpoint_1500",
+            "checkpoint_2000",
+            "checkpoint_500",
+        ]
+
+    def test_off_emits_only_what_this_run_wrote(self, tmp_path):
+        assert self._emitted(tmp_path, False) == ["checkpoint_2000"]
+
+    def test_off_renders_nothing_without_a_resume_source(self):
+        assert "not re-emitting seeded" not in self._render(resume_emit_seeded=False)

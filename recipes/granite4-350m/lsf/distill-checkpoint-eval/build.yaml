@@ -766,6 +766,10 @@ granite.build:
             # waits for an artifact that will never arrive.
             emit_checkpoint_artifacts: true
             checkpoint_watch_interval_seconds: $${CKPT_WATCH_INTERVAL_SECONDS}
+            # Empty unless relaunching a run that was stopped part-way: then the
+            # stopped run's checkpoint directory. See RESUME_FROM_CHECKPOINT_DIR.
+            resume_from_checkpoint_dir: "$${RESUME_FROM_CHECKPOINT_DIR}"
+            resume_emit_seeded: $${RESUME_EMIT_SEEDED}
             compute_config:
               num_nodes: $${GOLD_NUM_NODES}
               num_gpus_per_node: $${GOLD_NUM_GPUS}
@@ -863,6 +867,7 @@ granite.build:
               nccl_debug_subsys: "$${NCCL_DEBUG_SUBSYS}"
               nccl_timeout_ms: $${NCCL_TIMEOUT_MS}
               nccl_enable_monitoring: true
+              nccl_ib_hca: "$${NCCL_IB_HCA}"
               vllm_num_servers: 0
 
     # ─── export-<N>, one per rung, each gated on ITS OWN checkpoint ─────────

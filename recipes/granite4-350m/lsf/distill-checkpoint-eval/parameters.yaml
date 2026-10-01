@@ -638,6 +638,11 @@ NCCL_DEBUG: "INFO"
 NCCL_DEBUG_SUBSYS: "INIT,NET"
 # 10 minutes, not the reference hour: a smoke run wants a fast failure.
 NCCL_TIMEOUT_MS: 600000
+# Empty: the environment's nccl_tuning_file decides (it excludes the storage NICs
+# mlx5_1 and mlx5_6). Every multi-node hang on record was preceded by an IB
+# retry-exceeded error (status=12) on mlx5_8, always with a pod-6 host in the pair;
+# "^=mlx5_1,mlx5_6,mlx5_8" drops that rail too, at ~1/8 of inter-node bandwidth.
+NCCL_IB_HCA: ""
 
 # ─── Retries ──────────────────────────────────────────────────────────
 # One retry, for a measured cluster fault rather than as general insurance: host
@@ -651,6 +656,21 @@ NCCL_TIMEOUT_MS: 600000
 # Set to 0 to make a failure final, which is what you want while debugging a
 # failure of your own rather than the cluster's.
 MAX_RETRIES: 1
+
+# ─── Resume ───────────────────────────────────────────────────────────
+# Empty for a fresh run. To continue a run that stopped part-way, the stopped run's
+# checkpoint directory -- .../builds/<build>/runs/<run>/checkpoints/<RUN_NAME>_node<N>.
+# Every complete checkpoint-<N> there is hardlinked into the new run and the trainer
+# resumes from the highest. Keep GOLD_NUM_NODES, GOLD_NUM_GPUS, the batch sizes and
+# GOLD_MAX_STEPS as the stopped run had them: the step refuses a different world
+# size, and nothing checks the schedule. The seeded rungs are emitted again, so their
+# export and eval targets re-run.
+RESUME_FROM_CHECKPOINT_DIR: ""
+# true: the seeded rungs are announced again and their export/eval targets re-run,
+# which is what a CKPT_LADDER still naming them needs. false: they are treated as
+# already evaluated by the stopped run, so CKPT_LADDER must name only the rungs still
+# to come (e.g. 2000,2500) -- a laddered rung that is never announced waits forever.
+RESUME_EMIT_SEEDED: true
 
 # ─── Monitoring ───────────────────────────────────────────────────────
 # Short targets, so poll often enough to follow them.
