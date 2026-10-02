@@ -439,11 +439,20 @@ environment_configs:
               # ("initial ref transaction called with existing refs") while rank 1's
               # clone into the same path succeeded. Only rank 0 clones; every other rank
               # waits for a completion marker rank 0 writes after checkout succeeds.
+              #
+              # The marker holds a token naming THIS attempt, and a waiting rank continues
+              # only on a match. Its mere existence is not enough: a relaunch into the same
+              # per-run workdir finds the previous attempt's marker still there, and the
+              # other ranks would go straight to training while rank 0 rm -rf's and
+              # re-clones the tree under them. The launch id alone does not name an attempt
+              # (a retry_workload replay reuses it); the job id distinguishes a resubmit to
+              # the same cluster, and the scheduler's allocation id a fresh cluster.
               DONE_MARKER="$CODE_DIR.gb-clone-done"
+              CLONE_TOKEN="${GB_SKYPILOT_LAUNCH_ID:-}:${SKYPILOT_INTERNAL_JOB_ID:-}:${LSB_JOBID:-${SLURM_JOB_ID:-}}"
               if [ "${RANK:-0}" != "0" ]; then
-                echo "distill: rank ${RANK:-0} waiting for rank 0 to deliver $CODE_DIR"
+                echo "distill: rank ${RANK:-0} waiting for rank 0 to deliver $CODE_DIR (token $CLONE_TOKEN)"
                 WAITED=0
-                while [ ! -f "$DONE_MARKER" ]; do
+                while [ "$(cat "$DONE_MARKER" 2>/dev/null || true)" != "$CLONE_TOKEN" ]; do
                   sleep 2
                   WAITED=$((WAITED + 2))
                   if [ "$WAITED" -ge 600 ]; then
@@ -511,7 +520,9 @@ environment_configs:
                   echo "distill: FATAL: $REPO@${REF:-default} has no src/gb_steps_post_training." >&2
                   exit 1
                 fi
-                touch "$DONE_MARKER"
+                # tmp + mv, so a waiting rank never reads a half-written token.
+                printf '%s\n' "$CLONE_TOKEN" > "$DONE_MARKER.tmp.$$"
+                mv -f "$DONE_MARKER.tmp.$$" "$DONE_MARKER"
               fi
             else
               echo "distill: FATAL: no source. code_config.code_dir ('$CODE_DIR') does not" >&2

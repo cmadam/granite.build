@@ -9,8 +9,10 @@ These tests read the template directly (not the rendered Space), so they hold
 whether or not ``make space`` has been run.
 """
 
+import os
 import re
 import subprocess
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -942,3 +944,76 @@ class TestResumeEmitSeeded:
 
     def test_off_renders_nothing_without_a_resume_source(self):
         assert "not re-emitting seeded" not in self._render(resume_emit_seeded=False)
+
+
+class TestCloneHandshake:
+    """Ranks other than 0 wait for rank 0's clone, and only for THIS attempt's.
+
+    The marker used to be checked for existence alone. A relaunch into the same per-run
+    workdir found the previous attempt's marker still there, so the other ranks went
+    straight to training while rank 0 was deleting and re-cloning the tree.
+    """
+
+    @staticmethod
+    def _wait_snippet(run_script):
+        """From the marker definition through the end of the waiting branch, with the
+        600s timeout cut to one 2s poll so a refusal is quick to observe."""
+        anchor = run_script.index('DONE_MARKER="$CODE_DIR.gb-clone-done"')
+        begin = run_script.rindex("\n", 0, anchor) + 1
+        indent = run_script[begin:anchor]
+        end = run_script.index(f"\n{indent}else\n", begin)
+        snippet = textwrap.dedent(run_script[begin:end]) + "\nfi\n"
+        return snippet.replace("-ge 600 ]", "-ge 2 ]")
+
+    @staticmethod
+    def _write_snippet(run_script):
+        lines = [
+            line.strip()
+            for line in run_script.splitlines()
+            if "$DONE_MARKER.tmp.$$" in line
+        ]
+        assert len(lines) == 2, lines  # the printf and the mv
+        return "\n".join(lines)
+
+    @staticmethod
+    def _run(script, tmp_path, rank, launch_id):
+        env = {
+            "PATH": os.environ["PATH"],
+            "CODE_DIR": str(tmp_path / "code"),
+            "RANK": rank,
+            "GB_SKYPILOT_LAUNCH_ID": launch_id,
+            "SKYPILOT_INTERNAL_JOB_ID": "1",
+            "LSB_JOBID": "4242",
+        }
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + script],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_a_previous_attempts_marker_is_not_accepted(self, run_script, tmp_path):
+        (tmp_path / "code.gb-clone-done").write_text("launch-a:1:4242\n")
+
+        result = self._run(self._wait_snippet(run_script), tmp_path, "1", "launch-b")
+
+        assert result.returncode == 1
+        assert "never appeared" in result.stderr
+
+    def test_this_attempts_marker_is_accepted(self, run_script, tmp_path):
+        wait = self._wait_snippet(run_script)
+        # Rank 0's side: the same token definition, then the atomic write.
+        token_lines = "\n".join(wait.splitlines()[:2])
+        assert "CLONE_TOKEN=" in token_lines
+        rank0 = self._run(
+            token_lines + "\n" + self._write_snippet(run_script),
+            tmp_path,
+            "0",
+            "launch-b",
+        )
+        assert rank0.returncode == 0, rank0.stderr
+        assert (tmp_path / "code.gb-clone-done").read_text() == "launch-b:1:4242\n"
+
+        result = self._run(wait, tmp_path, "1", "launch-b")
+
+        assert result.returncode == 0, result.stderr
