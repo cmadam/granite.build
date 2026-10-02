@@ -49,6 +49,7 @@ from export_hf_model import (  # noqa: E402
     normalise_tokenizer_json,
     published_config_needs_repair,
     select_checkpoint,
+    tokenizer_pin_problems,
 )
 
 # The thinking-policy tests run against the REAL template, not a stub. `templates/
@@ -808,3 +809,45 @@ def test_published_config_needs_repair_survives_unreadable_json(tmp_path):
     dest.mkdir()
     (dest / "config.json").write_text("{not json")
     assert published_config_needs_repair(dest) is not None
+
+
+# ------------------------------------- tokenizer pin (the consumer's-eye segmentation check)
+#
+# Pure over two encoders for the same reason as diff_resolved_numeric: `verify()` supplies
+# AutoTokenizer and tokenizers.Tokenizer, and this file must run with neither installed.
+
+
+def _ids(text):
+    return [ord(c) for c in text]
+
+
+def test_tokenizer_pin_passes_when_both_encoders_agree():
+    assert tokenizer_pin_problems("PreTrainedTokenizerFast", True, _ids, _ids) == []
+
+
+def test_tokenizer_pin_catches_a_gpt2_class_that_ignored_the_pin():
+    """The measured failure: AutoTokenizer honours `GPT2Tokenizer` and drops the trained
+    Split. The class name alone is enough to refuse."""
+    problems = tokenizer_pin_problems("GPT2TokenizerFast", True, _ids, _ids)
+    assert len(problems) == 1
+    assert "pin did not take" in problems[0]
+
+
+def test_tokenizer_pin_catches_a_slow_tokenizer():
+    problems = tokenizer_pin_problems("LlamaTokenizer", False, _ids, _ids)
+    assert len(problems) == 1
+    assert "slow" in problems[0]
+
+
+def test_tokenizer_pin_catches_a_segmentation_that_differs():
+    """A class name is a label. This is the property that matters: a probe whose ids
+    differ from tokenizer.json's is reported, whatever the class is called."""
+
+    def split_on_spaces(text):
+        return [len(w) for w in text.split(" ")]
+
+    problems = tokenizer_pin_problems(
+        "PreTrainedTokenizerFast", True, split_on_spaces, _ids, probes=["a b", "ab"]
+    )
+    assert len(problems) == 2
+    assert "'a b'" in problems[0]

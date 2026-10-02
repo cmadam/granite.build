@@ -15,6 +15,10 @@
 # STRIP_TOKENIZER_JSON_RUNTIME_KEYS for why that is not cosmetic. This belongs upstream;
 # until it lands there, the divergence lives here and the three-way merge has to keep it.
 #
+# DIVERGENCE: `tokenizer_pin_problems` + its call in `verify`, which assert that the
+# published tokenizer, loaded the way a consumer loads it, segments exactly as its own
+# tokenizer.json does. See TOKENIZER_PIN_PROBES. Same status as the one above.
+#
 # It imports gb_steps_post_training.distillation at MODULE scope, which is delivered at
 # RUN time from the checkout named by code_config (see step-template.yaml). That is why
 # the tests for this file are gated on GB_DISTILL_CODE_DIR — see test/conftest.py.
@@ -68,7 +72,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable
 
 # The shared step-completion contract, vendored into this step's image (see Dockerfile). A hard
 # import and not a try/except: a missing gate would silently turn resume off for this step, and a
@@ -292,6 +296,26 @@ _THINKING_LINE_OFF = "{%- set enable_thinking = enable_thinking if enable_thinki
 # empty block is written. If a future edit to this function starts deleting them, this is what
 # says so, at export time, instead of the published model doing it quietly.
 _EMPTY_THINK = "<think></think>"
+
+
+# Strings the published tokenizer must segment exactly as its own tokenizer.json does.
+#
+# granite 4.x checkpoints declare `tokenizer_class: GPT2Tokenizer` over a trained
+# Sequence[Split, ByteLevel] pre_tokenizer. AutoTokenizer honours the declaration, builds
+# the GPT2 converter and discards the trained Split, so the model is evaluated on a
+# segmentation it was never trained on -- while still reporting is_fast=True. align pins
+# `tokenizer_class` to fix that and TOKENIZER_CLASS_REWRITES keeps the pin portable, but a
+# class NAME is only a label. These probes are the behavioural check: the ids AutoTokenizer
+# produces against the ids tokenizer.json produces with no transformers in the path. Code,
+# runs of whitespace, role markers and non-Latin text are where the two segmentations part.
+TOKENIZER_PIN_PROBES = (
+    "def fibonacci(n: int) -> int:\n    return n if n < 2 else fibonacci(n-1)+fibonacci(n-2)",
+    "The quick brown fox jumps over 42 lazy dogs.",
+    "  leading and   internal   whitespace\t\tand a tab",
+    "<|start_of_role|>user<|end_of_role|>Hello<|end_of_text|>",
+    "Ceci n'est pas une pipe \u2014 na\u00efve caf\u00e9, \u65e5\u672c\u8a9e\u30c6\u30ad\u30b9\u30c8, \U0001f680",
+    "1234567890 0x1F 3.14159e-7",
+)
 
 
 class ExportError(Exception):
@@ -842,6 +866,29 @@ def verify(
     tok = AutoTokenizer.from_pretrained(str(dest))
     notes.append(f"tokenizer loaded: {type(tok).__name__}, vocab={len(tok)}")
 
+    tokenizer_json = dest / "tokenizer.json"
+    if tokenizer_json.is_file():
+        from tokenizers import Tokenizer  # noqa: PLC0415
+
+        raw = Tokenizer.from_file(str(tokenizer_json))
+        problems = tokenizer_pin_problems(
+            type(tok).__name__,
+            tok.is_fast,
+            lambda text: tok(text, add_special_tokens=False)["input_ids"],
+            lambda text: raw.encode(text, add_special_tokens=False).ids,
+        )
+        if problems:
+            raise ExportError(
+                "the exported tokenizer does not segment the way its own tokenizer.json "
+                "does:\n  "
+                + "\n  ".join(problems)
+                + "\nEvery consumer that loads it through AutoTokenizer would see text "
+                "segmented differently from training."
+            )
+        notes.append(
+            f"tokenizer segments as tokenizer.json on all {len(TOKENIZER_PIN_PROBES)} probes"
+        )
+
     if expect_tokenizer_from is not None:
         ref = AutoTokenizer.from_pretrained(str(expect_tokenizer_from))
         probe = "<|im_start|>user\nhello<|im_end|>\n"
@@ -856,6 +903,38 @@ def verify(
             )
         notes.append(f"tokenizer identity matches {expect_tokenizer_from}")
     return notes
+
+
+def tokenizer_pin_problems(
+    loaded_class: str,
+    is_fast: bool,
+    encode: Callable[[str], list[int]],
+    encode_raw: Callable[[str], list[int]],
+    probes: Iterable[str] = TOKENIZER_PIN_PROBES,
+) -> list[str]:
+    """Why the published tokenizer would not segment as tokenizer.json does; empty if it would.
+
+    A pure function over the two encoders so it is testable with no transformers installed.
+    `verify()` supplies AutoTokenizer's `encode` and `tokenizers.Tokenizer`'s `encode_raw`.
+    """
+    problems: list[str] = []
+    if loaded_class.startswith("GPT2Tokenizer"):
+        problems.append(
+            f"AutoTokenizer resolves {loaded_class}, so the tokenizer_class pin did not take"
+        )
+    elif not is_fast:
+        problems.append(
+            f"AutoTokenizer resolves the slow {loaded_class}, which cannot be reading "
+            "tokenizer.json"
+        )
+    for probe in probes:
+        got, want = encode(probe), encode_raw(probe)
+        if got != want:
+            problems.append(
+                f"{probe[:40]!r} segments as {got[:12]} (len {len(got)}), tokenizer.json "
+                f"as {want[:12]} (len {len(want)})"
+            )
+    return problems
 
 
 def build_parser() -> argparse.ArgumentParser:
