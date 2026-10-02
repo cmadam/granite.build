@@ -124,3 +124,26 @@ def test_final_rung_failure_names_the_step_and_threshold():
     )
     assert "step 7" in msg and "50.0%" in msg and "15.0%" in msg
     assert final_rung_failure([{"degenerate": False}], 0.15) is None
+
+
+def test_the_prompts_are_raw_completions():
+    """MultiPL-E is where the collapse showed worst and it applies no chat template, so
+    a templated prompt set would test a different thing from the benchmark that caught
+    this."""
+    for prompt in PROMPTS:
+        assert "<|start_of_role|>" not in prompt
+        assert "<|im_start|>" not in prompt
+
+
+def test_decoding_is_greedy():
+    """Sampling would hide the failure. Temperature is what lets a narrowed
+    distribution still look varied, and df8512e0's MultiPL-E ran at temperature 0.2 on
+    a model with an effective branching factor of 1.49 -- effectively greedy already,
+    which is why it degenerated there and not elsewhere. generate_rung needs a GPU, so
+    this reads its source."""
+    import inspect
+
+    import gen_smoke
+
+    source = inspect.getsource(gen_smoke.generate_rung)
+    assert "do_sample=False" in source
