@@ -59,6 +59,10 @@ def sample_category_ids(
 
 
 def build_sample(fraction: float, seed: int) -> dict[str, list[str]]:
+    # Above 1.0, k exceeds the population and rng.sample raises on the first
+    # category; a mistyped percentage (25 for 0.25) is the likely way to get here.
+    if not 0 < fraction <= 1:
+        raise ValueError(f"fraction must be in (0, 1], got {fraction}")
     categories = sorted(set(TEST_COLLECTION_MAPPING["all"]) - set(NON_SCORING_CATEGORY))
     rng = random.Random(seed)
     return {
@@ -84,6 +88,8 @@ def main() -> None:
         "--seed", type=int, default=42, help="Deterministic sampling seed"
     )
     args = parser.parse_args()
+    if not 0 < args.fraction <= 1:
+        parser.error(f"--fraction must be in (0, 1], got {args.fraction}")
 
     sample = build_sample(args.fraction, args.seed)
 

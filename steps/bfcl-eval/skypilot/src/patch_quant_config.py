@@ -116,13 +116,16 @@ def main() -> int:
 
     staging_dir = os.path.join(output_dir, ".quant-config-patch")
     os.makedirs(staging_dir, exist_ok=True)
-    for name in os.listdir(model_path):
+    # A symlink's target resolves relative to the link's own directory, not
+    # cwd, so a relative model_path would leave every staged link dangling.
+    source_dir = os.path.abspath(model_path)
+    for name in os.listdir(source_dir):
         if name == "config.json":
             continue
         link_path = os.path.join(staging_dir, name)
         if os.path.islink(link_path) or os.path.exists(link_path):
             os.remove(link_path)
-        os.symlink(os.path.join(model_path, name), link_path)
+        os.symlink(os.path.join(source_dir, name), link_path)
 
     config["quantization_config"] = KNOWN_SCHEMES[scheme]
     with open(os.path.join(staging_dir, "config.json"), "w") as f:

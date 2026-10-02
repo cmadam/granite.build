@@ -33,6 +33,21 @@ def test_excludes_a_single_concrete_category_name():
     assert "web_search_no_snippet" in resolved
 
 
+def test_excludes_every_name_in_a_space_separated_list():
+    # The README's --exclude-categories form. Passed whole, the two names were
+    # one token that matched nothing, so multi_turn was scored though never
+    # generated.
+    resolved = set(resolve("all", "web_search multi_turn"))
+    assert resolved == set(TEST_COLLECTION_MAPPING["all"]) - set(
+        TEST_COLLECTION_MAPPING["web_search"]
+    ) - set(TEST_COLLECTION_MAPPING["multi_turn"])
+
+
+def test_accepts_a_comma_separated_test_category_list():
+    # generate gets --test-category as one value and bfcl splits it on ",".
+    assert resolve("simple_python,multiple", None) == ["multiple", "simple_python"]
+
+
 def test_empty_exclude_string_is_a_no_op():
     assert resolve("all", "") == resolve("all", None)
 

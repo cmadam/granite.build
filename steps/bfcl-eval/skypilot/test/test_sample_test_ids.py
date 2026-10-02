@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
@@ -58,3 +60,18 @@ def test_deterministic_given_same_seed():
 
 def test_different_seeds_generally_differ():
     assert build_sample(0.25, 42) != build_sample(0.25, 7)
+
+
+@pytest.mark.parametrize("fraction", [0, -0.5, 1.5, 25])
+def test_rejects_a_fraction_outside_zero_to_one(fraction):
+    # 25 is the mistyped-percentage case; without the check rng.sample raised
+    # "Sample larger than population" on the first category.
+    with pytest.raises(ValueError, match="fraction"):
+        build_sample(fraction=fraction, seed=42)
+
+
+def test_accepts_a_fraction_of_one():
+    sample = build_sample(fraction=1.0, seed=42)
+    for category, ids in sample.items():
+        if not is_memory(category):
+            assert len(ids) == len(load_dataset_entry(category))
