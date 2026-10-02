@@ -36,7 +36,7 @@ granite.build:
 
     # ── The server ────────────────────────────────────────────────────────────
     vllm-server:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       outputs:
         # mem://, NOT env://. The payload is a URL, and env:// would run it through
         # filesystem-path normalisation and mangle http://host:8001 into
@@ -85,7 +85,7 @@ granite.build:
 
     # ── The trainer ───────────────────────────────────────────────────────────
     train:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # The ordering primitive AND the health gate: this binding resolves only
         # once the server answers /health, so this target cannot start early.
@@ -172,7 +172,7 @@ granite.build:
 
     # ── The reaper ────────────────────────────────────────────────────────────
     teardown:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # `gate` is the ordering primitive and nothing else: the trainer emits
         # checkpoint as its final log line, so this target runs after training

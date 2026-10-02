@@ -66,6 +66,9 @@ CPU_ONLY_CPUS: 1
 CPU_ONLY_MEMORY: 32
 GPU_MEMORY: 256
 CLUSTER: "bluevela"
+# Where every target runs. One value rather than one literal per target, so moving this
+# recipe to another environment (a gbspace-public one, say) is a one-line change.
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 QUEUE: "normal"
 
 # ─── Retries ────────────────────────────────────────────────────────────

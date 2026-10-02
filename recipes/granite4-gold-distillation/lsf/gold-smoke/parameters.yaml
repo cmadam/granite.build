@@ -122,6 +122,9 @@ ACCELERATORS: "H100:8"
 # since 46.5G was the peak of a run that never finished a step.
 MEMORY: 256
 CLUSTER: "bluevela"
+# Where every target runs. One value rather than one literal per target, so moving this
+# recipe to another environment (a gbspace-public one, say) is a one-line change.
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 # SkyPilot's `zone` is the LSF queue name for this cloud.
 QUEUE: "normal"
 

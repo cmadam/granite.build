@@ -316,6 +316,9 @@ CPU_ONLY_MEMORY: 32
 EXPORT_CPUS: 4
 EXPORT_MEMORY: 64
 CLUSTER: "bluevela"
+# Where every target runs. One value rather than one literal per target, so moving this
+# recipe to another environment (a gbspace-public one, say) is a one-line change.
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 # SkyPilot's `zone` is the LSF queue name for this cloud. `normal` is
 # non-preemptable; an earlier sweep attempt died on the preemptable queue.
 QUEUE: "normal"

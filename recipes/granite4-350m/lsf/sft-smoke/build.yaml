@@ -52,7 +52,7 @@ granite.build:
     # the URI itself: the step's own code has no notion of hf:// or s3://
     # and never needs one.
     align:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         teacher_model:
           uri: "$${TEACHER_MODEL_URI}"
@@ -102,7 +102,7 @@ granite.build:
     # ─── corpus ─────────────────────────────────────────────────────────────
     # DATASET_URI: same full-URI convention as align's inputs above.
     corpus:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         tokenizer:
           binding: align.retagged_student
@@ -148,7 +148,7 @@ granite.build:
     # the whole point of this recipe: prove distill-sft's pin resolves and
     # the step runs and publishes a checkpoint, in isolation.
     train-sft:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         student:
           binding: align.retagged_student

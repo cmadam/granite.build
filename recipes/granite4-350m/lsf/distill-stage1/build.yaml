@@ -117,7 +117,7 @@ granite.build:
     # Two passes: one to count, one to select, because the per-split quota cannot be
     # computed until the totals are known.
     sources:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # Lineage. Three declared inputs mean the corpus's provenance is recorded as
         # three artifacts rather than as a path inside a shell script.
@@ -163,7 +163,7 @@ granite.build:
     # tokenizer artifacts the rest of the pipeline reads. Cheap relative to
     # everything after it, and everything after it is wrong without it.
     align:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # Recorded as lineage inputs. env:// means "already on a filesystem this
         # environment can reach", so the pull is a no-op: these add input
@@ -225,7 +225,7 @@ granite.build:
 
     # ─── corpus ─────────────────────────────────────────────────────────────
     corpus:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # The tokenizer that DEFINES this corpus, and the ordering edge that
         # guarantees it exists before this target starts.
@@ -309,7 +309,7 @@ granite.build:
     # so the registered checkpoint is HF-native and loadable as a student init —
     # which is why no export is needed between here and GOLD.
     train-sft:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         student:
           binding: align.retagged_student
@@ -378,7 +378,7 @@ granite.build:
     # The distillation itself. Off-policy at lmbda 0.0: every rank trains on the
     # fixed corpus and there is no vLLM server to coordinate.
     train-gold:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # The student GOLD starts from: the SFT checkpoint when that arm is on,
         # the aligned student otherwise. One binding either way, so the recorded
@@ -466,7 +466,7 @@ granite.build:
     # safetensors. This target picks one, checks it, and names it as the
     # recipe's model.
     export:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         train_output:
           binding: train-gold.checkpoint
@@ -521,7 +521,7 @@ granite.build:
     # It depends only on align and corpus, so it runs concurrently with training
     # rather than after it.
     eval-transfer-baseline:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         student:
           binding: align.retagged_student
@@ -574,7 +574,7 @@ granite.build:
     # as the baseline — everything except the student is held fixed, which is the
     # only way the two numbers are comparable.
     eval-transfer:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         student:
           binding: export.hf_model
@@ -621,7 +621,7 @@ granite.build:
     # so its own artifacts stay its own — and it runs in its own image, so no
     # image_id override here.
     eval-bfcl:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         model:
           binding: export.hf_model

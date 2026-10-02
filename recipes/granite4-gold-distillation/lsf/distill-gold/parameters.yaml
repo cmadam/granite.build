@@ -221,6 +221,9 @@ CPU_ONLY_MEMORY: 64
 # host-memory kill produces no CUDA OOM and no watchdog message.
 MEMORY: 256
 CLUSTER: "bluevela"
+# Where every target runs. One value rather than one literal per target, so moving this
+# recipe to another environment (a gbspace-public one, say) is a one-line change.
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 # SkyPilot's `zone` is the LSF queue name for this cloud. `normal` is
 # non-preemptable.
 QUEUE: "normal"

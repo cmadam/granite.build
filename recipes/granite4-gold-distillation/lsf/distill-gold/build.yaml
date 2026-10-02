@@ -64,7 +64,7 @@ granite.build:
     # recipe overrides it with an absolute, verified-on-BlueVela path instead
     # of relying on the step's default.
     align:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         teacher_model:
           uri: "$${TEACHER_MODEL_URI}"
@@ -110,7 +110,7 @@ granite.build:
 
     # ─── corpus ─────────────────────────────────────────────────────────────
     corpus:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         tokenizer:
           binding: align.retagged_student
@@ -166,7 +166,7 @@ granite.build:
     # can span two LSF allocations. It can; this recipe reuses that shape at
     # real scale.
     vllm-server:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         student_model:
           binding: align.retagged_student
@@ -212,7 +212,7 @@ granite.build:
 
     # ─── train-gold ─────────────────────────────────────────────────────────
     train-gold:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
 <% if ON_POLICY | string | lower in ("true", "yes", "1", "on") %>
         # The ordering primitive AND the health gate: this binding resolves
@@ -305,7 +305,7 @@ granite.build:
     # LSF SERVICE clusters never autostop, so the vllm-server allocation needs
     # an explicit reaper once training ends.
     teardown:
-      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
         # `gate` is the ordering primitive and nothing else: the trainer
         # emits checkpoint as its final log line, so this target runs after

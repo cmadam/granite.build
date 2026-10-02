@@ -107,6 +107,9 @@ ACCELERATORS: "H100:8"
 # risk a TERM_MEMLIMIT kill that looks like a hang.
 MEMORY: 256
 CLUSTER: "bluevela"
+# Where every target runs. One value rather than one literal per target, so moving this
+# recipe to another environment (a gbspace-public one, say) is a one-line change.
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
 QUEUE: "normal"
 
 # ─── Monitoring ───────────────────────────────────────────────────────
