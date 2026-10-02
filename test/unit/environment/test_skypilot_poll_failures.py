@@ -26,6 +26,19 @@ def lsf_env():
     env = Skypilot(event_q=asyncio.Queue(), environment_config=config)
     env._cluster_names["l1"] = "gb-train-l1"
     env._job_ids["l1"] = 1
+    env._ssh_hpc_launches.add("l1")
+    return env
+
+
+@pytest.fixture
+def cloud_env():
+    """A launch on a non-HPC cloud (AWS, Kubernetes): no SSH login node."""
+    config = EnvironmentConfig(
+        name="test-aws", type="Skypilot", config={"default_cloud": "aws"}
+    )
+    env = Skypilot(event_q=asyncio.Queue(), environment_config=config)
+    env._cluster_names["l1"] = "gb-train-l1"
+    env._job_ids["l1"] = 1
     return env
 
 
@@ -129,6 +142,38 @@ class TestGracePeriod:
         assert sky.job_status.call_count == 3
 
 
+class TestOtherClouds:
+    """Off SLURM/LSF a lost cluster is usually a real preemption: the
+    RetryHandler should see FAILED at once, not after the 15-minute grace."""
+
+    @pytest.mark.asyncio
+    async def test_does_not_exist_is_still_final(self, cloud_env):
+        clock = _Clock(step=30)
+        sky, _ = _sky([MISSING] * 10, clock)
+        probe = MagicMock(return_value=True)
+        with pytest.raises(WorkloadFailedException):
+            await _poll(cloud_env, sky, clock, probe=probe)
+        assert sky.job_status.call_count == 1
+        probe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_grace_by_default(self, cloud_env):
+        """Three failures 30 s apart are 90 s: final, as before this change."""
+        clock = _Clock(step=30)
+        sky, _ = _sky([SSH] * 10, clock)
+        with pytest.raises(WorkloadFailedException):
+            await _poll(cloud_env, sky, clock)
+        assert sky.job_status.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_grace_still_applies(self, cloud_env):
+        clock = _Clock(step=60)
+        sky, _ = _sky([SSH] * 100, clock)
+        with pytest.raises(WorkloadFailedException):
+            await _poll(cloud_env, sky, clock, poll_failure_grace_seconds=300)
+        assert 5 <= sky.job_status.call_count <= 7
+
+
 class TestLsfProbe:
     @pytest.fixture(autouse=True)
     def _lsf(self, lsf_env):
@@ -220,6 +265,14 @@ class TestLsfJobAlive:
         assert result is True
         # SkyPilot's LSF job name is <cluster>-<user hash>.
         client.get_jobs_state_by_name.assert_called_once_with("gb-train-l1-*")
+
+    def test_unknown_host_state_is_alive(self):
+        """UNKWN is LSF losing contact with the execution host -- the network
+        trouble the grace rides out -- not the job ending."""
+        assert self._run(["UNKWN"])[0] is True
+
+    def test_provisioning_job_is_alive(self):
+        assert self._run(["PROV"])[0] is True
 
     def test_no_job_is_gone(self):
         assert self._run([])[0] is False
