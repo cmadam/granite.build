@@ -6,6 +6,9 @@
 #
 # Verbatim apart from `black`/`isort` reflow, which CI requires repo-wide. Keep it that
 # way so re-syncing upstream stays a three-way merge; behaviour changes belong upstream.
+# The ONE intentional divergence is the empty-corpus guard at the top of merge(): upstream
+# divides by the kept count with no zero check, so a shard set that dropped every row
+# crashed with ZeroDivisionError after the full lockstep pass.
 #
 # It imports gb_steps_post_training.distillation at module scope, which is delivered at
 # RUN time from the checkout named by code_config (see step-template.yaml). That is why
@@ -292,6 +295,19 @@ def verify_shards(mans: list[dict]) -> list[str]:
 def merge(shard_dirs: list[Path], out_dir: Path, *, force: bool = False) -> dict:
     mans = load_manifests(shard_dirs)
     k = len(mans)
+
+    # Before the lockstep pass, not after it: the shards already say how many rows they kept,
+    # and an empty corpus is a prep outcome to report, not a division to crash on.
+    if sum(m["counts"]["kept"] for m in mans) == 0:
+        dropped = {}
+        for m in mans:
+            for reason, n in (m["counts"].get("drop_reasons") or {}).items():
+                dropped[reason] = dropped.get(reason, 0) + n
+        raise PrepError(
+            f"no rows kept across {k} shards ({sum(m['counts']['input'] for m in mans)} "
+            f"input records); drop reasons: {json.dumps(dropped, sort_keys=True)}. "
+            "There is no corpus to merge."
+        )
 
     # BEFORE expectation(), so the resume marker is never keyed on a claim known to be false.
     for line in verify_shards(mans):
