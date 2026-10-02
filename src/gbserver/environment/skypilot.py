@@ -138,6 +138,9 @@ _DEFAULT_POLL_INTERVAL_SECONDS = 300
 # and at a 30 s interval three failures were a ~90 s SSH blip -- which is what
 # killed healthy BlueVela training runs. Both are overridable per step through the
 # monitor config (``poll_failure_grace_seconds`` / ``poll_failure_max_seconds``).
+# The grace defaults on only for _SSH_HPC_CLOUDS, whose status polls ride an SSH
+# login node; elsewhere a lost cluster is usually a real preemption, and the
+# RetryHandler should see it at once rather than after 15 minutes.
 _MIN_POLL_FAILURES = 3
 _DEFAULT_POLL_FAILURE_GRACE_SECONDS = 900
 # For LSF clusters the grace is followed by a direct `bjobs` check, and a job LSF
@@ -148,7 +151,12 @@ _DEFAULT_POLL_FAILURE_MAX_SECONDS = 7200
 # How often that `bjobs` check may run while the failures last.
 _LSF_PROBE_INTERVAL_SECONDS = 300
 # LSF states of a job that still holds (or is waiting for) its allocation.
-_LSF_ALIVE_STATES = frozenset({"RUN", "PEND", "WAIT", "PSUSP", "USUSP", "SSUSP"})
+# UNKWN is what LSF reports when it loses contact with a running job's execution
+# host -- the same network trouble the grace exists to ride out -- so it must not
+# read as "gone". PROV is a job whose hosts are still being provisioned.
+_LSF_ALIVE_STATES = frozenset(
+    {"RUN", "PEND", "WAIT", "PROV", "PSUSP", "USUSP", "SSUSP", "UNKWN"}
+)
 
 
 def _lsf_job_alive(lsf_cluster: str, cluster_name: str) -> Optional[bool]:
@@ -1530,6 +1538,9 @@ class Skypilot(Environment):
         # launch_id -> LSF cluster name (the ~/.lsf/config host), for lsf launches
         # only: what the poll loop asks `bjobs` before tearing a cluster down.
         self._lsf_clusters: Dict[str, str] = {}
+        # launch_ids on an _SSH_HPC_CLOUDS cloud: the poll loop gives these the
+        # poll-failure grace by default and does not trust "does not exist".
+        self._ssh_hpc_launches: Set[str] = set()
         # launch_id -> relaunch attempt number. 0 (or absent) is the initial
         # launch; retry_workload bumps it so each relaunch provisions a fresh,
         # uniquely-named cluster instead of reusing the draining original.
@@ -2957,6 +2968,8 @@ class Skypilot(Environment):
             self._cluster_names[launch_id] = cluster_name
             if job_id is not None:
                 self._job_ids[launch_id] = job_id
+            if cloud_group in _SSH_HPC_CLOUDS:
+                self._ssh_hpc_launches.add(launch_id)
             infra_parts = (infra or "").split("/")
             if cloud_group == "lsf" and len(infra_parts) > 1 and infra_parts[1]:
                 self._lsf_clusters[launch_id] = infra_parts[1]
@@ -3434,9 +3447,10 @@ class Skypilot(Environment):
         # monotonic time of the first failure in the current run of failures
         first_poll_failure_at: Optional[float] = None
         last_lsf_probe_at: Optional[float] = None
+        ssh_hpc = launch_id in self._ssh_hpc_launches
         failure_grace = _coerce_float(
             kwargs.get("poll_failure_grace_seconds"),
-            _DEFAULT_POLL_FAILURE_GRACE_SECONDS,
+            _DEFAULT_POLL_FAILURE_GRACE_SECONDS if ssh_hpc else 0.0,
         )
         failure_ceiling = max(
             failure_grace,
@@ -3485,13 +3499,14 @@ class Skypilot(Environment):
                 if first_poll_failure_at is None:
                     first_poll_failure_at = now
                 failing_for = now - first_poll_failure_at
-                # "does not exist" is NOT conclusive on its own: SkyPilot's record
-                # of a cluster can vanish while the job behind it keeps running,
-                # and one such poll used to tear a healthy run down.
+                # On an SSH HPC cloud "does not exist" is NOT conclusive on its
+                # own: SkyPilot's record of a cluster can vanish while the job
+                # behind it keeps running, and one such poll used to tear a
+                # healthy run down. Elsewhere it still means preempted.
                 gone = (
                     consecutive_poll_failures >= _MIN_POLL_FAILURES
                     and failing_for >= failure_grace
-                )
+                ) or (not ssh_hpc and "does not exist" in str(e))
                 if gone and lsf_cluster and failing_for < failure_ceiling:
                     # The grace is over; ask LSF itself before tearing anything
                     # down. Only a definite "no such job" is final early.
@@ -4006,6 +4021,7 @@ class Skypilot(Environment):
         finally:
             self._cluster_names.pop(launch_id, None)
             self._lsf_clusters.pop(launch_id, None)
+            self._ssh_hpc_launches.discard(launch_id)
             self._job_ids.pop(launch_id, None)
             self._launch_kwargs.pop(launch_id, None)
             self._relaunch_attempts.pop(launch_id, None)
