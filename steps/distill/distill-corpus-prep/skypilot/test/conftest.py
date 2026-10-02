@@ -39,7 +39,7 @@ _OWN_SRC = Path(__file__).resolve().parent.parent / "src"
 if _OWN_SRC.is_dir() and str(_OWN_SRC) not in sys.path:
     sys.path.insert(0, str(_OWN_SRC))
 
-_NEEDS_UPSTREAM = ["test_prep_corpus.py"]
+_NEEDS_UPSTREAM = ["test_merge_shards.py", "test_prep_corpus.py"]
 
 
 def _delivered_package_is_readable() -> bool:
