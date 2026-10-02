@@ -135,7 +135,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: dataset
       steps:
-        - step_uri: space://steps/command
+        - step_uri: space://steps/distill/corpus-sources
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -148,113 +148,15 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
                 memory: $${SOURCES_MEMORY}
-            command_config:
-              # LITERAL block scalar. A folded one (>-) joins lines with spaces and
-              # turns the heredoc below into a one-line syntax error -- build
-              # 77aef958. The recipe test runs bash -n and compile() on this.
-              command: |
-                set -euo pipefail
-                OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/sources"
-                mkdir -p "$OUT_DIR"
-                /stage/.venv/bin/python - \
-                  "$OUT_DIR/train.jsonl" "$${TARGET_ROWS}" "$${SHUFFLE_SEED}" \
-                  "$${SOURCE_GENERAL}" "$${SOURCE_TOOLS}" "$${SOURCE_RAG}" <<'PYSRC'
-                import json, random, sys
-                from pathlib import Path
-
-                out = Path(sys.argv[1])
-                target = int(sys.argv[2])
-                seed = int(sys.argv[3])
-                srcs = [Path(p) for p in sys.argv[4:]]
-
-                for p in srcs:
-                    if not p.is_file():
-                        raise SystemExit(f"FATAL: source is not a file: {p}")
-
-                # ---- pass 1: count -------------------------------------------------
-                counts = []
-                for p in srcs:
-                    with p.open() as fh:
-                        counts.append(sum(1 for _ in fh))
-                    print(f"SOURCES count {p.name} {counts[-1]}", flush=True)
-                total = sum(counts)
-                print(f"SOURCES count TOTAL {total}", flush=True)
-                if total == 0:
-                    raise SystemExit("FATAL: every source is empty")
-
-                # target 0 means "all rows"; anything larger than the corpus is the same.
-                take_all = target <= 0 or target >= total
-                quotas = [
-                    c if take_all else max(1, round(target * c / total)) for c in counts
-                ]
-                print(
-                    "SOURCES quota "
-                    + " ".join(f"{p.name}={q}({q/max(t,1):.4%})"
-                               for p, q, t in zip(srcs, quotas, counts)),
-                    flush=True,
-                )
-
-                # ---- pass 2: reservoir-sample each split ---------------------------
-                # Per-split reservoirs keep the SHARE of each split fixed at its share
-                # of the corpus, which a single reservoir over the concatenation would
-                # only achieve in expectation.
-                renamed = 0
-                already = 0
-                bad = 0
-                picked = []
-                for p, q in zip(srcs, quotas):
-                    rng = random.Random(f"{seed}:{p.name}")
-                    reservoir = []
-                    with p.open() as fh:
-                        for i, line in enumerate(fh):
-                            try:
-                                rec = json.loads(line)
-                            except json.JSONDecodeError:
-                                bad += 1
-                                continue
-                            # THE RENAME. prep reads record["messages"] and drops
-                            # everything else as `no_messages`.
-                            if "messages" in rec:
-                                already += 1
-                            elif "conversations" in rec:
-                                rec["messages"] = rec.pop("conversations")
-                                renamed += 1
-                            else:
-                                bad += 1
-                                continue
-                            if len(reservoir) < q:
-                                reservoir.append(rec)
-                            else:
-                                j = rng.randint(0, i)
-                                if j < q:
-                                    reservoir[j] = rec
-                    print(f"SOURCES sampled {p.name} {len(reservoir)}", flush=True)
-                    picked.extend(reservoir)
-
-                if bad:
-                    print(f"SOURCES WARNING unusable rows skipped: {bad}", flush=True)
-                # A corpus where NOTHING carried either spelling is a schema change,
-                # not a bad row: fail rather than write an empty file prep will then
-                # refuse less informatively.
-                if renamed == 0 and already == 0:
-                    raise SystemExit(
-                        "FATAL: no row carried `conversations` or `messages`. The source "
-                        "schema has changed; prep would drop every row as no_messages."
-                    )
-
-                # Interleave the splits so an early truncation downstream still sees
-                # all three, and so batches are mixed rather than blocked by domain.
-                random.Random(seed).shuffle(picked)
-
-                out.parent.mkdir(parents=True, exist_ok=True)
-                with out.open("w") as fh:
-                    for rec in picked:
-                        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-                print(f"SOURCES renamed={renamed} already_messages={already} bad={bad}", flush=True)
-                print(f"SOURCES wrote {len(picked)} rows -> {out}", flush=True)
-                print(f"GB_ARTIFACT_ID:corpus_source GB_ARTIFACT_PATH:{out}", flush=True)
-                PYSRC
+            sources_config:
+              # Order names the per-split RNG streams; reordering changes the selection.
+              sources:
+                - "$${SOURCE_GENERAL}"
+                - "$${SOURCE_TOOLS}"
+                - "$${SOURCE_RAG}"
+              target_rows: $${TARGET_ROWS}
+              shuffle_seed: $${SHUFFLE_SEED}
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/sources"
 
     # ─── align ──────────────────────────────────────────────────────────────
     # Re-embeds the base student onto the teacher's tokenizer and emits the

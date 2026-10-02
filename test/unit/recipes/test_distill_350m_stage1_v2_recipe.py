@@ -44,10 +44,11 @@ import json
 import pathlib
 import re
 import subprocess
-import textwrap
+import sys
 
 import pytest
 import yaml
+from unit.recipes.published_step import gen_smoke_module, render_run
 
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
@@ -63,7 +64,6 @@ _STAGE1 = _RECIPE.parent / "distill-stage1"
 
 _MARKER = re.compile(r"\$\$\{([A-Za-z0-9_.,\"\[\]()\- ]+)\}")
 _PLAIN_MARKER = re.compile(r"\$\$\{([A-Za-z0-9_]+)\}")
-_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 
 # The loop variable is bound by the <% for %> block, not by parameters.yaml.
 _LOOP_VARS = {"N"}
@@ -575,67 +575,54 @@ class TestTheHorizonAndTheLadder:
 
 
 class TestGenSmoke:
-    @pytest.fixture(name="cmd")
-    def fixture_cmd(self, off):
-        return _config(off, "gen-smoke")["command_config"]["command"]
+    """The detector lives in the gen-smoke step and is tested there. What this recipe
+    owns is the wiring: every rung, in ladder order, the threshold, and the gate."""
 
-    def test_the_command_survived_yaml(self, cmd):
-        assert cmd.count("\n") > 20
-
-    def test_the_shell_parses(self, cmd):
-        result = subprocess.run(
-            ["bash", "-n"], input=cmd, text=True, capture_output=True
-        )
-        assert result.returncode == 0, result.stderr
+    def test_it_runs_the_gen_smoke_step(self, off):
+        step = _targets(off)["gen-smoke"]["steps"][0]
+        assert step["step_uri"] == "space://steps/distill/gen-smoke"
 
     def test_the_interpreter_actually_receives_every_rung(self, tmp_path):
         """Executes the assembly instead of parsing it. `bash -n` cannot see this
-        failure and neither can compile(): the <% %> block tags are not trimmed, so
-        each leaves a blank line where it stood, a blank line after a `\\` ENDS the
-        command, and bash then runs the next rung as a program name -- exit 127 with
-        `500:/proj/.../export-500: No such file or directory`, which is build
-        bb779f1f's gen-smoke. The interpreter is reached with no rungs and no heredoc
-        while every static check stays green, so the only test that can catch it is
-        one that looks at what the interpreter was handed."""
+        failure and neither can compile(): a <% %> block tag left a blank line after a
+        `\\`, which ENDS the command, and bash then ran the next rung as a program name
+        -- exit 127 with `500:/proj/.../export-500: No such file or directory`, which
+        is build bb779f1f's gen-smoke. The only test that can catch it is one that looks
+        at what the interpreter was handed, so this renders the recipe's own config
+        through the published step template and swaps only the interpreter."""
         rendered = _render(tmp_path, INCLUDE_SFT=False, WORKDIR_ROOT=str(tmp_path))
-        cmd = _config(rendered, "gen-smoke")["command_config"]["command"]
-
         argv_log = tmp_path / "argv.json"
-        stdin_log = tmp_path / "stdin.txt"
         stub = tmp_path / "python-stub"
         stub.write_text(
             "#!/usr/bin/env python3\n"
             "import json, sys\n"
-            f"open({str(stdin_log)!r}, 'w').write(sys.stdin.read())\n"
             f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
             encoding="utf-8",
         )
         stub.chmod(0o755)
+        script, step_dir = render_run(
+            "distill/gen-smoke",
+            _config(rendered, "gen-smoke"),
+            gen_smoke_config={"python": str(stub)},
+        )
 
-        # Only the interpreter is swapped. Every argument, the array, the loop and the
-        # heredoc are the recipe's own rendered text.
-        script = cmd.replace("/stage/.venv/bin/python", str(stub))
-        result = subprocess.run(["bash"], input=script, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "-c", script], cwd=step_dir, text=True, capture_output=True
+        )
+
         assert result.returncode == 0, result.stderr
-
         argv = json.loads(argv_log.read_text(encoding="utf-8"))
         rungs = _params()["CKPT_LADDER"].split(",")
-        # The stub sees the `-` that real python consumes as "read the program from
-        # stdin"; the recipe's own arguments start after it.
-        assert argv[0] == "-", f"interpreter got {argv}"
-        argv = argv[1:]
-        assert len(argv) == 3 + len(rungs), f"interpreter got {argv}"
-        assert argv[0].endswith("/repetition.json")
-        assert argv[1] == str(_params()["GEN_SMOKE_MAX_REPETITION"])
-        assert argv[2] == str(_params()["GEN_SMOKE_NEW_TOKENS"])
-        for rung, got in zip(rungs, argv[3:]):
+        assert argv[0] == "./src/gen_smoke.py", f"interpreter got {argv}"
+        assert len(argv) == 5 + len(rungs), f"interpreter got {argv}"
+        assert argv[1].endswith("/gen-smoke/repetition.json")
+        assert argv[2] == str(_params()["GEN_SMOKE_MAX_REPETITION"])
+        assert argv[3] == str(_params()["GEN_SMOKE_NEW_TOKENS"])
+        assert argv[4] == "true"
+        for rung, got in zip(rungs, argv[5:]):
             step, _, path = got.partition(":")
             assert step == rung, f"expected rung {rung}, got {got}"
             assert path.endswith(f"/export-{rung}"), got
-
-        # The heredoc has to land on the interpreter's stdin, not be orphaned by a
-        # broken continuation.
-        assert "def looped_fraction" in stdin_log.read_text(encoding="utf-8")
 
     def test_no_rung_is_appended_through_a_line_continuation(self):
         """The shape that broke, guarded at the source. A `\\`-continued line
@@ -650,62 +637,25 @@ class TestGenSmoke:
                     f"  {line}\n  {lines[i + 1]}"
                 )
 
-    def test_the_embedded_python_compiles(self, cmd):
-        bodies = _HEREDOC.findall(cmd)
-        assert bodies, "no Python heredoc found; has the target changed shape?"
-        for i, body in enumerate(bodies):
-            compile(textwrap.dedent(body), f"gen-smoke-{i}", "exec")
-
-    def test_it_reads_every_rung(self, cmd, off):
-        for rung in _params()["CKPT_LADDER"].split(","):
-            assert f"/export-{rung}" in cmd
+    def test_it_reads_every_rung(self, off):
+        rungs = _config(off, "gen-smoke")["gen_smoke_config"]["rungs"]
+        ladder = _params()["CKPT_LADDER"].split(",")
+        assert [r.partition(":")[0] for r in rungs] == ladder
+        for rung, entry in zip(ladder, rungs):
+            assert entry.endswith(f"/export-{rung}")
             assert f"export_{rung}" in _targets(off)["gen-smoke"]["inputs"]
 
-    def test_decoding_is_greedy(self, cmd):
-        """Sampling would hide the failure. Temperature is what lets a narrowed
-        distribution still look varied, and df8512e0's MultiPL-E ran at temperature
-        0.2 on a model with an effective branching factor of 1.49 -- effectively
-        greedy already, which is why it degenerated there and not elsewhere."""
-        assert "do_sample=False" in cmd
-
-    def test_the_prompts_are_raw_completions(self, cmd):
-        """MultiPL-E is where the collapse showed worst and it applies no chat
-        template, so a templated prompt set would test a different thing from the
-        benchmark that caught this."""
-        body = textwrap.dedent(_HEREDOC.findall(cmd)[0])
-        prompts = body[
-            body.index("PROMPTS = [") : body.index("]", body.index("PROMPTS = ["))
-        ]
-        assert "<|start_of_role|>" not in prompts
-        assert "<|im_start|>" not in prompts
-
-    def test_only_the_final_rung_can_fail_the_target(self, cmd):
+    def test_the_final_rung_gates_this_build(self, off):
         """An early rung above threshold is a finding to read in the table. Failing
-        the build on it would discard later checkpoints that may be fine."""
-        assert 'if rows[-1]["degenerate"]:' in cmd
-        assert cmd.count("sys.exit(1)") == 1
+        the build on it would discard later checkpoints that may be fine, so only the
+        final rung can fail the target -- and here it does."""
+        assert _config(off, "gen-smoke")["gen_smoke_config"]["gate_final_rung"] is True
 
-    def test_the_gate_is_the_run_metric_not_the_adjacent_pair_rate(self, cmd):
-        """Measured: a CORRECT 7-line Java function scores 0.167 on the adjacent-pair
-        rate, because two dedented closing braces are identical and one collision out
-        of six pairs is 17%. Gating on that fails healthy checkpoints. The run-based
-        metric gives 1.00 for the collapsed sample and 0.00 for the correct one."""
-        assert 'degenerate": mean_looped > threshold' in cmd
-        assert "def looped_fraction" in cmd
-        assert (
-            "def adjacent_rate" in cmd
-        ), "keep reporting it; the post-mortem quotes it"
-
-    def test_the_detector_separates_the_post_mortems_two_samples(self, cmd):
-        """Executes the shipped detector rather than trusting its docstring. These are
-        the actual generations recorded in the post-mortem."""
-        body = textwrap.dedent(_HEREDOC.findall(cmd)[0])
-        # Just the three pure functions: everything above them reads sys.argv.
-        detector = body[body.index("def adjacent_rate") : body.index("import torch")]
-        namespace = {}
-        exec(compile(detector, "detector", "exec"), namespace)
-        measure = namespace["measure"]
-
+    def test_the_detector_separates_the_post_mortems_two_samples(self):
+        """Executes the published detector at THIS recipe's threshold rather than
+        trusting its docstring. These are the actual generations recorded in the
+        post-mortem."""
+        measure = gen_smoke_module().measure
         collapsed = "// (true)\n" * 50
         correct = (
             "int count = 0;\n"
@@ -719,8 +669,6 @@ class TestGenSmoke:
         threshold = float(_params()["GEN_SMOKE_MAX_REPETITION"])
         assert measure(collapsed)[0] > threshold
         assert measure(correct)[0] <= threshold
-        for degenerate_input in ("", "one line", "\n\n  \n"):
-            assert measure(degenerate_input)[0] == 0.0
 
     def test_capability_is_measured_at_every_rung_and_at_the_baseline(self, off):
         """bb779f1f measured capability ONCE, at step 2,000, and got 0.000 (0/400) with
@@ -918,132 +866,102 @@ class TestTheCorpusPin:
 
 
 class TestThePinCheckScript:
-    @pytest.fixture(name="cmd")
-    def fixture_cmd(self, pinned):
-        return _config(pinned, "corpus-pin-check")["command_config"]["command"]
+    """The comparisons live in the corpus-pin-check step and are tested there. These
+    run the recipe's OWN pin_check_config through the published step, so a value that
+    lands in the wrong key, or a parameter that disagrees with the manifest this
+    recipe's own corpus target writes, fails here."""
 
-    @pytest.fixture(name="src")
-    def fixture_src(self, cmd):
-        found = _HEREDOC.search(cmd)
-        assert found, "no PYSRC heredoc survived"
-        return textwrap.dedent(found.group(1))
+    def test_it_runs_the_pin_check_step(self, pinned):
+        step = _targets(pinned)["corpus-pin-check"]["steps"][0]
+        assert step["step_uri"] == "space://steps/distill/corpus-pin-check"
 
-    def test_the_shell_parses(self, cmd):
-        proc = subprocess.run(
-            ["bash", "-n"], input=cmd, text=True, capture_output=True, check=False
-        )
-        assert proc.returncode == 0, proc.stderr
+    def test_it_checks_everything_that_defines_the_corpus(self, pinned):
+        cfg = _config(pinned, "corpus-pin-check")["pin_check_config"]
+        params = _params()
+        assert cfg["corpus_dir"] == _PIN
+        assert cfg["teacher_model"] == params["TEACHER_MODEL"]
+        assert cfg["max_length"] == params["MAX_LENGTH"]
+        assert cfg["think_policy"] == params["THINK_POLICY"]
+        assert cfg["documents_policy"] == params["DOCUMENTS_POLICY"]
+        assert cfg["eval_fraction"] == params["EVAL_FRACTION"]
+        assert cfg["tokenizer_dir"] == "{{ bindings.tokenizer.binding.path }}"
 
-    def test_the_embedded_python_compiles(self, src):
-        compile(src, "corpus-pin-check", "exec")
-
-    def test_it_checks_everything_that_defines_the_corpus(self, src):
-        for key in (
-            "tokenizer_identity",
-            "max_length",
-            "think_policy",
-            "completion_boundary",
-            "documents_policy",
-            "eval_fraction",
-        ):
-            assert key in src, key
-
-    def _run(self, src, tmp_path, manifest, **kw):
+    def _run(self, pinned, tmp_path, manifest, splits=("train.jsonl", "eval.jsonl")):
         corpus = tmp_path / "corpus"
         corpus.mkdir(exist_ok=True)
         (corpus / "corpus_manifest.json").write_text(json.dumps(manifest))
-        (corpus / "train.jsonl").write_text("{}\n")
-        (corpus / "eval.jsonl").write_text("{}\n")
+        for name in splits:
+            (corpus / name).write_text("{}\n")
         tok = tmp_path / "retagged_student"
         tok.mkdir(exist_ok=True)
-        script = tmp_path / "pin_check.py"
-        script.write_text(src)
-        argv = [
-            str(corpus),
-            kw.get("teacher", "/models/granite-4.1-3b-pinned"),
-            str(kw.get("max_length", 8192)),
-            kw.get("think_policy", "keep"),
-            kw.get("documents_policy", "keep"),
-            str(kw.get("eval_fraction", 0.005)),
-            str(tok),
-            str(tmp_path / "out.json"),
-        ]
+        script, step_dir = render_run(
+            "distill/corpus-pin-check",
+            _config(pinned, "corpus-pin-check"),
+            bindings={"tokenizer": str(tok)},
+            pin_check_config={
+                "corpus_dir": str(corpus),
+                "output_dir": str(tmp_path / "pin"),
+                "python": sys.executable,
+            },
+        )
         return subprocess.run(
-            ["python3", str(script), *argv],
-            text=True,
-            capture_output=True,
-            check=False,
+            ["bash", "-c", script], cwd=step_dir, text=True, capture_output=True
         )
 
     @staticmethod
     def _manifest(**over):
+        """What this recipe's corpus target would have written."""
+        params = _params()
         m = {
-            "tokenizer_identity": "granite-4.1-3b-pinned",
+            "tokenizer_identity": pathlib.Path(
+                params["TEACHER_MODEL"].rstrip("/")
+            ).name,
             "tokenizer_path": "/gone/align/retagged_student",
             "seed": 42,
-            "eval_fraction": 0.005,
+            "eval_fraction": params["EVAL_FRACTION"],
             "policies": {
-                "max_length": 8192,
-                "think_policy": "keep",
+                "max_length": params["MAX_LENGTH"],
+                "think_policy": params["THINK_POLICY"],
                 "completion_boundary": "last_message",
-                "documents_policy": "keep",
+                "documents_policy": params["DOCUMENTS_POLICY"],
             },
         }
         m.update(over)
         return m
 
-    def test_a_matching_manifest_is_accepted(self, src, tmp_path):
-        proc = self._run(src, tmp_path, self._manifest())
+    def test_a_matching_manifest_is_accepted(self, pinned, tmp_path):
+        proc = self._run(pinned, tmp_path, self._manifest())
         assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert (tmp_path / "out.json").is_file()
+        assert (tmp_path / "pin" / "corpus_pin.json").is_file()
+        assert "GB_ARTIFACT_ID:pin_check" in proc.stdout
 
-    def test_a_different_max_length_is_rejected(self, src, tmp_path):
+    def test_a_different_max_length_is_rejected(self, pinned, tmp_path):
         m = self._manifest()
         m["policies"]["max_length"] = 4096
-        proc = self._run(src, tmp_path, m)
+        proc = self._run(pinned, tmp_path, m)
         assert proc.returncode != 0
         assert "max_length" in proc.stdout + proc.stderr
 
-    def test_a_corpus_prepared_for_a_different_teacher_is_rejected(self, src, tmp_path):
+    def test_a_corpus_prepared_for_a_different_teacher_is_rejected(
+        self, pinned, tmp_path
+    ):
         proc = self._run(
-            src, tmp_path, self._manifest(tokenizer_identity="granite-4.0-1b-something")
+            pinned,
+            tmp_path,
+            self._manifest(tokenizer_identity="granite-4.0-1b-something"),
         )
         assert proc.returncode != 0
         assert "tokenizer_identity" in proc.stdout + proc.stderr
 
-    def test_a_missing_split_is_rejected(self, src, tmp_path):
-        corpus = tmp_path / "corpus"
-        corpus.mkdir()
-        (corpus / "corpus_manifest.json").write_text(json.dumps(self._manifest()))
-        (corpus / "train.jsonl").write_text("{}\n")
-        tok = tmp_path / "retagged_student"
-        tok.mkdir()
-        script = tmp_path / "pin_check.py"
-        script.write_text(src)
-        proc = subprocess.run(
-            [
-                "python3",
-                str(script),
-                str(corpus),
-                "/models/granite-4.1-3b-pinned",
-                "8192",
-                "keep",
-                "keep",
-                "0.005",
-                str(tok),
-                str(tmp_path / "out.json"),
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+    def test_a_missing_split_is_rejected(self, pinned, tmp_path):
+        proc = self._run(pinned, tmp_path, self._manifest(), splits=("train.jsonl",))
         assert proc.returncode != 0
         assert "eval.jsonl" in proc.stdout + proc.stderr
 
-    def test_every_mismatch_is_reported_not_just_the_first(self, src, tmp_path):
+    def test_every_mismatch_is_reported_not_just_the_first(self, pinned, tmp_path):
         m = self._manifest(tokenizer_identity="wrong", eval_fraction=0.5)
         m["policies"]["max_length"] = 4096
-        proc = self._run(src, tmp_path, m)
+        proc = self._run(pinned, tmp_path, m)
         blob = proc.stdout + proc.stderr
         assert proc.returncode != 0
         for key in ("tokenizer_identity", "eval_fraction", "max_length"):

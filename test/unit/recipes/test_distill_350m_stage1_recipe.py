@@ -34,8 +34,6 @@ epochs rather than by a step count that goes stale whenever the subset changes.
 
 import pathlib
 import re
-import subprocess
-import textwrap
 
 import pytest
 import yaml
@@ -52,7 +50,6 @@ _RECIPE = (
 )
 
 _MARKER = re.compile(r"\$\$\{([A-Za-z0-9_]+)\}")
-_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 
 # Measured on the cluster, 2026-09-22. The shares are what make a proportional
 # sample necessary; the totals are what make the cost estimate real.
@@ -125,55 +122,28 @@ def test_results_do_not_land_under_gbtest(off):
 
 
 class TestSources:
-    @pytest.fixture(name="cmd")
-    def fixture_cmd(self, off):
-        return _config(off, "sources")["command_config"]["command"]
+    """The logic lives in the corpus-sources step and is tested there. What this
+    recipe owns is the wiring: which splits, in which order, at what size."""
 
-    def test_the_command_survived_yaml(self, cmd):
-        """A folded scalar (>-) would flatten the heredoc into a one-line syntax
-        error — build 77aef958. Literal (|) is required."""
-        assert cmd.count("\n") > 20
+    def test_it_runs_the_corpus_sources_step(self, off):
+        step = _targets(off)["sources"]["steps"][0]
+        assert step["step_uri"] == "space://steps/distill/corpus-sources"
 
-    def test_the_shell_parses(self, cmd):
-        result = subprocess.run(
-            ["bash", "-n"], input=cmd, text=True, capture_output=True
-        )
-        assert result.returncode == 0, result.stderr
+    def test_it_passes_the_three_splits_in_lineage_order(self, off):
+        """Order names the per-split RNG streams, so it is part of the selection."""
+        cfg = _config(off, "sources")["sources_config"]
+        params = _params()
+        assert cfg["sources"] == [
+            params["SOURCE_GENERAL"],
+            params["SOURCE_TOOLS"],
+            params["SOURCE_RAG"],
+        ]
 
-    def test_the_embedded_python_compiles(self, cmd):
-        bodies = _HEREDOC.findall(cmd)
-        assert bodies, "no Python heredoc found; has the target changed shape?"
-        for i, body in enumerate(bodies):
-            compile(textwrap.dedent(body), f"sources-{i}", "exec")
-
-    def test_it_renames_conversations_to_messages(self, cmd):
-        """THE load-bearing line. prep reads record.get("messages") and returns
-        no_messages otherwise, so without this every one of the 5,081,504 rows is
-        dropped and prep raises PrepError."""
-        assert 'rec["messages"] = rec.pop("conversations")' in cmd
-
-    def test_a_missing_schema_fails_loudly_rather_than_writing_nothing(self, cmd):
-        """If a future release renames the field again, an empty output file would
-        surface as prep's less informative "0 of N records survived"."""
-        assert "FATAL: no row carried" in cmd
-        assert "raise SystemExit" in cmd
-
-    def test_it_samples_each_split_separately(self, cmd):
-        """A single reservoir over the concatenation holds the split shares only in
-        expectation. Per-split reservoirs hold them exactly, which is what makes an
-        800k subset of an 84.86%-general corpus representative rather than just
-        short."""
-        assert "for p, q in zip(srcs, quotas)" in cmd
-        assert "round(target * c / total)" in cmd
-
-    def test_the_selection_is_seeded_and_so_reproducible(self, cmd):
-        assert 'random.Random(f"{seed}:{p.name}")' in cmd
-        assert "random.Random(seed).shuffle(picked)" in cmd
-
-    def test_it_interleaves_the_splits(self, cmd):
-        """So that an early truncation downstream still sees all three domains, and
-        so batches are mixed rather than blocked by domain."""
-        assert "shuffle(picked)" in cmd
+    def test_the_size_and_seed_come_from_parameters(self, off):
+        cfg = _config(off, "sources")["sources_config"]
+        assert cfg["target_rows"] == _params()["TARGET_ROWS"]
+        assert cfg["shuffle_seed"] == _params()["SHUFFLE_SEED"]
+        assert cfg["output_dir"].endswith("/sources")
 
     def test_all_three_splits_are_declared_as_lineage_inputs(self, off):
         inputs = _targets(off)["sources"]["inputs"]
@@ -192,11 +162,10 @@ class TestSources:
             assert "tokenized" not in path, path
             assert "granite-4.0-sft-datasets" in path
 
-    def test_it_publishes_the_corpus_source_it_declares(self, off, cmd):
+    def test_it_declares_the_output_the_step_registers(self, off):
         """An undeclared output makes the resolver drop the NEWARTIFACT event and the
         target completes with no output AND no error."""
         assert set(_targets(off)["sources"]["outputs"]) == {"corpus_source"}
-        assert "GB_ARTIFACT_ID:corpus_source GB_ARTIFACT_PATH:" in cmd
 
 
 class TestCorpusConsumesSources:

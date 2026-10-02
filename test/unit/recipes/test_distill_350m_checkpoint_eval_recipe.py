@@ -39,13 +39,14 @@ So what this file guards is the graph:
   is exactly the kind of thing a later copy-paste would quietly restore.
 """
 
+import json
 import pathlib
 import re
 import subprocess
-import textwrap
 
 import pytest
 import yaml
+from unit.recipes.published_step import render_run
 
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
@@ -61,7 +62,6 @@ _V2 = _RECIPE.parent / "distill-stage1-v2"
 _CATALOG_SRC = _RECIPE.parent / "rl-checkpoint-eval" / "eval-catalog.yaml"
 
 _PLAIN_MARKER = re.compile(r"\$\$\{([A-Za-z0-9_]+)\}")
-_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 
 # Bound by the <% for %> blocks, not by parameters.yaml.
 _LOOP_VARS = {"N", "e", "k", "v", "name", "CATS", "SAGE_NAMES"}
@@ -514,35 +514,51 @@ def test_every_category_is_selectable(tmp_path):
 
 
 def test_gen_smoke_reports_without_gating(built):
-    """distill-stage1-v2's copy of this target exits 1 when the final rung is
+    """distill-stage1-v2's gen-smoke fails the target when the final rung is
     degenerate, because there it protects a downstream consumer from picking up a
     collapsed model. This recipe has no such consumer: it measures a whole epoch,
     every rung is priced by full-eval regardless, and failing here would only remove
-    evidence."""
-    command = _config(built, "gen-smoke")["command_config"]["command"]
-    body = textwrap.dedent(_HEREDOC.findall(command)[0])
-    assert "sys.exit" not in body
-    # It still measures and still reports: the flag and the table are the deliverable.
-    assert "degenerate" in body
-    assert "GEN-SMOKE table" in body
+    evidence. It still measures and still writes the table: that is the deliverable."""
+    step = _targets(built)["gen-smoke"]["steps"][0]
+    assert step["step_uri"] == "space://steps/distill/gen-smoke"
+    assert step["config"]["gen_smoke_config"]["gate_final_rung"] is False
 
 
-def test_gen_smoke_covers_every_rung_and_is_valid_bash_and_python(built, tmp_path):
-    """Neither `bash -n` nor compile() alone catches the real failure here: the <% %>
-    block tags are not trimmed, so each leaves a blank line where it stood, and a blank
-    line after a `\\` ends the command -- bash then runs the next rung as a program
-    name. That is build bb779f1f, and `bash -n` was green throughout."""
-    command = _config(built, "gen-smoke")["command_config"]["command"]
-    script = tmp_path / "gen-smoke.sh"
-    script.write_text(command, encoding="utf-8")
-    result = subprocess.run(
-        ["bash", "-n", str(script)], capture_output=True, text=True, check=False
+def test_gen_smoke_hands_the_interpreter_every_rung(built, tmp_path):
+    """Neither `bash -n` nor compile() catches the real failure here: a <% %> block tag
+    left a blank line after a `\\`, which ends the command, and bash then ran the next
+    rung as a program name. That is build bb779f1f, and `bash -n` was green
+    throughout. This renders the recipe's own config through the published step
+    template and swaps only the interpreter."""
+    argv_log = tmp_path / "argv.json"
+    stub = tmp_path / "python-stub"
+    stub.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
+        encoding="utf-8",
     )
+    stub.chmod(0o755)
+    script, step_dir = render_run(
+        "distill/gen-smoke",
+        _config(built, "gen-smoke"),
+        gen_smoke_config={"python": str(stub), "output_dir": str(tmp_path / "gs")},
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=step_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
     assert result.returncode == 0, result.stderr
-    compile(textwrap.dedent(_HEREDOC.findall(command)[0]), "gen-smoke", "exec")
-    rungs = re.findall(r'RUNGS\+=\("(\d+):([^"]+)"\)', command)
+    argv = json.loads(argv_log.read_text(encoding="utf-8"))
+    assert argv[4] == "false"
+    rungs = [a.partition(":") for a in argv[5:]]
     assert [r[0] for r in rungs] == _LADDER
-    for rung, path in rungs:
+    for rung, _, path in rungs:
         assert path.endswith(f"/export-{rung}")
 
 

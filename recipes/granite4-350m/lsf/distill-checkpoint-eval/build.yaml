@@ -159,7 +159,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: dataset
       steps:
-        - step_uri: space://steps/command
+        - step_uri: space://steps/distill/corpus-sources
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -172,113 +172,15 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
                 memory: $${SOURCES_MEMORY}
-            command_config:
-              # LITERAL block scalar. A folded one (>-) joins lines with spaces and
-              # turns the heredoc below into a one-line syntax error -- build
-              # 77aef958. The recipe test runs bash -n and compile() on this.
-              command: |
-                set -euo pipefail
-                OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/sources"
-                mkdir -p "$OUT_DIR"
-                /stage/.venv/bin/python - \
-                  "$OUT_DIR/train.jsonl" "$${TARGET_ROWS}" "$${SHUFFLE_SEED}" \
-                  "$${SOURCE_GENERAL}" "$${SOURCE_TOOLS}" "$${SOURCE_RAG}" <<'PYSRC'
-                import json, random, sys
-                from pathlib import Path
-
-                out = Path(sys.argv[1])
-                target = int(sys.argv[2])
-                seed = int(sys.argv[3])
-                srcs = [Path(p) for p in sys.argv[4:]]
-
-                for p in srcs:
-                    if not p.is_file():
-                        raise SystemExit(f"FATAL: source is not a file: {p}")
-
-                # ---- pass 1: count -------------------------------------------------
-                counts = []
-                for p in srcs:
-                    with p.open() as fh:
-                        counts.append(sum(1 for _ in fh))
-                    print(f"SOURCES count {p.name} {counts[-1]}", flush=True)
-                total = sum(counts)
-                print(f"SOURCES count TOTAL {total}", flush=True)
-                if total == 0:
-                    raise SystemExit("FATAL: every source is empty")
-
-                # target 0 means "all rows"; anything larger than the corpus is the same.
-                take_all = target <= 0 or target >= total
-                quotas = [
-                    c if take_all else max(1, round(target * c / total)) for c in counts
-                ]
-                print(
-                    "SOURCES quota "
-                    + " ".join(f"{p.name}={q}({q/max(t,1):.4%})"
-                               for p, q, t in zip(srcs, quotas, counts)),
-                    flush=True,
-                )
-
-                # ---- pass 2: reservoir-sample each split ---------------------------
-                # Per-split reservoirs keep the SHARE of each split fixed at its share
-                # of the corpus, which a single reservoir over the concatenation would
-                # only achieve in expectation.
-                renamed = 0
-                already = 0
-                bad = 0
-                picked = []
-                for p, q in zip(srcs, quotas):
-                    rng = random.Random(f"{seed}:{p.name}")
-                    reservoir = []
-                    with p.open() as fh:
-                        for i, line in enumerate(fh):
-                            try:
-                                rec = json.loads(line)
-                            except json.JSONDecodeError:
-                                bad += 1
-                                continue
-                            # THE RENAME. prep reads record["messages"] and drops
-                            # everything else as `no_messages`.
-                            if "messages" in rec:
-                                already += 1
-                            elif "conversations" in rec:
-                                rec["messages"] = rec.pop("conversations")
-                                renamed += 1
-                            else:
-                                bad += 1
-                                continue
-                            if len(reservoir) < q:
-                                reservoir.append(rec)
-                            else:
-                                j = rng.randint(0, i)
-                                if j < q:
-                                    reservoir[j] = rec
-                    print(f"SOURCES sampled {p.name} {len(reservoir)}", flush=True)
-                    picked.extend(reservoir)
-
-                if bad:
-                    print(f"SOURCES WARNING unusable rows skipped: {bad}", flush=True)
-                # A corpus where NOTHING carried either spelling is a schema change,
-                # not a bad row: fail rather than write an empty file prep will then
-                # refuse less informatively.
-                if renamed == 0 and already == 0:
-                    raise SystemExit(
-                        "FATAL: no row carried `conversations` or `messages`. The source "
-                        "schema has changed; prep would drop every row as no_messages."
-                    )
-
-                # Interleave the splits so an early truncation downstream still sees
-                # all three, and so batches are mixed rather than blocked by domain.
-                random.Random(seed).shuffle(picked)
-
-                out.parent.mkdir(parents=True, exist_ok=True)
-                with out.open("w") as fh:
-                    for rec in picked:
-                        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-
-                print(f"SOURCES renamed={renamed} already_messages={already} bad={bad}", flush=True)
-                print(f"SOURCES wrote {len(picked)} rows -> {out}", flush=True)
-                print(f"GB_ARTIFACT_ID:corpus_source GB_ARTIFACT_PATH:{out}", flush=True)
-                PYSRC
+            sources_config:
+              # Order names the per-split RNG streams; reordering changes the selection.
+              sources:
+                - "$${SOURCE_GENERAL}"
+                - "$${SOURCE_TOOLS}"
+                - "$${SOURCE_RAG}"
+              target_rows: $${TARGET_ROWS}
+              shuffle_seed: $${SHUFFLE_SEED}
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/sources"
 <% endif %>
 
 
@@ -457,7 +359,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: fileset
       steps:
-        - step_uri: space://steps/command
+        - step_uri: space://steps/distill/corpus-pin-check
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -470,131 +372,15 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
                 memory: $${CPU_ONLY_MEMORY}
-            command_config:
-              # LITERAL block scalar, and the arguments are passed positionally rather
-              # than interpolated into the python: the same discipline the other
-              # command steps in this file use, for the same reason (build 77aef958
-              # for the block scalar, bb779f1f for what a stray blank line does to a
-              # backslash-continued argument list -- there are none here).
-              command: |
-                set -euo pipefail
-                OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus-pin"
-                mkdir -p "$OUT_DIR"
-                /stage/.venv/bin/python - \
-                  "$${CORPUS_DIR.rstrip('/')}" \
-                  "$${TEACHER_MODEL}" \
-                  "$${MAX_LENGTH}" \
-                  "$${THINK_POLICY}" \
-                  "$${DOCUMENTS_POLICY}" \
-                  "$${EVAL_FRACTION}" \
-                  "{{ bindings.tokenizer.binding.path }}" \
-                  "$OUT_DIR/corpus_pin.json" \
-                  <<'PYSRC'
-                import hashlib, json, sys
-                from pathlib import Path
-
-                corpus = Path(sys.argv[1])
-                teacher = sys.argv[2]
-                max_length = int(sys.argv[3])
-                think_policy = sys.argv[4]
-                documents_policy = sys.argv[5]
-                eval_fraction = float(sys.argv[6])
-                tokenizer_dir = Path(sys.argv[7])
-                out = Path(sys.argv[8])
-
-                problems = []
-
-                manifest_path = corpus / "corpus_manifest.json"
-                if not manifest_path.is_file():
-                    raise SystemExit(f"FATAL: no corpus_manifest.json under {corpus}")
-                manifest = json.loads(manifest_path.read_text())
-
-                # The splits, before anything else: a pin whose files were cleaned up
-                # is the most likely way this target fires, and the cheapest to say.
-                for name in ("train.jsonl", "eval.jsonl"):
-                    if not (corpus / name).is_file():
-                        problems.append(f"{name} is missing from {corpus}")
-
-                # What the corpus was built AGAINST.
-                want_identity = Path(teacher.rstrip("/")).name
-                got_identity = manifest.get("tokenizer_identity")
-                if got_identity != want_identity:
-                    problems.append(
-                        f"tokenizer_identity {got_identity!r} != this build's teacher "
-                        f"{want_identity!r}"
-                    )
-
-                # What the corpus was built WITH. completion_boundary is not a
-                # parameter -- the recipe hard-codes last_message because the eval
-                # measures divergence over the final assistant turn -- so it is
-                # compared against that literal rather than against a parameter.
-                policies = manifest.get("policies") or {}
-                for key, want in (
-                    ("max_length", max_length),
-                    ("think_policy", think_policy),
-                    ("documents_policy", documents_policy),
-                    ("completion_boundary", "last_message"),
-                ):
-                    got = policies.get(key)
-                    if got != want:
-                        problems.append(f"policies.{key} {got!r} != {want!r}")
-
-                if float(manifest.get("eval_fraction", -1)) != eval_fraction:
-                    problems.append(
-                        f"eval_fraction {manifest.get('eval_fraction')!r} != "
-                        f"{eval_fraction!r}"
-                    )
-
-                # Strongest available check, when it is available: the manifest records
-                # the tokenizer directory it used, so if that directory still exists we
-                # compare bytes rather than trusting a name. It is allowed to be gone --
-                # a pin should outlive the build that produced it -- and the report says
-                # which mode ran, so a reader never has to guess how strict this was.
-                pinned_tok = Path(str(manifest.get("tokenizer_path") or ""))
-                mode = "identity-only (pinned tokenizer_path no longer on disk)"
-                if pinned_tok.is_dir():
-                    mode = "byte-compared against the pinned tokenizer_path"
-                    for name in ("tokenizer.json", "chat_template.jinja"):
-                        here, there = tokenizer_dir / name, pinned_tok / name
-                        if not there.is_file():
-                            problems.append(f"{name} missing from {pinned_tok}")
-                        elif not here.is_file():
-                            problems.append(f"{name} missing from {tokenizer_dir}")
-                        else:
-                            hh = hashlib.sha256(here.read_bytes()).hexdigest()
-                            th = hashlib.sha256(there.read_bytes()).hexdigest()
-                            if hh != th:
-                                problems.append(
-                                    f"{name} differs: this build {hh[:16]} vs pinned "
-                                    f"{th[:16]}"
-                                )
-
-                # Every problem, not the first: whoever is re-pointing a sweep at a
-                # corpus wants the whole list in one read, not one per relaunch.
-                if problems:
-                    print(f"CORPUS-PIN REJECTED {corpus}", flush=True)
-                    for p in problems:
-                        print(f"  - {p}", flush=True)
-                    raise SystemExit(
-                        f"FATAL [corpus-pin-check]: {len(problems)} mismatch(es) "
-                        f"between this build and the pinned corpus manifest"
-                    )
-
-                report = {
-                    "corpus_dir": str(corpus),
-                    "accepted": True,
-                    "tokenizer_check": mode,
-                    "tokenizer_identity": got_identity,
-                    "policies": policies,
-                    "eval_fraction": manifest.get("eval_fraction"),
-                    "seed": manifest.get("seed"),
-                    "counts": manifest.get("counts"),
-                    "splits": manifest.get("splits"),
-                }
-                out.write_text(json.dumps(report, indent=2))
-                print(f"CORPUS-PIN ACCEPTED {corpus} ({mode})", flush=True)
-                print(f"GB_ARTIFACT_ID:pin_check GB_ARTIFACT_PATH:{out}", flush=True)
-                PYSRC
+            pin_check_config:
+              corpus_dir: "$${CORPUS_DIR.rstrip('/')}"
+              teacher_model: "$${TEACHER_MODEL}"
+              max_length: $${MAX_LENGTH}
+              think_policy: "$${THINK_POLICY}"
+              documents_policy: "$${DOCUMENTS_POLICY}"
+              eval_fraction: $${EVAL_FRACTION}
+              tokenizer_dir: "{{ bindings.tokenizer.binding.path }}"
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus-pin"
 
 <% endif %>
 
@@ -1057,7 +843,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: fileset
       steps:
-        - step_uri: space://steps/command
+        - step_uri: space://steps/distill/gen-smoke
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -1071,184 +857,16 @@ granite.build:
                 cluster: "$${CLUSTER}"
                 zone: "$${QUEUE}"
                 memory: $${GPU_MEMORY}
-            command_config:
-              # LITERAL block scalar. A folded one (>-) joins lines with spaces and
-              # turns the heredoc below into a one-line syntax error -- build
-              # 77aef958. The recipe test runs bash -n and compile() on this.
-              #
-              # The rungs go into an array, one append per iteration, and NOT into a
-              # backslash-continued argument list. Jinja block tags are not trimmed
-              # here, so every one of them leaves a blank line where it stood, and a
-              # blank line after a `\` ends the command -- bash then runs the next rung
-              # as a program name. That is build bb779f1f: `line 26: 500:/proj/.../export-500:
-              # No such file or directory`, python reached with no heredoc and no rungs,
-              # and `bash -n` green throughout, because `500:/path` is a valid command.
-              # Blank lines BETWEEN array appends are inert, which is the whole point.
-              command: |
-                set -euo pipefail
-                OUT_DIR="$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/gen-smoke"
-                mkdir -p "$OUT_DIR"
-                RUNGS=()
+            gen_smoke_config:
+              # One entry per rung, in ladder order; the last is the one the gate judges.
+              rungs:
 <% for N in CKPT_LADDER.split(",") %>
-                RUNGS+=("$${N}:$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/export-$${N}")
+                - "$${N}:$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/export-$${N}"
 <% endfor %>
-                /stage/.venv/bin/python - \
-                  "$OUT_DIR/repetition.json" "$${GEN_SMOKE_MAX_REPETITION}" \
-                  "$${GEN_SMOKE_NEW_TOKENS}" \
-                  "${RUNGS[@]}" \
-                  <<'PYSRC'
-                import json, sys
-                from pathlib import Path
-
-                out = Path(sys.argv[1])
-                threshold = float(sys.argv[2])
-                new_tokens = int(sys.argv[3])
-                rungs = [a.split(":", 1) for a in sys.argv[4:]]
-
-                # Raw completion prompts, deliberately: MultiPL-E is where the
-                # collapse showed worst, and it applies no chat template. A prompt
-                # set that went through the template would test a different thing
-                # from the benchmark that caught this.
-                PROMPTS = [
-                    "def has_close_elements(numbers, threshold):\n",
-                    "def sum_to_n(n: int):\n    \"\"\"Sum numbers from 1 to n.\"\"\"\n",
-                    "public class Solution {\n    public static int count(int[] a) {\n",
-                    "#!/bin/bash\n# Print the first argument twice.\n",
-                    "fn factorial(n: u64) -> u64 {\n",
-                    "The capital of France is",
-                    "Q: What is 17 + 25?\nA:",
-                    "Write a haiku about autumn.\n",
-                ]
-
-                def adjacent_rate(lines):
-                    """Fraction of adjacent line pairs that are identical.
-
-                    Reported, not gated on. This is the shape of the detector whose
-                    numbers the df8512e0 post-mortem records (baseline 0.4% Java /
-                    2.1% Rust / 6.7% Shell against the collapsed 20.8% / 18.2% /
-                    30.9%), so it is kept for continuity with those figures — but it
-                    is NOT a safe gate on short samples. A correct 7-line Java
-                    function scores 0.167 on it, because two dedented closing braces
-                    are legitimately identical and on six pairs one collision is
-                    17%. Gating on that would fail healthy checkpoints.
-                    """
-                    if len(lines) < 2:
-                        return 0.0
-                    repeats = sum(1 for a, b in zip(lines, lines[1:]) if a == b)
-                    return repeats / (len(lines) - 1)
-
-                def looped_fraction(lines, min_run=3):
-                    """Fraction of lines inside a run of >= min_run identical lines.
-
-                    THIS is what gates, because it is what the failure actually looks
-                    like: the collapsed model wrote "// (true)" about fifty times in
-                    a row. Real code repeats a line twice in passing; it does not
-                    repeat one three times running. On the two samples in the
-                    post-mortem this separates cleanly — 1.00 for the collapsed Java
-                    output, 0.00 for the correct one — where the adjacent-pair rate
-                    puts them 0.17 apart.
-
-                    Lines are compared with indentation intact (rstrip only), so
-                    "    }" and "}" are different lines, which is the other half of
-                    why the brace case does not trigger it.
-                    """
-                    if not lines:
-                        return 0.0
-                    looped, i = 0, 0
-                    while i < len(lines):
-                        j = i
-                        while j + 1 < len(lines) and lines[j + 1] == lines[i]:
-                            j += 1
-                        run = j - i + 1
-                        if run >= min_run:
-                            looped += run
-                        i = j + 1
-                    return looped / len(lines)
-
-                def measure(text):
-                    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
-                    return looped_fraction(lines), adjacent_rate(lines)
-
-                import torch
-                from transformers import AutoModelForCausalLM, AutoTokenizer
-
-                rows = []
-                for step, path in rungs:
-                    tok = AutoTokenizer.from_pretrained(path)
-                    model = AutoModelForCausalLM.from_pretrained(
-                        path, dtype=torch.bfloat16, device_map="cuda"
-                    )
-                    model.eval()
-
-                    looped, adjacent, samples = [], [], []
-                    for prompt in PROMPTS:
-                        ids = tok(prompt, return_tensors="pt").to(model.device)
-                        with torch.no_grad():
-                            # GREEDY. Sampling would hide the failure: temperature
-                            # is what lets a narrowed distribution still look
-                            # varied, and greedy decoding of a collapsed model is a
-                            # fixed-point search.
-                            gen = model.generate(
-                                **ids,
-                                max_new_tokens=new_tokens,
-                                do_sample=False,
-                                pad_token_id=tok.pad_token_id or tok.eos_token_id,
-                            )
-                        text = tok.decode(
-                            gen[0][ids["input_ids"].shape[1]:], skip_special_tokens=True
-                        )
-                        one_looped, one_adjacent = measure(text)
-                        looped.append(one_looped)
-                        adjacent.append(one_adjacent)
-                        samples.append(
-                            {
-                                "prompt": prompt,
-                                "completion": text[:400],
-                                "looped_fraction": round(one_looped, 4),
-                            }
-                        )
-
-                    mean_looped = sum(looped) / len(looped)
-                    rows.append(
-                        {
-                            "step": int(step),
-                            "path": path,
-                            "mean_looped_fraction": round(mean_looped, 4),
-                            "worst_looped_fraction": round(max(looped), 4),
-                            "mean_adjacent_rate": round(sum(adjacent) / len(adjacent), 4),
-                            "degenerate": mean_looped > threshold,
-                            "samples": samples,
-                        }
-                    )
-                    print(
-                        f"GEN-SMOKE step={step} looped={mean_looped:.4f} "
-                        f"worst_looped={max(looped):.4f} "
-                        f"adjacent={sum(adjacent) / len(adjacent):.4f} "
-                        f"threshold={threshold} "
-                        f"{'DEGENERATE' if mean_looped > threshold else 'ok'}",
-                        flush=True,
-                    )
-                    del model
-                    torch.cuda.empty_cache()
-
-                out.parent.mkdir(parents=True, exist_ok=True)
-                out.write_text(json.dumps({"threshold": threshold, "rungs": rows}, indent=2))
-                print(f"GB_ARTIFACT_ID:repetition_report GB_ARTIFACT_PATH:{out}", flush=True)
-
-                print(
-                    "GEN-SMOKE table (step, looped, worst, adjacent, verdict):",
-                    flush=True,
-                )
-                for r in rows:
-                    print(
-                        f"  {r['step']:>6}  {r['mean_looped_fraction']:.4f}  "
-                        f"{r['worst_looped_fraction']:.4f}  "
-                        f"{r['mean_adjacent_rate']:.4f}  "
-                        f"{'DEGENERATE' if r['degenerate'] else 'ok'}",
-                        flush=True,
-                    )
-
-                PYSRC
+              max_repetition: $${GEN_SMOKE_MAX_REPETITION}
+              new_tokens: $${GEN_SMOKE_NEW_TOKENS}
+              gate_final_rung: false
+              output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/gen-smoke"
 
 
     # ═══ FULL-EVAL, PER RUNG ════════════════════════════════════════════════

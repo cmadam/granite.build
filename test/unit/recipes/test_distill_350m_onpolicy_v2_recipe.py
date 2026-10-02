@@ -41,6 +41,7 @@ import subprocess
 
 import pytest
 import yaml
+from unit.recipes.published_step import render_run
 
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
@@ -360,46 +361,47 @@ class TestGenSmoke:
     no gen-smoke coverage at all, which is how build bb779f1f's failure shipped in two
     recipes at once."""
 
+    def test_it_runs_the_gen_smoke_step(self, on):
+        step = _targets(on)["gen-smoke"]["steps"][0]
+        assert step["step_uri"] == "space://steps/distill/gen-smoke"
+
     def test_the_interpreter_actually_receives_every_rung(self, tmp_path):
         """Executes the assembly instead of parsing it. `bash -n` cannot see this
-        failure: the <% %> block tags are not trimmed, so each leaves a blank line
-        where it stood, a blank line after a `\\` ENDS the command, and bash then runs
-        the next rung as a program name -- exit 127 with
-        `500:/proj/.../export-500: No such file or directory`."""
+        failure: a <% %> block tag left a blank line after a `\\`, which ENDS the
+        command, and bash then ran the next rung as a program name -- exit 127 with
+        `500:/proj/.../export-500: No such file or directory`. This renders the
+        recipe's own config through the published step template and swaps only the
+        interpreter."""
         rendered = _render(tmp_path, INCLUDE_SFT=False, WORKDIR_ROOT=str(tmp_path))
-        cmd = _config(rendered, "gen-smoke")["command_config"]["command"]
-
         argv_log = tmp_path / "argv.json"
-        stdin_log = tmp_path / "stdin.txt"
         stub = tmp_path / "python-stub"
         stub.write_text(
             "#!/usr/bin/env python3\n"
             "import json, sys\n"
-            f"open({str(stdin_log)!r}, 'w').write(sys.stdin.read())\n"
             f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
             encoding="utf-8",
         )
         stub.chmod(0o755)
+        script, step_dir = render_run(
+            "distill/gen-smoke",
+            _config(rendered, "gen-smoke"),
+            gen_smoke_config={"python": str(stub)},
+        )
 
-        # Only the interpreter is swapped. Every argument, the array, the loop and the
-        # heredoc are the recipe's own rendered text.
-        script = cmd.replace("/stage/.venv/bin/python", str(stub))
-        result = subprocess.run(["bash"], input=script, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "-c", script], cwd=step_dir, text=True, capture_output=True
+        )
+
         assert result.returncode == 0, result.stderr
-
         argv = json.loads(argv_log.read_text(encoding="utf-8"))
         rungs = _params()["CKPT_LADDER"].split(",")
-        # The stub sees the `-` that real python consumes as "read the program from
-        # stdin"; the recipe's own arguments start after it.
-        assert argv[0] == "-", f"interpreter got {argv}"
-        argv = argv[1:]
-        assert len(argv) == 3 + len(rungs), f"interpreter got {argv}"
-        for rung, got in zip(rungs, argv[3:]):
+        assert argv[0] == "./src/gen_smoke.py", f"interpreter got {argv}"
+        assert len(argv) == 5 + len(rungs), f"interpreter got {argv}"
+        assert argv[4] == "true", "the on-policy arm gates on its final rung"
+        for rung, got in zip(rungs, argv[5:]):
             step, _, path = got.partition(":")
             assert step == rung, f"expected rung {rung}, got {got}"
             assert path.endswith(f"/export-{rung}"), got
-
-        assert "def looped_fraction" in stdin_log.read_text(encoding="utf-8")
 
     def test_no_rung_is_appended_through_a_line_continuation(self):
         """The shape that broke, guarded at the source."""
@@ -427,7 +429,6 @@ def test_the_student_default_cannot_silently_train_the_wrong_model():
 
 
 _PIN = "/proj/granite-build/g4os/distill/distill-350m-s1v2-ce040/c20ed3c0/corpus"
-_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 
 
 def _corpus_inputs(rendered):
@@ -491,12 +492,11 @@ class TestTheCorpusPin:
         and the server would wait on a check it has nothing to do with."""
         assert "corpus" not in (_targets(pinned)["vllm-server"].get("inputs") or {})
 
-    def test_the_pin_check_is_byte_identical_to_the_off_policy_arm(
-        self, pinned, tmp_path
-    ):
-        """Rather than duplicate the off-policy arm's six behavioural tests of the
-        script, assert the script is the same script. Those tests then cover this
-        recipe too, and a fix applied to one arm cannot silently miss the other."""
+    def test_the_pin_check_matches_the_off_policy_arm(self, pinned, tmp_path):
+        """Rather than duplicate the off-policy arm's behavioural tests of the check,
+        assert this arm runs the same step with the same configuration. Those tests
+        then cover this recipe too, and a change applied to one arm cannot silently
+        miss the other."""
         other = yaml.safe_load(
             apply_parameters(
                 (_OFFPOLICY / "build.yaml").read_text(encoding="utf-8"),
@@ -505,8 +505,14 @@ class TestTheCorpusPin:
                 str(tmp_path),
             )
         )
-        mine = _config(pinned, "corpus-pin-check")["command_config"]["command"]
-        theirs = other["granite.build"]["targets"]["corpus-pin-check"]["steps"][0][
-            "config"
-        ]["command_config"]["command"]
-        assert _HEREDOC.search(mine).group(1) == _HEREDOC.search(theirs).group(1)
+        mine = _targets(pinned)["corpus-pin-check"]["steps"][0]
+        theirs = other["granite.build"]["targets"]["corpus-pin-check"]["steps"][0]
+        assert mine["step_uri"] == theirs["step_uri"]
+        assert mine["config"]["pin_check_config"].keys() == (
+            theirs["config"]["pin_check_config"].keys()
+        )
+        for key in ("corpus_dir", "tokenizer_dir"):
+            assert (
+                mine["config"]["pin_check_config"][key]
+                == theirs["config"]["pin_check_config"][key]
+            )
