@@ -5,6 +5,19 @@
 > page covers only what is LSF-specific. For the *native* LSF backend (gbserver submits `bsub`
 > itself), see [lsf.md](lsf.md) instead.
 
+## SkyPilot fork
+
+gbserver installs SkyPilot from the granite-build fork
+([cmadam/skypilot](https://github.com/cmadam/skypilot)), pinned in `pyproject.toml` to the tag
+`gb-sky-v1-stable`. Upstream SkyPilot has no LSF cloud. The fork adds the LSF cloud driver and
+LSF multi-node support, which includes the `sky.skylet.executor.lsf` task executor. gbserver
+refuses a multi-node LSF launch when that executor is missing. The fork's own history lists
+everything else it carries.
+
+`gb-sky-v1-stable` is a moving tag: it is re-pointed to the recommended v1-line commit as the
+fork advances, and a breaking change gets a new tag. Fresh installs pick up the current target.
+An existing clone keeps the old one until you run `git fetch --tags --force`.
+
 ## Compute environment
 
 With `default_cloud: lsf`, SkyPilot provisions onto an existing **LSF** cluster. It reaches the
