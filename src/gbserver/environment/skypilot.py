@@ -1297,6 +1297,7 @@ def _num_nodes_from_configs(
     :param config: The step config (its ``launcher_config`` wins).
     :param cloud: Normalized target cloud, used only for the preflight check.
     :returns: Node count, at least 1.
+    :raises ValueError: If a ``num_nodes`` is not an integer >= 1.
     """
     num_nodes = 1
     for source in (
@@ -1307,25 +1308,25 @@ def _num_nodes_from_configs(
         value = (source or {}).get("num_nodes")
         if value is None:
             continue
+        # Fail fast rather than fall back to one node: a bad value (an
+        # unsubstituted parameter, say) would otherwise run single-node and
+        # report success, the outcome this resolver exists to prevent.
         try:
             parsed = int(value)
         except (TypeError, ValueError):
-            logger.warning(
-                "Ignoring non-integer num_nodes=%r; using %d.", value, num_nodes
-            )
-            continue
+            raise ValueError(
+                f"num_nodes={value!r} is not an integer; set compute_config."
+                "num_nodes to a whole number of nodes >= 1."
+            ) from None
         if parsed < 1:
-            logger.warning(
-                "Ignoring num_nodes=%d (must be >= 1); using %d.",
-                parsed,
-                num_nodes,
-            )
-            continue
+            raise ValueError(f"num_nodes={parsed} is invalid; it must be >= 1.")
         num_nodes = parsed
 
-    misplaced = (launcher_config.get("resources", {}) or {}).get("num_nodes") or (
-        config.get("launcher_config", {}) or {}
-    ).get("resources", {}).get("num_nodes")
+    # `or {}` on every layer: a present-but-null `resources:` key returns None
+    # from .get(), not the default.
+    misplaced = (launcher_config.get("resources") or {}).get("num_nodes") or (
+        (config.get("launcher_config") or {}).get("resources") or {}
+    ).get("num_nodes")
     if misplaced is not None:
         logger.warning(
             "launcher_config.resources.num_nodes=%r is ignored: num_nodes is a "
@@ -1357,7 +1358,14 @@ def _check_multinode_supported(cloud: str, num_nodes: int) -> None:
     """
     if cloud != "lsf":
         return
-    if importlib.util.find_spec("sky.skylet.executor.lsf") is not None:
+    # find_spec imports the parent package, so on a SkyPilot without
+    # sky.skylet.executor at all it raises instead of returning None. That is
+    # the oldest build this check exists for, so treat it as missing.
+    try:
+        spec = importlib.util.find_spec("sky.skylet.executor.lsf")
+    except ModuleNotFoundError:
+        spec = None
+    if spec is not None:
         return
     raise RuntimeError(
         f"num_nodes={num_nodes} requested on the lsf cloud, but the installed "

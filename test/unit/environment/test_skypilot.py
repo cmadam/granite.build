@@ -795,6 +795,47 @@ class TestSkypilotComputeConfigResources:
             {"num_cpus_per_node": 3}, cloud="lsf"
         ) == {"cpus": 3}
 
+    @pytest.mark.parametrize(
+        "step,cpus,memory",
+        [
+            ("hfpull", 1, "10+"),
+            ("hfpush", 1, "10+"),
+            ("s3pull", 2, "4+"),
+            ("s3push", 2, "4+"),
+        ],
+    )
+    def test_transfer_steps_keep_a_floor_on_every_cloud(self, step, cpus, memory):
+        """The builtin transfer steps carry their floor in compute_config.
+
+        A literal ``cpus: "1+"`` under the launcher's ``resources`` is passed to
+        sky.Resources verbatim and crashes the LSF cloud; dropping it instead
+        left AWS on SkyPilot's large default VM. Routed through compute_config,
+        the floor is a minimum on cloud catalogs and a bare int on LSF.
+        """
+        from pathlib import Path
+
+        import yaml
+
+        from gbserver.environment.skypilot import Skypilot
+
+        step_yaml = (
+            Path(__file__).resolve().parents[3]
+            / f"src/gbserver/builtins/steps/skypilot/{step}/step.yaml"
+        )
+        doc = yaml.safe_load(step_yaml.read_text())
+        launcher = doc["environment_configs"]["Skypilot"]["launchers"][step]
+        assert not launcher["config"]["resources"]
+        compute_config = doc["config"]["compute_config"]
+
+        env = Skypilot(event_q=asyncio.Queue())
+        assert env._resources_from_compute_config(compute_config, cloud="aws") == {
+            "cpus": f"{cpus}+",
+            "memory": memory,
+        }
+        assert env._resources_from_compute_config(compute_config, cloud="lsf") == {
+            "cpus": cpus
+        }
+
     def test_memory_floor_is_minimum_not_exact(self):
         """The cloud memory floor must be a SkyPilot minimum ("{n}+"), not an
         exact number.
@@ -2095,10 +2136,28 @@ class TestNumNodesResolution:
     def test_accepts_the_forms_yaml_produces(self, value):
         assert self._resolve(compute_config={"num_nodes": value}) == 2
 
-    @pytest.mark.parametrize("value", ["many", None, [], 0, -1])
-    def test_invalid_values_fall_back_to_one(self, value):
-        """Fail soft on a bad value; a single-node run beats a launch crash."""
-        assert self._resolve(compute_config={"num_nodes": value}) == 1
+    def test_null_value_is_unset(self):
+        """A bare ``num_nodes:`` key is YAML null, i.e. not set."""
+        assert self._resolve(compute_config={"num_nodes": None}) == 1
+
+    @pytest.mark.parametrize("value", ["many", "$${NUM_NODES}", [], 0, -1])
+    def test_invalid_values_raise(self, value):
+        """Fail fast: falling back to one node would run single-node and look
+        successful, e.g. on an unsubstituted parameter."""
+        with pytest.raises(ValueError, match="num_nodes"):
+            self._resolve(compute_config={"num_nodes": value})
+
+    @pytest.mark.parametrize(
+        "launcher_config,config",
+        [
+            ({"resources": None}, {}),
+            ({}, {"launcher_config": {"resources": None}}),
+            ({}, {"launcher_config": None}),
+        ],
+    )
+    def test_null_resources_does_not_crash(self, launcher_config, config):
+        """A present-but-null ``resources:`` key returns None from .get()."""
+        assert self._resolve(launcher_config=launcher_config, config=config) == 1
 
     def test_misplaced_under_resources_is_ignored_with_a_warning(self, caplog):
         """The trap this guards.
@@ -2153,6 +2212,18 @@ class TestMultinodeSupportPreflight:
         with patch(
             "gbserver.environment.skypilot.importlib.util.find_spec",
             return_value=None,
+        ):
+            with pytest.raises(RuntimeError, match="gb-sky-v2-multinode"):
+                _check_multinode_supported("lsf", 2)
+
+    def test_raises_when_the_executor_package_is_missing(self):
+        """find_spec raises, rather than returning None, when the parent
+        package sky.skylet.executor does not exist -- the oldest SkyPilot."""
+        from gbserver.environment.skypilot import _check_multinode_supported
+
+        with patch(
+            "gbserver.environment.skypilot.importlib.util.find_spec",
+            side_effect=ModuleNotFoundError("No module named 'sky.skylet.executor'"),
         ):
             with pytest.raises(RuntimeError, match="gb-sky-v2-multinode"):
                 _check_multinode_supported("lsf", 2)
