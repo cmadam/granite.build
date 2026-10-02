@@ -11,6 +11,7 @@ config:
     s3_uri: <s3://bucket/path>
     endpoint_url: ''
   compute_config:
+    num_cpus_per_node: 2
     num_gpus_per_node: 0
     total_memory_per_node: 4Gi
 environment_configs:
@@ -23,11 +24,11 @@ environment_configs:
         - skypilot_monitor
         config:
           image_id: docker:amazon/aws-cli:latest
-          # No cpus/memory floor: on the LSF cloud a "{n}+" minimum raises
-          # ValueError (sky/clouds/lsf.py does float("2+") without stripping
-          # the "+"), so hardcoding one here made this step LSF-incompatible
-          # — same failure mode measured on hfpull's sibling launcher.
-          # Leaving resources empty keeps the step cloud-agnostic.
+          # The cpus floor lives in compute_config.num_cpus_per_node, not here.
+          # The engine turns it into the form each cloud accepts (_cpus_floor):
+          # a "{n}+" minimum on cloud catalogs, a bare int on slurm/lsf, whose
+          # SkyPilot cloud crashes on float("{n}+"). A literal "{n}+" in
+          # resources is passed through verbatim and broke this step on LSF.
           resources: {}
           run: |
             set -euo pipefail

@@ -17,6 +17,7 @@ config:
     hf:
       type: ''
   compute_config:
+    num_cpus_per_node: 1
     total_memory_per_node: 10Gi
 environment_configs:
   Skypilot:
@@ -27,15 +28,11 @@ environment_configs:
         monitors:
         - skypilot_monitor
         config:
-          # No cpus default: on the LSF cloud `cpus: "1+"` raises ValueError
-          # (sky/clouds/lsf.py does float("1+") without stripping the "+"), so
-          # hardcoding it here made this step LSF-incompatible — measured via
-          # a real hf:// pull on an LSF/bsub environment, which failed before
-          # ever reaching the remote node ("could not convert string to
-          # float: '1+'"). Leaving resources empty keeps the step
-          # cloud-agnostic; each cloud picks sane defaults for a lightweight
-          # download step, and a build.yaml can still supply cpus/memory via
-          # config.launcher_config.resources if it needs to.
+          # The cpus floor lives in compute_config.num_cpus_per_node, not here.
+          # The engine turns it into the form each cloud accepts (_cpus_floor):
+          # a "{n}+" minimum on cloud catalogs, a bare int on slurm/lsf, whose
+          # SkyPilot cloud crashes on float("{n}+"). A literal "{n}+" in
+          # resources is passed through verbatim and broke this step on LSF.
           resources: {}
           setup: |
             # Pin <2.0: hf 2.x pulls httpx2, whose BrotliDecoder calls
