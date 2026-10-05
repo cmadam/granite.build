@@ -11,7 +11,9 @@ diagnostic: a shell syntax error, a marker that never fires so the consumer targ
 never dispatches, or a monitor overlay that gbserver rejects at config time.
 """
 
+import os
 import re
+import signal
 import subprocess
 from pathlib import Path
 
@@ -125,8 +127,8 @@ class TestReadinessGate:
         # One wait per branch: with the cap armed, and without it.
         assert tail.count('wait "$SERVER_PID"') == 2
         # Nothing after the waits may run in the normal path except the watchdog
-        # cleanup and the reaped-flag check, both of which only follow a returned
-        # server. In particular the step must not end by falling off the end of the
+        # cleanup, the reaped-flag check and the exit with the server's code, all of
+        # which only follow a returned server. In particular the step must not end by falling off the end of the
         # script with the server still up.
         assert tail.endswith("fi")
         for branch in ("$MAX_LIFETIME", "else"):
@@ -206,3 +208,74 @@ class TestVllmWorkarounds:
         node it got."""
         assert step["config"]["vllm_config"]["data_parallel_size"] == ""
         assert 'DP="$GPUS"' in run_script
+
+
+def _section(run_script, begin, end=None):
+    """One section of the run block, cut at its own comment headers."""
+    start = run_script.index(begin)
+    return run_script[start : run_script.index(end, start) if end else None]
+
+
+def _run_under_launcher(tmp_path, body, server, values):
+    """Run `body` the way the launcher does -- with `set -eu` in front of it -- against a
+    stand-in server process, and return (exit code, stderr).
+
+    The output goes to files, not pipes: the watchdog's `sleep` outlives its killed
+    subshell and would hold a pipe open until it finished. The whole session is killed
+    afterwards for the same reason.
+    """
+    for key, value in values.items():
+        body = body.replace("{{ config.vllm_config.%s }}" % key, str(value))
+    assert "{{" not in body, "a template value the test did not supply"
+    script = tmp_path / "run.sh"
+    script.write_text(f"set -eu\n({server}) &\nSERVER_PID=$!\n{body}\n")
+    out, err = tmp_path / "out", tmp_path / "err"
+    with out.open("w") as o, err.open("w") as e:
+        proc = subprocess.Popen(
+            ["bash", str(script)], stdout=o, stderr=e, start_new_session=True
+        )
+        try:
+            rc = proc.wait(timeout=30)
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return rc, err.read_text()
+
+
+class TestFailuresAreReportedUnderTheLauncherPrefix:
+    """The launcher prepends `set -eu` to every run block, so a bare `wait` on a dead
+    server ends the script before the line that reports why. These run the template's
+    own sections under that prefix."""
+
+    def test_a_server_that_dies_while_starting_says_so(self, run_script, tmp_path):
+        gate = _section(run_script, "# Wait for readiness", "# Healthy.")
+        rc, err = _run_under_launcher(
+            tmp_path,
+            f'PYBIN=python3\nPORT=9\n{gate}\necho "unreachable: marked healthy" >&2',
+            server="exit 7",
+            values={"health_timeout_seconds": 30, "health_poll_seconds": 0.1},
+        )
+        assert "server exited with 7 before becoming healthy" in err
+        assert rc == 1
+
+    def test_a_server_the_lifetime_cap_kills_says_so(self, run_script, tmp_path):
+        hold = _section(run_script, "MAX_LIFETIME=")
+        rc, err = _run_under_launcher(
+            tmp_path, hold, server="sleep 20", values={"max_lifetime_seconds": 1}
+        )
+        assert "lifetime cap of 1s reached" in err
+        assert rc == 1
+
+    def test_a_server_that_dies_under_the_cap_still_fails_the_step(
+        self, run_script, tmp_path
+    ):
+        """Capturing the exit code must not swallow it: a crash that is not the
+        watchdog's doing has to fail the step with the server's own code."""
+        hold = _section(run_script, "MAX_LIFETIME=")
+        rc, err = _run_under_launcher(
+            tmp_path, hold, server="exit 3", values={"max_lifetime_seconds": 60}
+        )
+        assert "lifetime cap" not in err.replace("lifetime cap 60s armed", "")
+        assert rc == 3

@@ -225,7 +225,9 @@ environment_configs:
             DEADLINE=$(( $(date +%s) + {{ config.vllm_config.health_timeout_seconds }} ))
             while :; do
               if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                wait "$SERVER_PID"; RC=$?
+                # `|| RC=$?`, not `; RC=$?`: the launcher runs this block under
+                # `set -eu`, so a bare failing wait would exit before the report.
+                RC=0; wait "$SERVER_PID" || RC=$?
                 echo "vllm-server: FATAL: server exited with $RC before becoming healthy" >&2
                 exit 1
               fi
@@ -272,13 +274,14 @@ environment_configs:
                 fi
               ) &
               WATCHDOG_PID=$!
-              wait "$SERVER_PID"
+              RC=0; wait "$SERVER_PID" || RC=$?
               kill "$WATCHDOG_PID" 2>/dev/null || true
               if [ -f "$REAPED_FLAG" ]; then
                 rm -f "$REAPED_FLAG"
                 echo "vllm-server: FATAL: lifetime cap of ${MAX_LIFETIME}s reached; releasing the allocation. Nothing tore this server down in time — check whether the consumer target failed." >&2
                 exit 1
               fi
+              exit "$RC"
             else
               wait "$SERVER_PID"
             fi
