@@ -2140,7 +2140,7 @@ class TestNumNodesResolution:
         """A bare ``num_nodes:`` key is YAML null, i.e. not set."""
         assert self._resolve(compute_config={"num_nodes": None}) == 1
 
-    @pytest.mark.parametrize("value", ["many", "$${NUM_NODES}", [], 0, -1])
+    @pytest.mark.parametrize("value", ["many", "$${NUM_NODES}", [], 0, -1, 2.5, 1.9])
     def test_invalid_values_raise(self, value):
         """Fail fast: falling back to one node would run single-node and look
         successful, e.g. on an unsubstituted parameter."""
@@ -2312,6 +2312,25 @@ class TestNumNodesReachesSkyTask:
             {"compute_config": {"num_nodes": 2}},
         )
         assert kwargs["num_nodes"] == 3
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "launcher_config,config",
+        [
+            ({"run": "echo hi", "resources": None}, {}),
+            ({"run": "echo hi"}, {"launcher_config": {"resources": None}}),
+            ({"run": "echo hi"}, {"launcher_config": None}),
+        ],
+    )
+    async def test_null_resources_does_not_crash_the_launch(
+        self, skypilot_env, launcher_config, config
+    ):
+        """A present-but-null ``resources:`` (or ``launcher_config:``) key returns
+        None from .get(), not the default. The cloud lookup and the resource merge
+        read it before the node count is resolved, so the resolver's own guard
+        never got the chance to run."""
+        kwargs = await self._launch(skypilot_env, launcher_config, config)
+        assert kwargs["num_nodes"] == 1
 
 
 from gbserver.environment import skypilot as skymod
