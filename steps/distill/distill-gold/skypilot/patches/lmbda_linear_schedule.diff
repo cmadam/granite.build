@@ -1,0 +1,78 @@
+gold: restore the linear lmbda schedule
+
+Applies to: github.com/laminair/gb-steps-distillation at a5d59bc4 -- the commit this
+            step's code_config pins -- from the checkout ROOT (paths are the repo's own):
+
+              git -C <checkout> apply steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff
+
+            git apply skips this header. Upstream HEAD 59c36a2 has the same defect.
+
+THE DEFECT. _get_current_lmbda() handles only "constant". Its "linear" branch sits after
+the `return` of _draw_on_policy, the method inserted above it when the on-policy draw was
+made rank-consistent, so the branch is unreachable. With lmbda_schedule linear the method
+returns None, and draw_on_policy() raises TypeError on `None <= 0.0` at the first training
+step, after the allocation is already held. render_gold_config.py accepts linear, because
+the CONFIG is valid; it is the trainer that cannot run it.
+
+THE FIX moves those 12 lines back into _get_current_lmbda, unchanged. The constant path is
+untouched, so a constant-lmbda run on the patched checkout trains exactly as on the pin.
+Verified 2026-10-05 by exercising the method on a stub: lmbda_init 0.25 to lmbda 0.5 over
+max_steps 2,500 gives 0.25 / 0.3125 / 0.375 / 0.4375 / 0.5 at steps 0 / 625 / 1250 /
+1875 / 2500, and constant returns lmbda.
+
+A REPRODUCIBLE COMMIT. With this identity and date, the patched commit is
+508220c4d24842bc1fa244d2c0bfffe8de375095 on any machine, which is what lets a recipe pin
+it as CODE_EXPECT_REF before the checkout exists:
+
+  git clone https://github.com/laminair/gb-steps-distillation.git <checkout>
+  git -C <checkout> checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
+  git -C <checkout> apply <this file>
+  GIT_AUTHOR_NAME=granite.build GIT_AUTHOR_EMAIL=granite.build@localhost \
+  GIT_COMMITTER_NAME=granite.build GIT_COMMITTER_EMAIL=granite.build@localhost \
+  GIT_AUTHOR_DATE=2026-10-05T00:00:00+0000 GIT_COMMITTER_DATE=2026-10-05T00:00:00+0000 \
+    git -C <checkout> commit -qam "gold: restore the linear lmbda schedule"
+
+diff --git a/src/gb_steps_post_training/distillation/custom_gold_trainer.py b/src/gb_steps_post_training/distillation/custom_gold_trainer.py
+index dbf46b9..40073c2 100755
+--- a/src/gb_steps_post_training/distillation/custom_gold_trainer.py
++++ b/src/gb_steps_post_training/distillation/custom_gold_trainer.py
+@@ -2340,6 +2340,19 @@ class CustomGOLDTrainer(GOLDTrainer):
+         if self.args.lmbda_schedule == "constant":
+             return self.lmbda
+ 
++        if self.args.lmbda_schedule == "linear":
++            max_steps = self.state.max_steps
++            current_step = self.state.global_step
++
++            if max_steps <= 0:
++                return self.args.lmbda_init
++
++            progress = min(1.0, current_step / max_steps)
++            current_lmbda = self.args.lmbda_init + progress * (self.args.lmbda - self.args.lmbda_init)
++            return current_lmbda
++
++        return self.lmbda
++
+     def _draw_on_policy(self, current_lmbda: float) -> bool:
+         """Whether THIS step draws from the teacher, decided identically on every rank.
+ 
+@@ -2356,19 +2369,6 @@ class CustomGOLDTrainer(GOLDTrainer):
+             device=self.accelerator.device,
+         )
+ 
+-        if self.args.lmbda_schedule == "linear":
+-            max_steps = self.state.max_steps
+-            current_step = self.state.global_step
+-
+-            if max_steps <= 0:
+-                return self.args.lmbda_init
+-
+-            progress = min(1.0, current_step / max_steps)
+-            current_lmbda = self.args.lmbda_init + progress * (self.args.lmbda - self.args.lmbda_init)
+-            return current_lmbda
+-
+-        return self.lmbda
+-
+     def _get_current_beta(self) -> float:
+         """
+         Compute current beta value based on training progress.
