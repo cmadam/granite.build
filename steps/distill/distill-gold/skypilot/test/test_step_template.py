@@ -721,7 +721,9 @@ class TestResumeFromCheckpointDir:
     @classmethod
     def _seed_block(cls, src, vllm_server_url=""):
         step = yaml.safe_load(_STEP.read_text())
-        gold_config = dict(step["config"]["gold_config"], vllm_server_url=vllm_server_url)
+        gold_config = dict(
+            step["config"]["gold_config"], vllm_server_url=vllm_server_url
+        )
         rendered = cls._render(
             resume_from_checkpoint_dir=str(src), gold_config=gold_config
         )
