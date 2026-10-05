@@ -246,18 +246,22 @@ if [[ -f "${STUDENT_MODEL}/retag_manifest.json" ]]; then
   if [[ ! -f "${RETAGGED}/tokenizer_identity.json" ]]; then
     echo
     echo "--- [skip] backfilling tokenizer_identity.json (absent on this older retag)"
-    "$PYBIN" -c "
+    # The paths go in as argv, not interpolated into the source: a quote in one would
+    # otherwise be a SyntaxError, as the post-condition block below already avoids.
+    "$PYBIN" - "$TEACHER_MODEL" "$RETAGGED" "$STUDENT_MODEL" <<'PYIDENTITY'
+import sys
 from pathlib import Path
 from gb_steps_post_training.distillation import tokenizer_identity
-identity = tokenizer_identity.derive_name(Path('${TEACHER_MODEL}'))
+teacher, retagged, student = sys.argv[1:4]
+identity = tokenizer_identity.derive_name(Path(teacher))
 dest = tokenizer_identity.write(
-    Path('${RETAGGED}'), identity,
+    Path(retagged), identity,
     produced_by='distill-tokenizer-align/run-align.sh (skip path)',
-    student='${STUDENT_MODEL}',
-    teacher='${TEACHER_MODEL}',
+    student=student,
+    teacher=teacher,
 )
 print(f'  recorded tokenizer identity {identity!r} -> {dest}')
-"
+PYIDENTITY
   fi
 
   if [[ -n "$CHAT_TEMPLATE" ]]; then
