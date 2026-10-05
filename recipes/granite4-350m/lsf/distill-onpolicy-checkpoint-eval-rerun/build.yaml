@@ -1,0 +1,466 @@
+######
+# distill-onpolicy-checkpoint-eval-rerun — finish the MEASUREMENT of a
+# distill-onpolicy-checkpoint-eval build whose training already ran, without training.
+# BlueVela (SkyPilot / LSF).
+#
+# Two kinds of gap, two shapes of target:
+#
+#   NEW_RUNGS     rungs whose checkpoint is on disk but was never exported (the build
+#                 that wrote it lost the checkpoint_<N> binding, or died first). These
+#                 get the parent's whole per-rung pipeline: export -> eval-transfer ->
+#                 the 26 sage evals + BFCL -> the two per-rung CSVs.
+#   RERUN_EVALS   individual evals that FAILED on rungs that were otherwise measured.
+#                 Only those evals run again, then their results are merged into the
+#                 rung's existing sage result directory and the rung's CSV is written.
+#
+# WHY RE-RUN EVALS DO NOT WRITE STRAIGHT INTO THE ORIGINAL RESULT DIRECTORY
+#
+# gbserver refuses an artifact URI another build already registered
+# (buildrunner.py, "Same artifact URI found in space ... for another build"). The
+# refusal is caught and logged by the event loop, so the target can still read as
+# succeeded -- but the artifact event is DROPPED, its binding never resolves, and
+# every target downstream of it never dispatches. The original build declared each
+# eval's output under its rung directory, and a FAILED eval can still have registered
+# that URI (c966afae's eval-olmes-agi-eval-ck1000 did), so re-declaring it would
+# strand the merge and the CSV behind it. Here outputs are `{{ binding.path }}`,
+# i.e. whatever results file the sage-eval step finds under its output_dir (the
+# first one, not necessarily its own eval's), and those paths are fresh only because
+# the re-run evals write under
+# RERUN_SAGE_DIR, which must be OUTSIDE SAGE_OUTPUT_DIR (sage-export reads
+# SAGE_OUTPUT_DIR, and a second copy of a rung's tree under it is a second set of
+# rows), and merge-sage-ck<N> copies the files they wrote across. NEW_RUNGS
+# have no such history and write to the original locations directly.
+#
+# Parameters come from the PARENT recipe's parameters.yaml -- the eval catalog, the
+# images, the queues -- so the two cannot drift. Everything specific to the build being
+# finished is a --param, and StrictUndefined makes a missing one fail the render.
+#
+#   gb build start -f recipes/granite4-350m/lsf/distill-onpolicy-checkpoint-eval-rerun/build.yaml \
+#     --parameters-path recipes/granite4-350m/lsf/distill-onpolicy-checkpoint-eval/parameters.yaml \
+#     --space public \
+#     --param EXPERIMENT=<the original build's EXPERIMENT> \
+#     --param SRC_BUILD_DIR=<WORKDIR_ROOT>/<RUN_NAME>/<original build id> \
+#     --param CKPT_SRC_DIR=<.../runs/<run>/checkpoints/<RUN_NAME>_node<N>> \
+#     --param NEW_RUNGS=1500 \
+#     --param RERUN_EVALS='1000:multiple-js,salad-bench;2000:attaq' \
+#     --param RERUN_SAGE_DIR=/proj/granite-build/g4os/sage-rerun/<tag> \
+#     --param OE_EVAL_BCB_API_URL=<bcb-server url>
+######
+<% set CATS = (EVAL_CATEGORIES | string | replace(" ", "") | lower).split(",") %>
+<% set NEW = (NEW_RUNGS | string | replace(" ", "")).split(",") if NEW_RUNGS | string | trim else [] %>
+<% set RERUN = (RERUN_EVALS | string | replace(" ", "")).split(";") if RERUN_EVALS | string | trim else [] %>
+<% set SAGE_NAMES = [] %>
+<% for e in EVAL_CATALOG %><% if e.category in CATS %><% set _ = SAGE_NAMES.append(e.name) %><% endif %><% endfor %>
+granite.build:
+  name: distill-350m-onpolicy-ckpt-eval-rerun
+  retries:
+    max_retries: $${MAX_RETRIES}
+    target_reuse_enabled: true
+  targets:
+
+    # ═══ NEW_RUNGS: the parent's per-rung pipeline, from a checkpoint on disk ════
+<% for N in NEW %>
+    export-$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        checkpoint_dir:
+          uri: "env://$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
+          type: model
+        expected_tokenizer:
+          uri: "env://$${SRC_BUILD_DIR.rstrip('/')}/align/retagged_student"
+          type: model
+      outputs:
+        hf_model:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/distill/distill-hf-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${EXPORT_CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${EXPORT_MEMORY}
+            export_config:
+              # Absolute checkpoint path, as in the parent: select_checkpoint returns
+              # it directly and train_output_dir is never read.
+              train_output_dir: "$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
+              checkpoint: "$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
+              # Beside the original build's other exports, so every rung of the run
+              # is under one directory.
+              dest: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+              padding_side: "right"
+              chat_template_thinking: "$${CHAT_TEMPLATE_THINKING}"
+              allow_unknown: true
+              verify: true
+              expect_tokenizer_from: "$${SRC_BUILD_DIR.rstrip('/')}/align/retagged_student"
+
+    eval-transfer-$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        student:
+          binding: export-$${N}.hf_model
+      outputs:
+        eval_metrics:
+          uri: "env://{{ binding.path }}"
+          type: fileset
+      steps:
+        - step_uri: space://steps/distill/distill-eval
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                accelerators: "H100:$${EVAL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${GPU_MEMORY}
+            eval_config:
+              student_model: "{{ bindings.student.binding.path }}"
+              teacher_model: "$${TEACHER_MODEL}"
+              corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
+              output_dir: "$${SRC_BUILD_DIR.rstrip('/')}/eval-transfer-$${N}"
+              metrics: "$${EVAL_METRICS}"
+              max_samples: $${EVAL_MAX_SAMPLES}
+              seed: $${SEED}
+              max_length: $${MAX_LENGTH}
+              max_incomplete_fraction: $${MAX_INCOMPLETE_FRACTION}
+              batch_size: $${EVAL_BATCH_SIZE}
+              dtype: "$${EVAL_DTYPE}"
+              allow_tokenizer_mismatch: false
+
+<% for e in EVAL_CATALOG %><% if e.category in CATS %>
+    eval-$${e.name}-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        model:
+          binding: export-$${N}.hf_model
+      outputs:
+        sage_eval_results:
+          type: dataset
+          uri: "env://{{ binding.path }}"
+      steps:
+        - step_uri: space://steps/sage-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            sage_eval_config:
+              gb_script: "$${e.gb_script}"
+              model_path: "{{ bindings.model.binding.path }}"
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              batch_size: $${e.batch_size | default(SAGE_BATCH_SIZE)}
+              max_length: $${e.max_length | default(SAGE_MAX_LENGTH)}
+              num_gpus: $${SAGE_NUM_GPUS}
+              output_dir: "$${SAGE_OUTPUT_DIR}"
+              image_id: "$${e.image_id}"
+<% if e.extra_env | default({}) or e.needs_bcb_url | default(false) %>
+              extra_env:
+<% for k, v in (e.extra_env | default({})).items() %>
+                $${k}: "$${v}"
+<% endfor %>
+<% if e.needs_bcb_url | default(false) %>
+                OE_EVAL_BCB_API_URL: "$${OE_EVAL_BCB_API_URL}"
+<% endif %>
+<% else %>
+              extra_env: {}
+<% endif %>
+            launcher_config:
+              resources:
+                accelerators: "$${EVAL_ACCELERATORS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${EVAL_MEMORY}
+<% endif %><% endfor %>
+
+<% if SAGE_NAMES %>
+    export-sage-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+<% for name in SAGE_NAMES %>
+        gate_$${name | replace("-", "_")}:
+          binding: eval-$${name}-ck$${N}.sage_eval_results
+<% endfor %>
+      outputs:
+        sage_export_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+      steps:
+        - step_uri: space://steps/sage-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            sage_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              export_stack: "$${EXPORT_STACK}"
+              input_dir: "$${SAGE_OUTPUT_DIR}"
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endif %>
+
+<% if "bfcl" in CATS %>
+    eval-bfcl-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        model:
+          binding: export-$${N}.hf_model
+      outputs:
+        bfcl_results:
+          type: dataset
+          uri: "env://$${BFCL_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${N}/$${BFCL_EVAL_NAME}"
+      steps:
+        - step_uri: space://steps/bfcl-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            bfcl_config:
+              model_path: "{{ bindings.model.binding.path }}"
+              model_id: "$${BFCL_MODEL_ID}"
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              test_categories: "$${BFCL_TEST_CATEGORIES}"
+              num_gpus_generate: $${BFCL_NUM_GPUS}
+              num_gpus_evaluate: $${BFCL_NUM_GPUS}
+              gpu_memory_utilization: "$${BFCL_GPU_MEMORY_UTILIZATION}"
+              output_dir: "$${BFCL_OUTPUT_DIR}"
+            launcher_config:
+              resources:
+                accelerators: "H100:$${BFCL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${GPU_MEMORY}
+
+    export-bfcl-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        gate_bfcl:
+          binding: eval-bfcl-ck$${N}.bfcl_results
+      outputs:
+        bfcl_export_csv:
+          type: dataset
+          uri: "env://$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+      steps:
+        - step_uri: space://steps/bfcl-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            bfcl_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              input_dir: "$${BFCL_OUTPUT_DIR}"
+              output_csv: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+              filter: "$${BFCL_FILTER}"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endif %>
+<% endfor %>
+
+    # ═══ RERUN_EVALS: failed evals on otherwise-measured rungs ════════════════
+    # RERUN_EVALS is "<N>:<eval>,<eval>;<N>:<eval>", names as in EVAL_CATALOG. An
+    # unknown name fails the render (the catalog lookup is undefined), rather than
+    # silently dropping an eval from the rung.
+<% for spec in RERUN %>
+<% set N = spec.split(":")[0] %>
+<% set NAMES = spec.split(":")[1].split(",") %>
+<% for name in NAMES %>
+<% set e = EVAL_CATALOG | selectattr("name", "equalto", name) | list | first %>
+    eval-$${e.name}-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        model:
+          uri: "env://$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+          type: model
+      outputs:
+        sage_eval_results:
+          type: dataset
+          uri: "env://{{ binding.path }}"
+      steps:
+        - step_uri: space://steps/sage-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            sage_eval_config:
+              gb_script: "$${e.gb_script}"
+              model_path: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+              # The SAME experiment name as the original rung, so the merged tree
+              # is indistinguishable from one the original build wrote; only the
+              # base directory differs.
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              batch_size: $${e.batch_size | default(SAGE_BATCH_SIZE)}
+              max_length: $${e.max_length | default(SAGE_MAX_LENGTH)}
+              num_gpus: $${SAGE_NUM_GPUS}
+              output_dir: "$${RERUN_SAGE_DIR}"
+              image_id: "$${e.image_id}"
+<% if e.extra_env | default({}) or e.needs_bcb_url | default(false) %>
+              extra_env:
+<% for k, v in (e.extra_env | default({})).items() %>
+                $${k}: "$${v}"
+<% endfor %>
+<% if e.needs_bcb_url | default(false) %>
+                OE_EVAL_BCB_API_URL: "$${OE_EVAL_BCB_API_URL}"
+<% endif %>
+<% else %>
+              extra_env: {}
+<% endif %>
+            launcher_config:
+              resources:
+                accelerators: "$${EVAL_ACCELERATORS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${EVAL_MEMORY}
+<% endfor %>
+
+    # Copies every FILE the re-runs wrote over the original rung's tree. File by file,
+    # not per eval subdirectory, because the catalog's output_subpath is not where
+    # sage writes: MultiPL-E puts all five languages into shared code/multiple/
+    # {metrics,generations}/ directories (one file per language), and safety writes
+    # under safety-eval/. Only re-run evals write under RERUN_SAGE_DIR, so every file
+    # there belongs to one. A file it overwrites is first COPIED to
+    # <RERUN_SAGE_DIR>-replaced, and a retry never overwrites that first backup.
+    merge-sage-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+<% for name in NAMES %>
+        gate_$${name | replace("-", "_")}:
+          binding: eval-$${name}-ck$${N}.sage_eval_results
+<% endfor %>
+      outputs:
+        merged:
+          uri: "env://{{ binding.path }}"
+          type: fileset
+      steps:
+        - step_uri: space://steps/command
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${CPU_ONLY_CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${CPU_ONLY_MEMORY}
+            command_config:
+              # LITERAL block scalar and array appends, for the reasons the parent's
+              # gen-smoke spells out (builds 77aef958, bb779f1f).
+              command: |
+                set -euo pipefail
+                SRC="$${RERUN_SAGE_DIR}/$${EXPERIMENT}-ckpt_$${N}"
+                DST="$${SAGE_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${N}"
+                BAK="$${RERUN_SAGE_DIR}-replaced/$${EXPERIMENT}-ckpt_$${N}"
+                if [ ! -d "$SRC" ] || [ -z "$(find "$SRC" -type f ! -name .merged -print -quit)" ]; then
+                  echo "merge-sage: FATAL: the re-run evals wrote nothing under $SRC" >&2
+                  exit 1
+                fi
+                if [ ! -d "$DST" ]; then
+                  echo "merge-sage: FATAL: no original rung tree at $DST to merge into" >&2
+                  exit 1
+                fi
+                # Backups are taken on the FIRST complete pass only: on a retry, DST
+                # already holds merged copies, and backing those up would file re-run
+                # output as an original.
+                DONE="$BAK/.backup-complete"
+                n_new=0; n_replaced=0
+                cd "$SRC"
+                while IFS= read -r -d "" f; do
+                  f="${f#./}"
+                  if [ -e "$DST/$f" ]; then
+                    if [ ! -e "$DONE" ] && [ ! -e "$BAK/$f" ]; then
+                      mkdir -p "$(dirname "$BAK/$f")"
+                      cp -a "$DST/$f" "$BAK/$f"
+                    fi
+                    n_replaced=$((n_replaced + 1))
+                  else
+                    n_new=$((n_new + 1))
+                  fi
+                  mkdir -p "$(dirname "$DST/$f")"
+                  cp -a "$f" "$DST/$f"
+                done < <(find . -type f ! -name .merged -print0)
+                mkdir -p "$BAK"
+                touch "$DONE"
+                echo "merge-sage: $n_new new file(s), $n_replaced replaced (originals in $BAK)"
+                MARKER="$SRC/.merged"
+                date -u +%FT%TZ > "$MARKER"
+                echo "GB_ARTIFACT_ID:merged GB_ARTIFACT_PATH:$MARKER"
+
+    export-sage-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        gate_merged:
+          binding: merge-sage-ck$${N}.merged
+      outputs:
+        sage_export_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+      steps:
+        - step_uri: space://steps/sage-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            sage_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              export_stack: "$${EXPORT_STACK}"
+              input_dir: "$${SAGE_OUTPUT_DIR}"
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endfor %>
+
+    # ─── export-combined ─────────────────────────────────────────────────────
+    # Pivots EVERY per-rung CSV in the experiment's results directory, including the
+    # ones the original build already wrote, so it is the whole run's table. Gated on
+    # the CSVs this build writes -- so if another build already registered one of
+    # those CSV paths (a manual export-results run, say), its binding is dropped and
+    # this never dispatches. RUN_COMBINED=false leaves it out for that case.
+<% if RUN_COMBINED | default(true) | string | lower in ("true", "1", "yes", "on") %>
+    export-combined:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+<% for N in NEW %>
+<% if SAGE_NAMES %>
+        gate_sage_$${N}:
+          binding: export-sage-ck$${N}.sage_export_csv
+<% endif %>
+<% if "bfcl" in CATS %>
+        gate_bfcl_$${N}:
+          binding: export-bfcl-ck$${N}.bfcl_export_csv
+<% endif %>
+<% endfor %>
+<% for spec in RERUN %>
+        gate_sage_$${spec.split(":")[0]}:
+          binding: export-sage-ck$${spec.split(":")[0]}.sage_export_csv
+<% endfor %>
+      outputs:
+        combined_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/combined.csv"
+      steps:
+        - step_uri: space://steps/combined-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            combined_export_config:
+              sage_input_dir: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}"
+              bfcl_input_dir: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}"
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/combined.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endif %>

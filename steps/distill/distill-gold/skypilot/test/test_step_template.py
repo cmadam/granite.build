@@ -521,6 +521,7 @@ class TestCeAnchorFlagsReachTheRenderer:
             ("--lmbda-schedule", "lmbda_schedule"),
             ("--lmbda-init", "lmbda_init"),
             ("--min-completion-length", "min_completion_length"),
+            ("--data-seed", "data_seed"),
         ],
     )
     def test_each_flag_reads_its_own_key(self, run_script, flag, key):
@@ -543,6 +544,7 @@ class TestCeAnchorFlagsReachTheRenderer:
             "lmbda_schedule",
             "lmbda_init",
             "min_completion_length",
+            "data_seed",
         ],
     )
     def test_each_new_flag_carries_a_default(self, run_script, key):

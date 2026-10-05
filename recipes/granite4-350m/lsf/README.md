@@ -24,7 +24,10 @@ model on the BlueVela LSF cluster via the SkyPilot LSF backend.
 | `distill-stage1`    | Off-policy GOLD distillation, a full epoch -- the best recipe on record |
 | `distill-stage1-v2` | SUPERSEDED (its premise was an export bug). A cheap 300-step laddered sample of the same objective |
 | `distill-onpolicy-v2` | On-policy GOLD from stage 1 v2's chosen checkpoint, with a vLLM server allocation (written, not yet run) |
+| `distill-onpolicy-v2-1node` | `distill-onpolicy-v2` with the trainer on one 8-GPU node (grad_accum 6, same effective batch); much easier to schedule than 2 × 8 |
 | `distill-checkpoint-eval` | Off-policy GOLD for a full epoch, with every checkpoint exported and run through all 27 evals as it lands, rolled up into one benchmark x checkpoint table |
+| `distill-onpolicy-checkpoint-eval` | On-policy GOLD for 2,500 steps from the off-policy step-2,000 checkpoint (c2000), laddered and fully evaluated like `distill-checkpoint-eval` (written, not yet run) |
+| `distill-onpolicy-checkpoint-eval-1node` | `distill-onpolicy-checkpoint-eval` with the trainer on one 8-GPU node (grad_accum 6, same effective batch); much easier to schedule than 2 × 8 |
 
 ## Distillation
 
@@ -43,8 +46,11 @@ Run them in this order, each gating the next:
    [`distill-checkpoint-eval`](distill-checkpoint-eval/README.md) with a shorter
    `GOLD_MAX_STEPS`; [`distill-stage1-v2`](distill-stage1-v2/README.md) is the cheap,
    shallow version of that and is otherwise superseded.
-4. [`distill-onpolicy-v2`](distill-onpolicy-v2/README.md) — on-policy from a chosen
-   off-policy rung. Written, not yet run.
+4. [`distill-onpolicy-checkpoint-eval`](distill-onpolicy-checkpoint-eval/README.md) —
+   on-policy from c2000, the off-policy rung `distill-checkpoint-eval` chose, with every
+   rung run through all 27 evals. Written, not yet run.
+   [`distill-onpolicy-v2`](distill-onpolicy-v2/README.md) is the same topology with a
+   300-step horizon and divergence-only reads.
 5. stage 2 proper — on-policy on the IFRL and IdentityRL prompt sets rather than the SFT
    mixture, which is a prompt-set change on top of step 4's policy change.
 
@@ -63,10 +69,10 @@ all 27 evaluations, summarised into one `combined.csv`. It is what `distill-stag
 have been — that run exported only its final checkpoint, which was also its worst — and it
 is ~249 GPU-h against v2's ~56, so run v2 first and this when the objective is settled.
 
-It is also the only recipe here that evaluates mid-run: `train-gold` declares one
-`checkpoint_<N>` output per rung and the `distill-gold` step's opt-in watcher
-(`emit_checkpoint_artifacts`) emits each as it is written, so the evaluation overlaps the
-13-hour epoch instead of queueing behind it.
+It and `distill-onpolicy-checkpoint-eval` are the only recipes here that evaluate mid-run:
+`train-gold` declares one `checkpoint_<N>` output per rung and the `distill-gold` step's
+opt-in watcher (`emit_checkpoint_artifacts`) emits each as it is written, so the evaluation
+overlaps the training instead of queueing behind it.
 
 
 ## Defaults are BlueVela-specific

@@ -415,6 +415,33 @@ class TestSchemaMatchesTheValidatedConfigs:
         config = _render(tmp_path, extra=["--max-steps", "100"])
         assert config["num_train_epochs"] == pytest.approx(1.0)
 
+    def test_data_seed_is_absent_by_default(self, tmp_path):
+        """Every recipe that predates the key must render exactly what it rendered
+        before; the sampler then follows the trainer's `seed`, as it always has."""
+        assert "data_seed" not in _render(tmp_path)
+        assert "data_seed" not in _render(tmp_path, extra=["--data-seed", "-1"])
+
+    def test_data_seed_is_emitted_as_an_int_when_set(self, tmp_path):
+        """The on-policy-from-a-checkpoint recipe sets it so the continuation does not
+        replay the batches its init already trained on. 0 is a valid seed, so the
+        sentinel for "unset" is -1, not 0."""
+        for value in (0, 43):
+            config = _render(
+                _dir(tmp_path, str(value)), extra=["--data-seed", str(value)]
+            )
+            assert config["data_seed"] == value
+            assert isinstance(config["data_seed"], int)
+
+    def test_data_seed_is_not_a_trainer_extension(self):
+        """It is a stock TrainingArguments field, so it must not trip the delivered-
+        trainer field check that guards the patch-gated keys."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("_rgc", _RENDER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert "data_seed" not in module._TRAINER_EXTENSION_KEYS
+
     def test_save_strategy_is_settable(self, tmp_path):
         """A run that wants no checkpoints should not have to edit the step."""
         assert (

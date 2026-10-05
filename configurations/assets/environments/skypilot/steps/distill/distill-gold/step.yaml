@@ -165,6 +165,11 @@ config:
     # a run over a corpus too large to epoch through needs — one epoch of the
     # 802,027-row reference corpus is 4,177 steps at effective batch 192.
     max_steps: 0
+    # Seed for the training data SAMPLER only. -1 leaves the key out of the rendered
+    # config, so the sampler follows the trainer's `seed` (42) as it always has. Set it
+    # when initialising from another run's checkpoint over the same corpus: at the same
+    # seed and geometry the new run draws the very batches the old one trained on.
+    data_seed: -1
     learning_rate: 1.0e-05
     min_lr: 1.0e-06
     warmup_ratio: 0.05
@@ -798,6 +803,7 @@ environment_configs:
               --dataset-name "{{ config.gold_config.dataset_name }}" \
               --num-train-epochs {{ config.gold_config.num_train_epochs }} \
               --max-steps {{ config.gold_config.max_steps }} \
+              --data-seed {{ config.gold_config.data_seed | default(-1) }} \
               --learning-rate {{ config.gold_config.learning_rate }} \
               --min-lr {{ config.gold_config.min_lr }} \
               --warmup-ratio {{ config.gold_config.warmup_ratio }} \

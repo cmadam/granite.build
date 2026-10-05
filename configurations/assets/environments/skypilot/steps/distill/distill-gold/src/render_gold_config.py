@@ -401,6 +401,12 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # (test_off_policy_key_set_is_exact asserts the key set, not just the
         # values). When set it overrides num_train_epochs in the trainer.
         **({"max_steps": args.max_steps} if args.max_steps > 0 else {}),
+        # data_seed reseeds the training SAMPLER and nothing else; HF Trainer falls back
+        # to `seed` (42) when it is unset. A run initialised from another run's checkpoint
+        # on the same corpus and geometry otherwise draws exactly the batches that run
+        # already trained on. Emitted ONLY when >= 0, for the same byte-identity reason as
+        # max_steps above. A stock TrainingArguments field, so not a trainer extension.
+        **({"data_seed": args.data_seed} if args.data_seed >= 0 else {}),
         "learning_rate": _lr(args.learning_rate),
         "warmup_ratio": float(args.warmup_ratio),
         "lr_scheduler_type": args.lr_scheduler_type,
@@ -655,6 +661,8 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--num-train-epochs", type=float, default=1.0)
     # 0 => absent from the rendered config, i.e. bound the run by epochs.
     p.add_argument("--max-steps", type=int, default=0)
+    # -1 => absent from the rendered config, i.e. the sampler follows `seed`.
+    p.add_argument("--data-seed", type=int, default=-1)
     p.add_argument("--learning-rate", type=float, default=1.0e-05)
     p.add_argument("--min-lr", type=float, default=1.0e-06)
     p.add_argument("--warmup-ratio", type=float, default=0.05)
