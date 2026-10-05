@@ -4,7 +4,7 @@ import json
 from collections import Counter
 
 import pytest
-from build_sources import main, quotas
+from build_sources import main, quotas, sample_split
 
 
 def _write(path, rows):
@@ -78,6 +78,23 @@ def test_bad_rows_are_skipped_and_counted(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "unusable rows skipped: 2" in out
     assert "renamed=1 already_messages=0 bad=2" in out
+
+
+def test_skipped_rows_do_not_skew_the_reservoir(tmp_path):
+    """The replacement draw must range over the ELIGIBLE rows seen so far. Drawn over
+    the raw line index, 1,000 unusable lines ahead of 10 good ones leave each later
+    row a ~2/1000 chance of entering, so the sample is the first two good rows almost
+    every time; uniform sampling picks that pair 1 time in 45."""
+    path = tmp_path / "split.jsonl"
+    good = [{"conversations": [{"role": "user", "content": str(i)}]} for i in range(10)]
+    path.write_text("not json\n" * 1000 + "".join(json.dumps(r) + "\n" for r in good))
+    pairs = Counter()
+    for seed in range(450):
+        tally = {"renamed": 0, "already": 0, "bad": 0}
+        rows = sample_split(path, 2, seed, tally)
+        pairs[frozenset(r["messages"][0]["content"] for r in rows)] += 1
+    assert pairs[frozenset({"0", "1"})] < 45
+    assert len(pairs) == 45
 
 
 def test_a_schema_change_is_refused(tmp_path):
