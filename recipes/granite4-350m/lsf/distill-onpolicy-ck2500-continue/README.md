@@ -36,12 +36,12 @@ git -C $D apply ~/lmbda_linear_schedule.diff
 GIT_AUTHOR_NAME=granite.build GIT_AUTHOR_EMAIL=granite.build@localhost \
 GIT_COMMITTER_NAME=granite.build GIT_COMMITTER_EMAIL=granite.build@localhost \
 GIT_AUTHOR_DATE=2026-10-05T00:00:00+0000 GIT_COMMITTER_DATE=2026-10-05T00:00:00+0000 \
-  git -C $D commit -qam "gold: restore the linear lmbda schedule"
+  git -C $D -c commit.gpgsign=false commit -qam "gold: restore the linear lmbda schedule"
 git -C $D rev-parse HEAD
 rm ~/lmbda_linear_schedule.diff'
 ```
 
-It must print `508220c4d24842bc1fa244d2c0bfffe8de375095`, the recipe's `CODE_EXPECT_REF`.
+It must print `288bfc6bdab589eca394ca9f7229f1138a6da1c4`, the recipe's `CODE_EXPECT_REF`.
 The step refuses a checkout at any other commit, or a dirty one. All three arms read it.
 
 **2. bcb-server.** `OE_EVAL_BCB_API_URL` must name a live server, or the bigcodebench eval

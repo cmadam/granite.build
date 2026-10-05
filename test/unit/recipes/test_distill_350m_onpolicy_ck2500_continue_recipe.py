@@ -63,7 +63,7 @@ _CHANGED_PARAMS = {
         "68b7c4b2-7d39-449d-9f0b-fb448ac2f5ad/export-2500"
     ),
     "CODE_DIR": "/proj/granite-build/g4os/gb-steps-distillation-lmbda-ramp",
-    "CODE_EXPECT_REF": "508220c4d24842bc1fa244d2c0bfffe8de375095",
+    "CODE_EXPECT_REF": "288bfc6bdab589eca394ca9f7229f1138a6da1c4",
     "GOLD_DATA_SEED": 44,
     "GOLD_LEARNING_RATE": "1.0e-06",
     "LMBDA": 0.5,

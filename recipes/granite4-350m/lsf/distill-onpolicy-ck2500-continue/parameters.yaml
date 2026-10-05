@@ -146,7 +146,7 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 #
 # steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff moves those 12
 # lines back, unchanged, and nothing else. Its header has the commands; committed with the
-# identity and date given there, the result is 508220c4 on any machine, which is why
+# identity and date given there, the result is 288bfc6b on any machine, which is why
 # CODE_EXPECT_REF below can be stated before the checkout exists. The step refuses a
 # CODE_DIR that is not at that commit or is dirty.
 #
@@ -154,7 +154,7 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # the three arms run byte-identical trainer code and differ in lmbda alone.
 CODE_DIR: "/proj/granite-build/g4os/gb-steps-distillation-lmbda-ramp"
 # The full 40-char commit CODE_DIR must be at, and be clean at.
-CODE_EXPECT_REF: "508220c4d24842bc1fa244d2c0bfffe8de375095"
+CODE_EXPECT_REF: "288bfc6bdab589eca394ca9f7229f1138a6da1c4"
 DS_CONFIG: "steps/distill-gold-train/configs/deepspeed/accelerate_deepspeed_zero3.yaml"
 # The five ported steps read their own code from a separate pinned checkout,
 # declared by each step's code_config (code_dir plus expect_ref) rather than
