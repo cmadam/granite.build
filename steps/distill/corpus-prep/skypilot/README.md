@@ -1,4 +1,4 @@
-# distill-corpus-prep — development notes
+# corpus-prep — development notes
 
 User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
 released step as its `README.md`.
@@ -33,6 +33,13 @@ pre-existing tokenizer on BlueVela has a `{% generation %}` block tag (see USAGE
 single-target fixture pointed at any `/proj` overlay fails with an empty assistant mask — the
 step refusing correctly. So the align target is the only source of a usable tokenizer, and the
 fixture proves the cross-target binding as a side effect.
+
+## Tests
+
+```bash
+make test                                                   # 24 contract tests, no checkout needed
+GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 88 ported upstream tests
+```
 
 ## Publishing
 

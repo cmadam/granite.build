@@ -1,4 +1,4 @@
-# distill-eval — development notes
+# eval — development notes
 
 User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
 released step as its `README.md`.
@@ -33,6 +33,24 @@ one. Both intervals stay recipe-overridable.
 `code_config` and the delimited region at the top of `run:` are **byte-identical copies** from
 `steps/distill/tokenizer-align`, the reference step. Do not edit them here — change the
 reference and re-splice, or that step's `test_source_contract.py` fails and names this one.
+
+## Tests
+
+```bash
+make test                                                   # 31 contract tests, no checkout needed
+GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 21 ported (10 skip without torch)
+GB_STEP_BLUEVELA_BUILD=1 make test                           # + the end-to-end run on BlueVela
+```
+
+Ten of the ported tests need torch and skip without it. That is upstream's design, not an
+oversight: the metric arithmetic is worth testing against real tensors, and the image that has
+torch is the cluster's, not CI's.
+
+The end-to-end test (`test/lsf/test_skypilot_lsf_distill_eval.py`, fixtures in
+`test-data/lsf/`) is a three-target chain (align -> corpus -> eval), because the student has to
+be a retagged model whose tokenizer agrees with the teacher's and the corpus has to be an eval
+split. It asks for one H100 and eight samples, so it costs minutes. Without
+`GB_STEP_BLUEVELA_BUILD=1`, or when the BlueVela login node is unreachable, it skips.
 
 ## Publishing
 

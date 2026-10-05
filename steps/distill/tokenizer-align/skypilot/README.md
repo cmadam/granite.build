@@ -1,4 +1,4 @@
-# distill-tokenizer-align — development notes
+# tokenizer-align — development notes
 
 User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
 released step as its `README.md`. This file is for people changing the step.
@@ -55,3 +55,25 @@ make check-published
 `publish-step` writes to `configurations/assets/environments/skypilot/steps/` — **not** under
 `lsf/ibm-bluevela/`. BlueVela still resolves it via the Tier-1 ancestor walk; the step gates
 itself to LSF with `environment_configs.Skypilot.subtypes: [lsf]`.
+
+## Tests
+
+```bash
+make test                                                   # hermetic contract tests, no checkout needed
+GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 39 ported upstream tests (test_build_overlay.py)
+GB_STEP_BLUEVELA_BUILD=1 make test                           # + the end-to-end LSF run in test/lsf/
+```
+
+Without a checkout, `make test` collects 100 tests (`test_step_template.py`,
+`test_source_contract.py`, `test_granite_role_template.py`, and two LSF tests that skip
+unless `GB_STEP_BLUEVELA_BUILD=1`). `conftest.py` falls back to
+`/proj/granite-build/g4os/gb-steps-collection-post-training` when `GB_DISTILL_CODE_DIR` is
+unset, so on a host with `/proj` mounted the ported suite runs without the variable.
+
+The contract tests read the template and `src/run-align.sh` directly and assert, among other
+things, that every declared artifact id is actually printed (and vice versa), that booleans are
+rendered as `--flag`/`--no-flag` pairs rather than `--flag {{ value }}`, and that every flag the
+template passes is one the script parses. `test_source_contract.py` asserts the `code_config`
+block and the delimited source-delivery region of `run` are byte-identical across the ported
+steps. A green run with no checkout means the **step contract** holds — not that the upstream
+code does.

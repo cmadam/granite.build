@@ -1,4 +1,4 @@
-# distill-logit-precompute — development notes
+# logit-precompute — development notes
 
 User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
 released step as its `README.md`.
@@ -50,3 +50,10 @@ No `test-data/lsf/` fixture and no build test: this step is wired into no recipe
 nothing for a fixture to chain to. It was verified by a one-off build instead (`ed6894ee`,
 recorded in USAGE.md), which reused artifacts earlier runs left on /proj rather than re-running
 align and prep.
+
+## Tests
+
+```bash
+make test                                                   # 32 contract tests, no checkout needed
+GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 51 ported upstream tests
+```

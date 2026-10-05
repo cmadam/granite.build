@@ -16,11 +16,11 @@ version: 1.0.0
 # the dependency graph itself the health gate; and a teardown target gated on the
 # trainer's checkpoint downs the cluster.
 #
-# NOT YET RUN ON A CLUSTER. The trainer pushes updated student weights to the
-# server over NCCL, not HTTP (the reference launcher's
-# VLLM_NCCL_COORDINATOR_PORT), so a separate target means a NCCL process group
-# spanning two LSF allocations. Whether that works is the open question, and it is
-# deliberately not hidden: see README.md.
+# The trainer pushes updated student weights to the server over NCCL, not HTTP
+# (the reference launcher's VLLM_NCCL_COORDINATOR_PORT), so a separate target means
+# a NCCL process group spanning two LSF allocations. Build 9973e766 (recipe
+# gold-onpolicy-smoke) showed that works: all 362 parameter tensors synced across
+# the two allocations, and the teardown target ended the server.
 #
 # Division of labour, as in distill-gold: SkyPilot's LSF provisioner owns bsub,
 # enroot and the node topology; deps come from the image; the server code (now

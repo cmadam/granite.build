@@ -1,4 +1,4 @@
-# distill-sft — development notes
+# sft — development notes
 
 User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
 released step as its `README.md`.
@@ -29,7 +29,7 @@ All three are path resolution, none is behaviour:
   shared package from `GB_DISTILL_CODE_DIR`.
 - the **parity tests** import `distill-gold-train`'s renderer, which granite.build does not
   contain. They are pointed at the upstream renderer in the delivered checkout rather than
-  dropped — see USAGE.md for what they then assert.
+  dropped — see [Tests](#tests) for what they then assert.
 - three tests read `sft.py`'s **source text** (a property that cannot be imported, since it pulls
   torch at module scope). Repointed at the checkout for the same reason.
 
@@ -38,6 +38,20 @@ All three are path resolution, none is behaviour:
 `code_config` and the delimited region at the top of `run:` are **byte-identical copies** from
 `steps/distill/tokenizer-align`, the reference step. Do not edit them here — change the reference
 and re-splice, or that step's `test_source_contract.py` fails and names this one.
+
+## Tests
+
+```bash
+make test                                                   # 37 contract tests, no checkout needed
+GB_DISTILL_CODE_DIR=/path/to/checkout make test              # + 94 ported upstream tests
+```
+
+The ported suite includes upstream's parity tests, which compare this renderer against
+`distill-gold-train`'s. That renderer is not in granite.build — `steps/distill/gold` ships a
+different one, because it drives kd-sandbox's trainer — so they are pointed at the **upstream**
+renderer in the delivered checkout. What they then assert is still worth knowing: upstream's
+control and its treatment share their guards, their optimization defaults and their tracking
+surface.
 
 ## Publishing
 

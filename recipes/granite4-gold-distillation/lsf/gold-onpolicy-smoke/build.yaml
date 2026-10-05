@@ -3,11 +3,11 @@
 # with vLLM as a SEPARATE target rather than nodes carved out of the trainer's
 # allocation.
 #
-# NOT YET RUN. This recipe exists to answer one question: can the trainer's NCCL
-# weight-sync group span two LSF allocations? On-policy GOLD pushes the student's
-# updated weights to the vLLM server every vllm_sync_frequency step over NCCL, not
-# HTTP, and two targets means two allocations. If it cannot, the fallback is
-# distill-gold's in-allocation role split and this graph is the wrong shape.
+# This recipe exists to answer one question: can the trainer's NCCL weight-sync
+# group span two LSF allocations? On-policy GOLD pushes the student's updated
+# weights to the vLLM server every vllm_sync_frequency step over NCCL, not HTTP, and
+# two targets means two allocations. It can: build 9973e766 synced all 362 parameter
+# tensors across them (see README.md).
 #
 # THREE TARGETS, and the ordering between them is implicit — there is no depends_on
 # key. A target starts when ALL its input bindings resolve:

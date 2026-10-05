@@ -1,10 +1,8 @@
 """Contract tests for the vllm-server step-template.yaml.
 
-Nothing here has run on a cluster. That is stated in the step's README rather than
-implied by a green suite: these tests pin the CONTRACT — the readiness gate, the
-two markers, the monitor overlay — and the open question (whether the trainer's
-NCCL weight-sync group can span two LSF allocations) is not something a test can
-answer.
+These tests pin the CONTRACT — the readiness gate, the two markers, the monitor
+overlay. Whether the trainer's NCCL weight-sync group can span two LSF allocations is
+not something a test can answer; build 9973e766 answered it on BlueVela.
 
 The failures they do catch are the ones that cost a queue slot and produce no
 diagnostic: a shell syntax error, a marker that never fires so the consumer target

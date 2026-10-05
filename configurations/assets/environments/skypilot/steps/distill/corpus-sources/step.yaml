@@ -13,8 +13,9 @@ version: 1.0.0
 type: data_processing
 config:
   sources_config:
-    # The raw splits, as .jsonl paths visible from the compute node. Order is kept: it
-    # names the per-split RNG streams, so reordering the list changes the selection.
+    # The raw splits, as .jsonl paths visible from the compute node. Each split's RNG
+    # stream is seeded from shuffle_seed and the file's NAME, so reordering the list
+    # keeps the selection; two splits with the same file name share a stream.
     sources: []
     # Rows to keep across all splits. 0, or anything >= the corpus, keeps every row.
     target_rows: 0
