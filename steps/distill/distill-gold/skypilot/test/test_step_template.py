@@ -719,8 +719,12 @@ class TestResumeFromCheckpointDir:
         return Template(script).render(config=config)
 
     @classmethod
-    def _seed_block(cls, src):
-        rendered = cls._render(resume_from_checkpoint_dir=str(src))
+    def _seed_block(cls, src, vllm_server_url=""):
+        step = yaml.safe_load(_STEP.read_text())
+        gold_config = dict(step["config"]["gold_config"], vllm_server_url=vllm_server_url)
+        rendered = cls._render(
+            resume_from_checkpoint_dir=str(src), gold_config=gold_config
+        )
         start = rendered.index('RESUME_SRC="')
         end = rendered.index("# Rendered per node", start)
         return rendered[start:end]
@@ -739,9 +743,11 @@ class TestResumeFromCheckpointDir:
             (ckpt / f"global_step{step}" / shard).write_text("x")
         return ckpt
 
-    def _run(self, tmp_path, src, rank="0", nodes="2"):
+    def _run(
+        self, tmp_path, src, rank="0", nodes="2", vllm_servers="0", vllm_server_url=""
+    ):
         dst = tmp_path / "run" / "checkpoints" / "gold_node2"
-        script = "set -eu\n" + self._seed_block(src)
+        script = "set -eu\n" + self._seed_block(src, vllm_server_url)
         result = subprocess.run(
             ["bash", "-c", script],
             env={
@@ -749,7 +755,7 @@ class TestResumeFromCheckpointDir:
                 "NODE_RANK": rank,
                 "NODES": nodes,
                 "GPUS": "8",
-                "VLLM_SERVERS": "0",
+                "VLLM_SERVERS": vllm_servers,
                 "CKPT_DIR": str(dst),
             },
             capture_output=True,
@@ -842,6 +848,36 @@ class TestResumeFromCheckpointDir:
         assert "holds 16 ZeRO optimizer shards" in result.stderr
         assert "trains on 8 ranks" in result.stderr
         assert not (dst / ".resume-seeded").exists()
+
+    def test_an_external_server_takes_no_trainer_node(self, tmp_path):
+        """vllm_num_servers 1 with vllm_server_url set is the on-policy recipes'
+        topology: the server is another target's allocation, so all 2 x 8 ranks
+        train and a 16-shard checkpoint resumes. Counting the server against this
+        allocation refused exactly that resume, as 8 ranks (build 9c265991's
+        relaunch)."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 500)
+        result, dst = self._run(
+            tmp_path,
+            src,
+            vllm_servers="1",
+            vllm_server_url="http://10.0.0.1:8001",
+        )
+        assert result.returncode == 0, result.stderr
+        assert "resumes from checkpoint-500" in result.stdout
+        assert (dst / ".resume-seeded").exists()
+
+    def test_an_in_allocation_server_node_is_not_a_trainer_rank(self, tmp_path):
+        """Without a URL, the last vllm_num_servers nodes serve, so 3 nodes with 1
+        server train on 16 ranks and 2 nodes with 1 server on only 8."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 500)
+        result, _ = self._run(tmp_path, src, nodes="3", vllm_servers="1")
+        assert result.returncode == 0, result.stderr
+
+        result, _ = self._run(tmp_path / "split", src, nodes="2", vllm_servers="1")
+        assert result.returncode == 1
+        assert "trains on 8 ranks" in result.stderr
 
     def test_a_worker_waits_for_rank_zero_and_does_not_seed(self, tmp_path):
         src = tmp_path / "src"

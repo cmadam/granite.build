@@ -658,7 +658,14 @@ environment_configs:
               # count, rather than discovered by every rank after allocation.
               RESUME_SHARDS="$(find "$CKPT_DIR/checkpoint-$RESUME_LAST" -mindepth 2 -maxdepth 2 \
                 -path '*/global_step*/*' -name '*optim_states.pt' 2>/dev/null | wc -l)"
+              # An EXTERNAL server (vllm_server_url set) is another target's allocation:
+              # every node here trains, whatever vllm_num_servers says. Only the
+              # in-allocation split gives nodes to vLLM -- see "Node roles" below.
+              {% if config.gold_config.vllm_server_url | default("") | string | trim %}
+              RESUME_WORLD=$(( NODES * GPUS ))
+              {% else %}
               RESUME_WORLD=$(( (NODES - VLLM_SERVERS) * GPUS ))
+              {% endif %}
               if [ "$RESUME_SHARDS" -gt 0 ] && [ "$RESUME_SHARDS" -ne "$RESUME_WORLD" ]; then
                 echo "distill-gold: FATAL: checkpoint-$RESUME_LAST holds $RESUME_SHARDS ZeRO optimizer shards" >&2
                 echo "  but this run trains on $RESUME_WORLD ranks. Resume with the source's topology." >&2
