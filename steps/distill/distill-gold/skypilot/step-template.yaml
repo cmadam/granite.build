@@ -447,6 +447,9 @@ environment_configs:
               # re-clones the tree under them. The launch id alone does not name an attempt
               # (a retry_workload replay reuses it); the job id distinguishes a resubmit to
               # the same cluster, and the scheduler's allocation id a fresh cluster.
+              # All three empty would make every attempt's token "::" and bring the
+              # stale-marker race back; that cannot happen here, because gbserver sets
+              # GB_SKYPILOT_LAUNCH_ID on every launch and SkyPilot sets the job id.
               DONE_MARKER="$CODE_DIR.gb-clone-done"
               CLONE_TOKEN="${GB_SKYPILOT_LAUNCH_ID:-}:${SKYPILOT_INTERNAL_JOB_ID:-}:${LSB_JOBID:-${SLURM_JOB_ID:-}}"
               if [ "${RANK:-0}" != "0" ]; then
