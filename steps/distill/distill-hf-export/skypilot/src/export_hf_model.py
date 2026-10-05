@@ -308,6 +308,9 @@ _EMPTY_THINK = "<think></think>"
 # class NAME is only a label. These probes are the behavioural check: the ids AutoTokenizer
 # produces against the ids tokenizer.json produces with no transformers in the path. Code,
 # runs of whitespace, role markers and non-Latin text are where the two segmentations part.
+#
+# This is the check that used to be scripts/check_tokenizer_pin.py, a hand-run diagnostic.
+# It runs on every export with --verify, which every granite4-350m recipe that exports sets.
 TOKENIZER_PIN_PROBES = (
     "def fibonacci(n: int) -> int:\n    return n if n < 2 else fibonacci(n-1)+fibonacci(n-2)",
     "The quick brown fox jumps over 42 lazy dogs.",
