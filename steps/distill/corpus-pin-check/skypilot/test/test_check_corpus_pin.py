@@ -54,6 +54,28 @@ def test_a_matching_pin_has_no_problems(tmp_path):
     assert mode.startswith("identity-only")
 
 
+def test_a_corpus_with_no_eval_split_needs_no_eval_jsonl(tmp_path):
+    """prep_corpus writes eval.jsonl only when eval_fraction > 0, and forces 0 for a
+    merged corpus, so its absence there is the consistent state, not a cleaned-up pin.
+    """
+    build = dict(_BUILD, eval_fraction=0.0)
+    corpus = _corpus(tmp_path, _manifest(eval_fraction=0.0))
+    (corpus / "eval.jsonl").unlink()
+    problems, _ = pin_problems(
+        corpus, _manifest(eval_fraction=0.0), tokenizer_dir=tmp_path / "tok", **build
+    )
+    assert problems == []
+
+
+def test_a_corpus_with_an_eval_split_still_needs_eval_jsonl(tmp_path):
+    corpus = _corpus(tmp_path, _manifest())
+    (corpus / "eval.jsonl").unlink()
+    problems, _ = pin_problems(
+        corpus, _manifest(), tokenizer_dir=tmp_path / "tok", **_BUILD
+    )
+    assert problems == [f"eval.jsonl is missing from {corpus}"]
+
+
 def test_every_mismatch_is_reported_not_just_the_first(tmp_path):
     corpus = tmp_path / "empty"
     corpus.mkdir()

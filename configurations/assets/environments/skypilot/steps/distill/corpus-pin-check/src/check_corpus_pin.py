@@ -41,8 +41,11 @@ def pin_problems(
     problems = []
 
     # The splits, before anything else: a pin whose files were cleaned up is the most
-    # likely way this fires, and the cheapest to say.
-    for name in ("train.jsonl", "eval.jsonl"):
+    # likely way this fires, and the cheapest to say. prep_corpus writes eval.jsonl
+    # only when eval_fraction > 0 (and forces 0 for a merged corpus), so without an
+    # eval split its absence is the consistent state.
+    splits = ("train.jsonl", "eval.jsonl") if eval_fraction > 0 else ("train.jsonl",)
+    for name in splits:
         if not (corpus / name).is_file():
             problems.append(f"{name} is missing from {corpus}")
 
