@@ -1,5 +1,8 @@
 # corpus-sources
 
+User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
+released step as its `README.md`.
+
 Builds one prep-ready `train.jsonl` from several raw SFT splits, for
 `distill-corpus-prep` to consume. It does three things, and the rationale for each is
 in [`src/build_sources.py`](src/build_sources.py):

@@ -1,4 +1,7 @@
-# distill-probe
+# probe
+
+User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
+released step as its `README.md`.
 
 Runs one of three cheap probes that gate the granite4-350m distillation family. None
 trains or produces anything; each prints a `PROBE VERDICT` line to the log. What each

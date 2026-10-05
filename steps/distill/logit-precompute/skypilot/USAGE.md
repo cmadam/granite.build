@@ -50,7 +50,7 @@ Everything unusual about this step follows from that sentence:
 ## Config
 
 Source delivery (`code_config`) is identical in every ported distillation step — see
-[distill-tokenizer-align's USAGE.md](../../tokenizer-align/skypilot/USAGE.md#source-delivery).
+"Source delivery" in the `space://steps/distill/tokenizer-align` step's README.
 
 | Key | Default | Notes |
 |---|---|---|
