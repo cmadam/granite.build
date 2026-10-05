@@ -56,7 +56,7 @@ targets:
     inputs:
       vllm: {binding: vllm-server.vllm_url}
     steps:
-      - step_uri: space://steps/distill/distill-gold
+      - step_uri: space://steps/distill/gold
         config:
           gold_config:
             vllm_server_url: "{{ bindings.vllm.binding.state }}"

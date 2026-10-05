@@ -101,7 +101,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-gold
+        - step_uri: space://steps/distill/gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}

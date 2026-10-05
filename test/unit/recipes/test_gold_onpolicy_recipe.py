@@ -101,9 +101,7 @@ def test_three_targets_in_the_expected_roles(targets):
         targets["vllm-server"]["steps"][0]["step_uri"]
         == "space://steps/distill/vllm-server"
     )
-    assert (
-        targets["train"]["steps"][0]["step_uri"] == "space://steps/distill/distill-gold"
-    )
+    assert targets["train"]["steps"][0]["step_uri"] == "space://steps/distill/gold"
     assert (
         targets["teardown"]["steps"][0]["step_uri"] == "space://steps/skypilot-teardown"
     )

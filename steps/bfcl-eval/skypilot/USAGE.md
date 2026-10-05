@@ -21,7 +21,7 @@ The harness and its runtime are baked into a container image built from
 BFCL scores the student against **ground truth** — *did it call the right function with the
 right arguments?* It cannot say whether a distilled student moved toward its **teacher**,
 which is a distance between two distributions; that is what
-[`distill-eval`](../../distill-eval/skypilot/USAGE.md) measures. A distillation recipe wires
+[`distill-eval`](../../distill/eval/skypilot/USAGE.md) measures. A distillation recipe wires
 **both**, and they are not substitutes in either direction: a student can track its teacher
 closely and still call functions badly, or score well while having learned nothing from the
 teacher.
