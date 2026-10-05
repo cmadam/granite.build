@@ -21,19 +21,24 @@ buys. `parameters.yaml` gives the reason for each changed value; this recipe is
 **1. The patched trainer checkout.** At the step's trainer pin, the linear lmbda schedule
 is unreachable code, so a ramp arm dies on its first step. The fix is
 `steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff`. Build the
-checkout once, from the repo root on a host that can reach BlueVela:
+checkout once, from the repo root. Copy the patch over as a file: piped into `ssh` on
+stdin, it does not reach `git apply`, which then waits for input indefinitely.
 
 ```bash
+scp -F $HOME/.lsf/config steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff \
+  bluevela:lmbda_linear_schedule.diff
+
 ssh -F $HOME/.lsf/config bluevela 'set -e
 D=/proj/granite-build/g4os/gb-steps-distillation-lmbda-ramp
 git clone -q https://github.com/laminair/gb-steps-distillation.git $D
 git -C $D checkout -q a5d59bc45524a8d75706e20d44ae1a254f273f23
-git -C $D apply
+git -C $D apply ~/lmbda_linear_schedule.diff
 GIT_AUTHOR_NAME=granite.build GIT_AUTHOR_EMAIL=granite.build@localhost \
 GIT_COMMITTER_NAME=granite.build GIT_COMMITTER_EMAIL=granite.build@localhost \
 GIT_AUTHOR_DATE=2026-10-05T00:00:00+0000 GIT_COMMITTER_DATE=2026-10-05T00:00:00+0000 \
   git -C $D commit -qam "gold: restore the linear lmbda schedule"
-git -C $D rev-parse HEAD' < steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff
+git -C $D rev-parse HEAD
+rm ~/lmbda_linear_schedule.diff'
 ```
 
 It must print `508220c4d24842bc1fa244d2c0bfffe8de375095`, the recipe's `CODE_EXPECT_REF`.
