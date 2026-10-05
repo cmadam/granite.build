@@ -37,10 +37,11 @@ import json
 import pathlib
 import re
 import subprocess
-import textwrap
 
 import pytest
 import yaml
+
+from unit.recipes.published_step import render_run
 
 from gbcli.services.service_build import get_params_from_file
 from gbcli.utils.buildutil import apply_parameters
@@ -63,7 +64,6 @@ _GOLD_STEP = (
 )
 
 _PLAIN_MARKER = re.compile(r"\$\$\{([A-Za-z0-9_]+)\}")
-_HEREDOC = re.compile(r"<<'PYSRC'\n(.*?)\n\s*PYSRC(?:\n|$)", re.S)
 _LOOP_VARS = {"N", "e", "k", "v", "name", "CATS", "SAGE_NAMES"}
 
 _LADDER = ["500", "1000", "1500", "2000", "2500"]
@@ -617,36 +617,43 @@ def test_evals_ride_the_preemptable_queue_and_training_does_not(built):
 
 
 def test_gen_smoke_reports_without_gating(built):
-    command = _config(built, "gen-smoke")["command_config"]["command"]
-    body = textwrap.dedent(_HEREDOC.findall(command)[0])
-    assert "sys.exit" not in body
-    assert "degenerate" in body
+    step = _targets(built)["gen-smoke"]["steps"][0]
+    assert step["step_uri"] == "space://steps/distill/gen-smoke"
+    assert step["config"]["gen_smoke_config"]["gate_final_rung"] is False
 
 
 def test_gen_smoke_hands_the_interpreter_every_rung(built, tmp_path):
     """Executes the assembly rather than parsing it: a blank line after a `\\` ends the
-    command and bash runs the next rung as a program name (build bb779f1f)."""
-    rendered = _render(tmp_path, WORKDIR_ROOT=str(tmp_path))
-    cmd = _config(rendered, "gen-smoke")["command_config"]["command"]
+    command and bash runs the next rung as a program name (build bb779f1f). Rendered
+    through the published step template, with only the interpreter swapped."""
     argv_log = tmp_path / "argv.json"
     stub = tmp_path / "python-stub"
     stub.write_text(
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
-        "sys.stdin.read()\n"
         f"json.dump(sys.argv[1:], open({str(argv_log)!r}, 'w'))\n",
         encoding="utf-8",
     )
     stub.chmod(0o755)
-    script = cmd.replace("/stage/.venv/bin/python", str(stub))
+    script, step_dir = render_run(
+        "distill/gen-smoke",
+        _config(built, "gen-smoke"),
+        gen_smoke_config={"python": str(stub), "output_dir": str(tmp_path / "gs")},
+    )
     result = subprocess.run(
-        ["bash"], input=script, text=True, capture_output=True, check=False
+        ["bash", "-c", script],
+        cwd=step_dir,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
-    argv = json.loads(argv_log.read_text(encoding="utf-8"))[1:]
-    assert [a.partition(":")[0] for a in argv[3:]] == _LADDER
-    for rung, got in zip(_LADDER, argv[3:]):
-        assert got.endswith(f"/export-{rung}"), got
+    argv = json.loads(argv_log.read_text(encoding="utf-8"))
+    assert argv[4] == "false"
+    rungs = [a.partition(":") for a in argv[5:]]
+    assert [r[0] for r in rungs] == _LADDER
+    for rung, _, path in rungs:
+        assert path.endswith(f"/export-{rung}"), path
 
 
 def test_nothing_downstream_is_gated_on_an_instrument(built):
