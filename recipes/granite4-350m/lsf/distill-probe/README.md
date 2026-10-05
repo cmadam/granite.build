@@ -1,8 +1,9 @@
 # distill-probe
 
-Two cheap questions that gate the whole granite4-350m distillation family. One
-H100, about two minutes each, nothing trained, nothing produced — the answers are
-in the log.
+Three cheap questions that gate the whole granite4-350m distillation family. About
+two minutes each, nothing trained, nothing produced — the answers are in the log.
+Every target runs the [`distill-probe`](../../../../steps/distill/distill-probe/skypilot/README.md)
+step, which holds the probes themselves.
 
 **Run this before [`distill-smoke`](../distill-smoke/README.md), and that before
 stage 1.**
@@ -14,10 +15,10 @@ gb build start -f recipes/granite4-350m/lsf/distill-probe/build.yaml --space <yo
 ## Reading the output
 
 **`gb build log` will NOT show the `PROBE` lines.** That command returns gbserver's
-event log — statuses, artifact markers, exceptions. A `command` step's stdout is not in
+event log — statuses, artifact markers, exceptions. The probe step's stdout is not in
 it, and `build_job_log` does not find it either: that tool looks for
 `$GB_HOME_DIR/workdir/llm-build-<id>/**/outputs/job.log`, which is written by steps that
-use `$GB_BUILD_WORKDIR`, and the generic `command` step does not.
+use `$GB_BUILD_WORKDIR`, and the probe step does not.
 
 The workload's real stdout is in SkyPilot's own log on the gbserver host, under the
 cluster name that appears in the event log:
@@ -226,7 +227,7 @@ hardlinked, the way the pinned teacher is built in
 
 ## Why no outputs
 
-Neither target declares one. There is nothing to hand downstream: the answers are
+No target declares one. There is nothing to hand downstream: the answers are
 decisions for a human, not artifacts for a step. `max_retries: 0` for the same
 reason — a probe that needed a retry has already told you something, and a silently
 retried transient would hide exactly the flakiness worth seeing.

@@ -51,8 +51,12 @@ def sample_split(
     """
     rng = random.Random(f"{seed}:{path.name}")
     reservoir: list[dict] = []
+    # Usable rows seen so far. The replacement draw ranges over these, not over the raw
+    # line index: counting skipped lines would leave every row after them below a
+    # uniform chance of entering, skewing the sample toward the start of the file.
+    seen = 0
     with path.open() as fh:
-        for i, line in enumerate(fh):
+        for line in fh:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
@@ -68,10 +72,11 @@ def sample_split(
             else:
                 tally["bad"] += 1
                 continue
+            seen += 1
             if len(reservoir) < quota:
                 reservoir.append(rec)
             else:
-                j = rng.randint(0, i)
+                j = rng.randint(0, seen - 1)
                 if j < quota:
                     reservoir[j] = rec
     return reservoir

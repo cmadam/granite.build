@@ -1325,8 +1325,12 @@ def _num_nodes_from_configs(
         # Fail fast rather than fall back to one node: a bad value (an
         # unsubstituted parameter, say) would otherwise run single-node and
         # report success, the outcome this resolver exists to prevent.
+        # int() truncates a float, so 2.5 would quietly become 2: accept a
+        # float only when it is already whole (YAML's `2.0`).
         try:
             parsed = int(value)
+            if isinstance(value, float) and parsed != value:
+                raise ValueError
         except (TypeError, ValueError):
             raise ValueError(
                 f"num_nodes={value!r} is not an integer; set compute_config."
@@ -2370,7 +2374,7 @@ class Skypilot(Environment):
         config = kwargs.get("config") or {}
         run_metadata = kwargs.get("run_metadata") or {}
         launcher_envs = launcher_config.get("envs", {})
-        config_envs = config.get("launcher_config", {}).get("envs", {})
+        config_envs = (config.get("launcher_config") or {}).get("envs", {})
         builtins = self._skypilot_builtin_env(
             kwargs.get("launch_id", ""),
             kwargs.get("cluster_name", ""),
@@ -2501,9 +2505,11 @@ class Skypilot(Environment):
                 build_id=run_metadata.get("build_id", "") or "",
                 build_config_name=run_metadata.get("build_config_name", "") or "",
             )
-            cloud = (
-                launcher_config.get("resources", {}).get("cloud") or self._get_cloud()
-            )
+            # `or {}` on every layer: a present-but-null `resources:` or
+            # `launcher_config:` key returns None from .get(), not the default.
+            cloud = (launcher_config.get("resources") or {}).get(
+                "cloud"
+            ) or self._get_cloud()
             idle_minutes = launcher_config.get(
                 "idle_minutes_to_autostop", self._get_idle_minutes()
             )
@@ -2513,8 +2519,8 @@ class Skypilot(Environment):
             # the target cloud can be resolved before the floor is layered in.
             compute_config = config.get("compute_config", {}) or {}
             override_res = {
-                **launcher_config.get("resources", {}),
-                **config.get("launcher_config", {}).get("resources", {}),
+                **(launcher_config.get("resources") or {}),
+                **((config.get("launcher_config") or {}).get("resources") or {}),
             }
 
             # Build infra string: supports 'cloud/cluster/partition' format
@@ -2647,7 +2653,7 @@ class Skypilot(Environment):
             # `command` step renders image_id to "" when no image is given, and
             # sky.Resources expects None (bare node) rather than an empty string.
             image_id = (
-                config.get("launcher_config", {}).get("image_id")
+                (config.get("launcher_config") or {}).get("image_id")
                 or launcher_config.get("image_id")
             ) or None
 

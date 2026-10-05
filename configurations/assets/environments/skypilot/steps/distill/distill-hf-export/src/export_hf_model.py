@@ -308,6 +308,9 @@ _EMPTY_THINK = "<think></think>"
 # class NAME is only a label. These probes are the behavioural check: the ids AutoTokenizer
 # produces against the ids tokenizer.json produces with no transformers in the path. Code,
 # runs of whitespace, role markers and non-Latin text are where the two segmentations part.
+#
+# This is the check that used to be scripts/check_tokenizer_pin.py, a hand-run diagnostic.
+# It runs on every export with --verify, which every granite4-350m recipe that exports sets.
 TOKENIZER_PIN_PROBES = (
     "def fibonacci(n: int) -> int:\n    return n if n < 2 else fibonacci(n-1)+fibonacci(n-2)",
     "The quick brown fox jumps over 42 lazy dogs.",
@@ -395,6 +398,20 @@ def _is_number(value: Any) -> bool:
     # bool is an int subclass in Python and `use_cache: true` must not be mistaken for a
     # number to mirror.
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _as_numeric(value: Any) -> Any:
+    """A number, or a list/tuple of numbers as a list, else None.
+
+    `time_step_limit` resolves to a PAIR, and it is the very key normalise_model_config
+    drops, so a scalar-only comparison would skip the one field it exists to check. The
+    tuple/list difference is the JSON round trip, not a change of value.
+    """
+    if _is_number(value):
+        return value
+    if isinstance(value, (list, tuple)) and value and all(map(_is_number, value)):
+        return list(value)
+    return None
 
 
 def _nested_param_dicts(cfg: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -516,7 +533,7 @@ def diff_resolved_numeric(source: dict[str, Any], dest: dict[str, Any]) -> list[
     the two directories actually resolve, so a dropped key that was NOT its class default
     fails the export instead of quietly changing the published model.
 
-    Only fields the SOURCE had, and only numbers. This step ADDS top-level keys on purpose
+    Only fields the SOURCE had, and only numbers or sequences of them. This step ADDS top-level keys on purpose
     -- that is the hoist -- so a key present only in `dest` is not drift. Non-numerics are
     out of scope: `dtype` and `architectures` are compared by the loads in `verify()`
     itself, and a string-valued field that legitimately differs (transformers_version) is
@@ -526,18 +543,19 @@ def diff_resolved_numeric(source: dict[str, Any], dest: dict[str, Any]) -> list[
     transformers, which is the property this whole module is arranged around.
     """
     drift: list[str] = []
-    for key, want in sorted(source.items()):
-        if not _is_number(want):
+    for key, raw in sorted(source.items()):
+        want = _as_numeric(raw)
+        if want is None:
             continue
         if key not in dest:
             drift.append(
                 f"{key}: source resolves {want!r}, exported config has no such field"
             )
             continue
-        got = dest[key]
-        if _is_number(got) and got == want:
+        got = _as_numeric(dest[key])
+        if got is not None and got == want:
             continue
-        drift.append(f"{key}: source resolves {want!r}, export resolves {got!r}")
+        drift.append(f"{key}: source resolves {want!r}, export resolves {dest[key]!r}")
     return drift
 
 

@@ -14,6 +14,7 @@ the upstream distillation package.
 
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -364,3 +365,56 @@ class TestChatmlIsAPropertyOfThePair:
         # branch is closed before the check itself runs — so the check is not skipped.
         assert block.index("fi") < block.index('"$PYBIN"')
         assert '"$PYBIN" - "$RETAGGED" "$REQUIRE_CHATML"' in block
+
+
+class TestIdentityBackfill:
+    """The skip path's tokenizer_identity.json backfill, run for real against a stub
+    package. It once interpolated the model paths into Python source, so a path holding
+    a quote was a SyntaxError on exactly the run that needed the backfill."""
+
+    _STUB = """
+from pathlib import Path
+
+
+def derive_name(teacher):
+    return Path(teacher).name
+
+
+def write(dest, identity, *, produced_by, student, teacher):
+    out = Path(dest) / "tokenizer_identity.json"
+    out.write_text(f"{identity}|{student}|{teacher}")
+    return out
+"""
+
+    @staticmethod
+    def _block(align_sh):
+        start = align_sh.index('  if [[ ! -f "${RETAGGED}/tokenizer_identity.json" ]]')
+        return align_sh[start : align_sh.index("\n  fi\n", start) + len("\n  fi\n")]
+
+    def test_paths_with_quotes_reach_the_writer_verbatim(self, align_sh, tmp_path):
+        pkg = tmp_path / "lib" / "gb_steps_post_training" / "distillation"
+        pkg.mkdir(parents=True)
+        (pkg.parent / "__init__.py").write_text("")
+        (pkg / "__init__.py").write_text("")
+        (pkg / "tokenizer_identity.py").write_text(self._STUB)
+        retagged = tmp_path / "it's retagged"
+        retagged.mkdir()
+        teacher = "/models/o'brien's teacher"
+        student = '/models/a "quoted" student'
+
+        result = subprocess.run(
+            ["bash", "-c", "set -euo pipefail\n" + self._block(align_sh)],
+            env={
+                "PATH": "/usr/bin:/bin",
+                "PYTHONPATH": str(tmp_path / "lib"),
+                "PYBIN": sys.executable,
+                "RETAGGED": str(retagged),
+                "TEACHER_MODEL": teacher,
+                "STUDENT_MODEL": student,
+            },
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        written = (retagged / "tokenizer_identity.json").read_text()
+        assert written == f"o'brien's teacher|{student}|{teacher}"

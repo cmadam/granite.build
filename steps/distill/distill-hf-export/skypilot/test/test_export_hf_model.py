@@ -728,13 +728,34 @@ def test_resolved_drift_accepts_a_key_dropped_to_its_class_default():
     """The sentinel drop is only safe because absence resolves to the same value. This is
     what checks that per export instead of trusting a comment: `time_step_limit` is gone
     from the written file, and both sides still RESOLVE (0.0, inf)."""
+    inf = float("inf")
     assert (
         diff_resolved_numeric(
-            {"rope_theta": 10000000, "time_step_min": 0.001},
-            {"rope_theta": 10000000, "time_step_min": 0.001},
+            {
+                "rope_theta": 10000000,
+                "time_step_min": 0.001,
+                "time_step_limit": (0.0, inf),
+            },
+            {
+                "rope_theta": 10000000,
+                "time_step_min": 0.001,
+                "time_step_limit": [0.0, inf],
+            },
         )
         == []
     )
+
+
+def test_resolved_drift_compares_numeric_sequences():
+    """`time_step_limit` is the one key the export drops, and it resolves to a PAIR, so a
+    scalar-only comparison skipped exactly the key it exists to check."""
+    drift = diff_resolved_numeric(
+        {"time_step_limit": (0.0, float("inf"))}, {"time_step_limit": [0.0, 10.0]}
+    )
+    assert len(drift) == 1
+    assert "time_step_limit" in drift[0]
+    drift = diff_resolved_numeric({"time_step_limit": (0.0, float("inf"))}, {})
+    assert len(drift) == 1
 
 
 def test_resolved_drift_catches_a_dropped_key_that_was_not_default():
