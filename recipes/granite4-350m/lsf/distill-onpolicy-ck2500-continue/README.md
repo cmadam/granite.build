@@ -20,12 +20,12 @@ buys. `parameters.yaml` gives the reason for each changed value; this recipe is
 
 **1. The patched trainer checkout.** At the step's trainer pin, the linear lmbda schedule
 is unreachable code, so a ramp arm dies on its first step. The fix is
-`steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff`. Build the
+`steps/distill/gold/skypilot/patches/lmbda_linear_schedule.diff`. Build the
 checkout once, from the repo root. Copy the patch over as a file: piped into `ssh` on
 stdin, it does not reach `git apply`, which then waits for input indefinitely.
 
 ```bash
-scp -F $HOME/.lsf/config steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff \
+scp -F $HOME/.lsf/config steps/distill/gold/skypilot/patches/lmbda_linear_schedule.diff \
   bluevela:lmbda_linear_schedule.diff
 
 ssh -F $HOME/.lsf/config bluevela 'set -e

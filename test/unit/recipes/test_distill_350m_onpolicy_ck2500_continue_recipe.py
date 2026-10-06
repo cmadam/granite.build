@@ -47,7 +47,7 @@ _LSF = _REPO / "recipes" / "granite4-350m" / "lsf"
 _RECIPE = _LSF / "distill-onpolicy-ck2500-continue"
 _PARENT = _LSF / "distill-onpolicy-checkpoint-eval"
 _OFFPOLICY = _LSF / "distill-checkpoint-eval"
-_GOLD_SRC = _REPO / "steps" / "distill" / "distill-gold" / "skypilot"
+_GOLD_SRC = _REPO / "steps" / "distill" / "gold" / "skypilot"
 _PATCH = _GOLD_SRC / "patches" / "lmbda_linear_schedule.diff"
 
 # The CLI delivers --param values as STRINGS, so the arms are spelled the way a command

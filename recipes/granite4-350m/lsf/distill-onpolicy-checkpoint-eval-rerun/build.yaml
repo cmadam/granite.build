@@ -74,7 +74,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-hf-export
+        - step_uri: space://steps/distill/hf-export
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -111,7 +111,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: fileset
       steps:
-        - step_uri: space://steps/distill/distill-eval
+        - step_uri: space://steps/distill/eval
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}

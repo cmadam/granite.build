@@ -3,7 +3,7 @@ gold: restore the linear lmbda schedule
 Applies to: github.com/laminair/gb-steps-distillation at a5d59bc4 -- the commit this
             step's code_config pins -- from the checkout ROOT (paths are the repo's own):
 
-              git -C <checkout> apply steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff
+              git -C <checkout> apply steps/distill/gold/skypilot/patches/lmbda_linear_schedule.diff
 
             git apply skips this header. Upstream HEAD 59c36a2 has the same defect.
 

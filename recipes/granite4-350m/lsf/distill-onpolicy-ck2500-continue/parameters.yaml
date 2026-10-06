@@ -144,7 +144,7 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # dies with a TypeError on its first step -- after the 2 x 8 H100 allocation is held. The
 # renderer cannot catch it, because the config is valid.
 #
-# steps/distill/distill-gold/skypilot/patches/lmbda_linear_schedule.diff moves those 12
+# steps/distill/gold/skypilot/patches/lmbda_linear_schedule.diff moves those 12
 # lines back, unchanged, and nothing else. Its header has the commands; committed with the
 # identity and date given there, the result is 288bfc6b on any machine, which is why
 # CODE_EXPECT_REF below can be stated before the checkout exists. The step refuses a
@@ -241,7 +241,7 @@ SHUFFLE_SEED: 42
 #
 # The markers emit nothing, so the rendered output is byte-identical to the
 # unmarked template. That is asserted, not assumed:
-# steps/distill/distill-tokenizer-align/skypilot/test/test_granite_role_template.py renders
+# steps/distill/tokenizer-align/skypilot/test/test_granite_role_template.py renders
 # both over nine conversation shapes and diffs them.
 #
 # BEFORE THE FIRST RUN: diff this against /proj/granite-build/g4os/chat_template.jinja,

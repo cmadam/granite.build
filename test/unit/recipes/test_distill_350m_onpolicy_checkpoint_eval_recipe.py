@@ -59,7 +59,7 @@ _GOLD_STEP = (
     / "skypilot"
     / "steps"
     / "distill"
-    / "distill-gold"
+    / "gold"
     / "step.yaml"
 )
 
