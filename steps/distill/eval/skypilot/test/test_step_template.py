@@ -217,15 +217,17 @@ class TestFlagSurface:
 
 
 class TestConfigDefaults:
-    def test_the_student_and_corpus_are_not_defaulted(self, step):
+    def test_the_student_is_required_and_the_corpus_not_defaulted(self, step):
+        assert set(step["inputs"]["required"]) == {"student"}
         cfg = step["config"]["eval_config"]
-        assert cfg["student_model"] == ""
+        assert "student_model" not in cfg
         assert cfg["corpus"] == ""
 
-    def test_the_teacher_is_optional_and_empty(self, step):
+    def test_the_teacher_is_an_optional_input(self, step):
         """With no teacher only entropy is computable, and asking for jsd without one is
-        refused rather than defaulted. The emptiness is meaningful."""
-        assert step["config"]["eval_config"]["teacher_model"] == ""
+        refused rather than defaulted. The absence is meaningful."""
+        assert set(step["inputs"]["optional"]) == {"teacher_model"}
+        assert "teacher_model" not in step["config"]["eval_config"]
 
     def test_all_four_metrics_are_requested_by_default(self, step):
         """They are reductions over the SAME pair of logit tensors, so four cost one
