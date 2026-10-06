@@ -197,7 +197,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-tokenizer-align
+        - step_uri: space://steps/distill/tokenizer-align
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -253,7 +253,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: dataset
       steps:
-        - step_uri: space://steps/distill/distill-corpus-prep
+        - step_uri: space://steps/distill/corpus-prep
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -398,7 +398,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-sft
+        - step_uri: space://steps/distill/sft
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -497,7 +497,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-gold
+        - step_uri: space://steps/distill/gold
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -533,7 +533,7 @@ granite.build:
               #   git clone https://github.com/laminair/gb-steps-distillation.git $CODE_DIR
               #   git -C $CODE_DIR checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
               #   cd $CODE_DIR/src/gb_steps_post_training/distillation
-              #   patch -p2 -F3 < <this repo>/steps/distill/distill-gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
+              #   patch -p2 -F3 < <this repo>/steps/distill/gold/skypilot/patches/ce_anchor_and_entropy_guard.diff
               #   git -C $CODE_DIR commit -am "ce anchor and entropy guard"
               code_dir: "$${CODE_DIR}"
               expect_ref: "$${CODE_EXPECT_REF}"
@@ -625,7 +625,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       steps:
-        - step_uri: space://steps/distill/distill-hf-export
+        - step_uri: space://steps/distill/hf-export
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -696,7 +696,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: fileset
       steps:
-        - step_uri: space://steps/distill/distill-eval
+        - step_uri: space://steps/distill/eval
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
@@ -771,7 +771,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: fileset
       steps:
-        - step_uri: space://steps/distill/distill-eval
+        - step_uri: space://steps/distill/eval
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}

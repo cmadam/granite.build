@@ -16,11 +16,11 @@ version: 1.0.0
 # the dependency graph itself the health gate; and a teardown target gated on the
 # trainer's checkpoint downs the cluster.
 #
-# NOT YET RUN ON A CLUSTER. The trainer pushes updated student weights to the
-# server over NCCL, not HTTP (the reference launcher's
-# VLLM_NCCL_COORDINATOR_PORT), so a separate target means a NCCL process group
-# spanning two LSF allocations. Whether that works is the open question, and it is
-# deliberately not hidden: see README.md.
+# The trainer pushes updated student weights to the server over NCCL, not HTTP
+# (the reference launcher's VLLM_NCCL_COORDINATOR_PORT), so a separate target means
+# a NCCL process group spanning two LSF allocations. Build 9973e766 (recipe
+# gold-onpolicy-smoke) showed that works: all 362 parameter tensors synced across
+# the two allocations, and the teardown target ended the server.
 #
 # Division of labour, as in distill-gold: SkyPilot's LSF provisioner owns bsub,
 # enroot and the node topology; deps come from the image; the server code (now
@@ -225,7 +225,9 @@ environment_configs:
             DEADLINE=$(( $(date +%s) + {{ config.vllm_config.health_timeout_seconds }} ))
             while :; do
               if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-                wait "$SERVER_PID"; RC=$?
+                # `|| RC=$?`, not `; RC=$?`: the launcher runs this block under
+                # `set -eu`, so a bare failing wait would exit before the report.
+                RC=0; wait "$SERVER_PID" || RC=$?
                 echo "vllm-server: FATAL: server exited with $RC before becoming healthy" >&2
                 exit 1
               fi
@@ -272,13 +274,14 @@ environment_configs:
                 fi
               ) &
               WATCHDOG_PID=$!
-              wait "$SERVER_PID"
+              RC=0; wait "$SERVER_PID" || RC=$?
               kill "$WATCHDOG_PID" 2>/dev/null || true
               if [ -f "$REAPED_FLAG" ]; then
                 rm -f "$REAPED_FLAG"
                 echo "vllm-server: FATAL: lifetime cap of ${MAX_LIFETIME}s reached; releasing the allocation. Nothing tore this server down in time — check whether the consumer target failed." >&2
                 exit 1
               fi
+              exit "$RC"
             else
               wait "$SERVER_PID"
             fi

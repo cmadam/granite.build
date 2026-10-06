@@ -1,7 +1,10 @@
 # corpus-sources
 
+User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
+released step as its `README.md`.
+
 Builds one prep-ready `train.jsonl` from several raw SFT splits, for
-`distill-corpus-prep` to consume. It does three things, and the rationale for each is
+the `corpus-prep` step to consume. It does three things, and the rationale for each is
 in [`src/build_sources.py`](src/build_sources.py):
 
 1. renames `conversations` to `messages`, the key prep reads;
@@ -13,7 +16,7 @@ in [`src/build_sources.py`](src/build_sources.py):
 
 | key | meaning |
 |---|---|
-| `sources` | list of `.jsonl` paths visible from the compute node; order names the per-split RNG streams |
+| `sources` | list of `.jsonl` paths visible from the compute node; each split's RNG stream is seeded from `shuffle_seed` and the file name, and list order sets the order the final shuffle starts from |
 | `target_rows` | rows to keep in total; `0` keeps every row |
 | `shuffle_seed` | seed for the per-split reservoirs and the final shuffle |
 | `output_dir` | where `train.jsonl` lands; relative paths go under `GB_BUILD_WORKDIR` |
@@ -39,5 +42,5 @@ sources:
           output_dir: /proj/run/sources
 ```
 
-Stdlib-only, CPU-only, and no trainer source, so it does not carry the distill-* steps'
+Stdlib-only, CPU-only, and no trainer source, so it does not carry the other distillation steps'
 `code_config` contract.

@@ -430,7 +430,7 @@ class TestTheTrainerPin:
             _RECIPE.parents[3]
             / "steps"
             / "distill"
-            / "distill-gold"
+            / "gold"
             / "skypilot"
             / "patches"
             / "ce_anchor_and_entropy_guard.diff"

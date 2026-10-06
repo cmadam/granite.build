@@ -26,7 +26,7 @@ Three differences from the legacy asset are deliberate, not oversights:
 
 | Legacy asset | Here | Why |
 |---|---|---|
-| `type: EVAL` | `type: custom` | There is no `EVAL` member in `gbcommon.types.stepconfig.StepType`; the values are `data_processing`, `data_generation`, `training`, `tuning`, `custom`. `type` is a free string, so `EVAL` neither errors nor validates — it is simply not a type. Follows [distill-eval](../../distill-eval/skypilot/step-template.yaml), which reasoned this through first. `steps/eval` still says `EVAL`; that is left alone here rather than changed under cover of an unrelated step. |
+| `type: EVAL` | `type: custom` | There is no `EVAL` member in `gbcommon.types.stepconfig.StepType`; the values are `data_processing`, `data_generation`, `training`, `tuning`, `custom`. `type` is a free string, so `EVAL` neither errors nor validates — it is simply not a type. Follows [distill-eval](../../distill/eval/skypilot/step-template.yaml), which reasoned this through first. `steps/eval` still says `EVAL`; that is left alone here rather than changed under cover of an unrelated step. |
 | `outputs.optional.bfcl_results` | `outputs.required.bfcl_results` | The step exits 1 when the harness leaves no score file, so a successful run always has one. `optional` on an always-present output only lets a real failure complete green. |
 | `config.workload.cwd` / `hf_home` | `config.bfcl_config.hf_home` | `config.workload` is parsed as `StepConfigWorkloadSection` (`path`/`args`/`workspace_dir`/`output_dir`/`python_env`). Pydantic **ignores** unknown keys there, so both of those settings have never had any effect. |
 

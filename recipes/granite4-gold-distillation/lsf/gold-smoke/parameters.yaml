@@ -31,7 +31,7 @@ IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
 # nothing and the loss would be computed over the wrong span — silently. Shrinking
 # context and data is safe; shrinking the pair is not. For how to group the overlays
 # by tokenizer — not discoverable from the names — see
-# ../../../../steps/distill/distill-gold/skypilot/USAGE.md#choosing-a-studentteacher-pair.
+# ../../../../steps/distill/gold/skypilot/USAGE.md#choosing-a-studentteacher-pair.
 TEACHER_MODEL: "/proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
 STUDENT_MODEL: "/proj/granite-build/g4os/kd-sandbox/student_overlays/granite-4.1-3b-base-hub"
 # A 2000-row head slice of the reference dataset

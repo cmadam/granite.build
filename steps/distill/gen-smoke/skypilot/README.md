@@ -1,5 +1,8 @@
 # gen-smoke
 
+User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
+released step as its `README.md`.
+
 Greedy-decodes eight raw prompts (code in five languages, three short prose prompts)
 from each exported checkpoint of a ladder and measures the fraction of generated lines
 inside a run of three or more identical lines. That is the failure build df8512e0's

@@ -1,10 +1,13 @@
 # corpus-pin-check
 
+User-facing documentation is [USAGE.md](USAGE.md), which `make publish-step` copies to the
+released step as its `README.md`.
+
 Refuses a pinned corpus whose `corpus_manifest.json` does not describe this build,
 before any GPU allocation is held. The comparisons, and why each one exists, are in
 [`src/check_corpus_pin.py`](src/check_corpus_pin.py):
 
-- `train.jsonl` and `eval.jsonl` are both present;
+- `train.jsonl` is present, and `eval.jsonl` too when `eval_fraction > 0`;
 - the manifest's `tokenizer_identity` is the basename of this build's teacher;
 - `max_length`, `think_policy`, `documents_policy` and `completion_boundary`
   (always `last_message`) match;

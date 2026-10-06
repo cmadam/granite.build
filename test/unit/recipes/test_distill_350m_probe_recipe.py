@@ -17,7 +17,7 @@
 """Unit tests for the distill-probe recipe.
 
 Every target runs the ``distill-probe`` step; the probes and the tests of their logic
-live with the step (steps/distill/distill-probe/skypilot). What the recipe owns is the
+live with the step (steps/distill/probe/skypilot). What the recipe owns is the
 wiring -- which probe each target asks for, against which checkpoint -- so each target's
 config is rendered through the PUBLISHED step template and run against a stand-in
 interpreter that records its argv.
@@ -85,7 +85,7 @@ def test_no_probe_declares_an_output(build):
 def test_every_target_runs_the_probe_step(build, name):
     """No inline scripts: the recipe passes configuration, the step holds the code."""
     step = _step(build, name)
-    assert step["step_uri"] == "space://steps/distill/distill-probe"
+    assert step["step_uri"] == "space://steps/distill/probe"
     assert "command_config" not in step["config"]
 
 
@@ -116,7 +116,7 @@ def test_each_target_asks_its_own_probe_of_the_same_checkpoint(build, name, tmp_
     )
     stub.chmod(0o755)
     script, step_dir = render_run(
-        "distill/distill-probe",
+        "distill/probe",
         _step(build, name)["config"],
         probe_config={"python": str(stub)},
     )
