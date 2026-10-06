@@ -12,6 +12,9 @@
 #   RERUN_EVALS   individual evals that FAILED on rungs that were otherwise measured.
 #                 Only those evals run again, then their results are merged into the
 #                 rung's existing sage result directory and the rung's CSV is written.
+#   RERUN_BFCL    rungs whose BFCL eval FAILED. BFCL is not in EVAL_CATALOG, so it has
+#                 its own list: eval-bfcl-ck<N> on the existing export, then the rung's
+#                 BFCL CSV. Optional; empty or absent re-runs no BFCL.
 #
 # WHY RE-RUN EVALS DO NOT WRITE STRAIGHT INTO THE ORIGINAL RESULT DIRECTORY
 #
@@ -43,12 +46,14 @@
 #     --param CKPT_SRC_DIR=<.../runs/<run>/checkpoints/<RUN_NAME>_node<N>> \
 #     --param NEW_RUNGS=1500 \
 #     --param RERUN_EVALS='1000:multiple-js,salad-bench;2000:attaq' \
+#     --param RERUN_BFCL=2000 \
 #     --param RERUN_SAGE_DIR=/proj/granite-build/g4os/sage-rerun/<tag> \
 #     --param OE_EVAL_BCB_API_URL=<bcb-server url>
 ######
 <% set CATS = (EVAL_CATEGORIES | string | replace(" ", "") | lower).split(",") %>
 <% set NEW = (NEW_RUNGS | string | replace(" ", "")).split(",") if NEW_RUNGS | string | trim else [] %>
 <% set RERUN = (RERUN_EVALS | string | replace(" ", "")).split(";") if RERUN_EVALS | string | trim else [] %>
+<% set RERUN_B = (RERUN_BFCL | default("") | string | replace(" ", "")).split(",") if RERUN_BFCL | default("") | string | trim else [] %>
 <% set SAGE_NAMES = [] %>
 <% for e in EVAL_CATALOG %><% if e.category in CATS %><% set _ = SAGE_NAMES.append(e.name) %><% endif %><% endfor %>
 granite.build:
@@ -422,6 +427,70 @@ granite.build:
                 memory: $${EXPORT_MEMORY}
 <% endfor %>
 
+    # ═══ RERUN_BFCL: a failed BFCL eval on an otherwise-measured rung ═══════════
+    # Written straight to the original BFCL location, unlike the sage re-runs, because
+    # nothing else is there to merge with: one BFCL eval per rung, and bfcl-export reads
+    # only its own experiment's directory. Check first that the failed eval registered no
+    # output URI (`gb build status`), or this one's binding is dropped as a duplicate.
+<% for N in RERUN_B %>
+    eval-bfcl-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        model:
+          uri: "env://$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+          type: model
+      outputs:
+        bfcl_results:
+          type: dataset
+          uri: "env://$${BFCL_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${N}/$${BFCL_EVAL_NAME}"
+      steps:
+        - step_uri: space://steps/bfcl-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            bfcl_config:
+              model_path: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+              model_id: "$${BFCL_MODEL_ID}"
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              test_categories: "$${BFCL_TEST_CATEGORIES}"
+              num_gpus_generate: $${BFCL_NUM_GPUS}
+              num_gpus_evaluate: $${BFCL_NUM_GPUS}
+              gpu_memory_utilization: "$${BFCL_GPU_MEMORY_UTILIZATION}"
+              output_dir: "$${BFCL_OUTPUT_DIR}"
+            launcher_config:
+              resources:
+                accelerators: "H100:$${BFCL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${GPU_MEMORY}
+
+    export-bfcl-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        gate_bfcl:
+          binding: eval-bfcl-ck$${N}.bfcl_results
+      outputs:
+        bfcl_export_csv:
+          type: dataset
+          uri: "env://$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+      steps:
+        - step_uri: space://steps/bfcl-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            bfcl_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              input_dir: "$${BFCL_OUTPUT_DIR}"
+              output_csv: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+              filter: "$${BFCL_FILTER}"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endfor %>
+
     # ─── export-combined ─────────────────────────────────────────────────────
     # Pivots EVERY per-rung CSV in the experiment's results directory, including the
     # ones the original build already wrote, so it is the whole run's table. Gated on
@@ -445,6 +514,10 @@ granite.build:
 <% for spec in RERUN %>
         gate_sage_$${spec.split(":")[0]}:
           binding: export-sage-ck$${spec.split(":")[0]}.sage_export_csv
+<% endfor %>
+<% for N in RERUN_B %>
+        gate_bfcl_$${N}:
+          binding: export-bfcl-ck$${N}.bfcl_export_csv
 <% endfor %>
       outputs:
         combined_csv:
