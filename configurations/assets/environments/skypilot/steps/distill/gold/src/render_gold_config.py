@@ -578,6 +578,33 @@ _TRAINER_EXTENSION_KEYS = frozenset(
 )
 
 
+def _unwrap_trl_availability_flags() -> None:
+    """Undo TRL's tuple-valued package guards before anything imports the GOLD trainer.
+
+    transformers>=4.57 makes _is_package_available() return (bool, version), and TRL 0.26
+    stores that tuple raw as _vllm_ascend_available. A non-empty tuple is truthy, so
+    is_vllm_ascend_available() reports the absent package as present, and importing
+    trl.experimental.gold (whose __init__ pulls in gold_trainer -> extras.vllm_client)
+    runs `from vllm_ascend ... import`. That raises ModuleNotFoundError, which the import
+    below would misreport as gb_steps_post_training not being importable -- it cost the
+    ck2500 lmbda-ramp arms (fe650626, ae922fd7) four allocations on 2026-10-05.
+
+    The trainer's own entry point (gb_steps_post_training/distillation/sft.py) applies this
+    same unwrap before its TRL imports; this script imports the package without going
+    through it, so it has to apply it itself. getattr with a default because the attribute
+    is gone on TRL main, where there is nothing to unwrap.
+    """
+    try:
+        import trl.import_utils as trl_import_utils  # noqa: PLC0415
+    except ImportError:
+        # No TRL at all: the CustomGOLDConfig import below reports that, by name.
+        return
+    for attr in ("_mergekit_available", "_vllm_ascend_available"):
+        value = getattr(trl_import_utils, attr, None)
+        if isinstance(value, tuple):
+            setattr(trl_import_utils, attr, value[0])
+
+
 def check_trainer_accepts(config: Dict[str, Any]) -> None:
     """Refuse to emit a key the delivered trainer's dataclass does not define.
 
@@ -606,6 +633,7 @@ def check_trainer_accepts(config: Dict[str, Any]) -> None:
     if not requested:
         return
 
+    _unwrap_trl_availability_flags()
     try:
         from gb_steps_post_training.distillation.custom_gold_config import (  # noqa: PLC0415
             CustomGOLDConfig,

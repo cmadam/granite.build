@@ -933,3 +933,95 @@ class TestOnPolicyShapingKeys:
 
     def test_an_unknown_schedule_is_refused(self, tmp_path):
         _render(tmp_path, extra=["--lmbda-schedule", "cosine"], expect_rc=2)
+
+
+class TestTrainerKeyCheck:
+    """--verify-trainer-accepts-keys imports the delivered CustomGOLDConfig, and through it
+    TRL. Faked here so the suite needs neither: the fake TRL keeps the (bool, version) tuple
+    TRL 0.26 stores for _vllm_ascend_available under transformers>=4.57, and the fake
+    trainer imports vllm_ascend behind that guard the way trl.extras.vllm_client does.
+    Without the unwrap, the import fails and the renderer misreports it as the package
+    being missing -- what killed the ck2500 lmbda-ramp arms (fe650626, ae922fd7)."""
+
+    _RAMP = [
+        "--vllm-num-servers",
+        "1",
+        "--lmbda",
+        "0.75",
+        "--lmbda-schedule",
+        "linear",
+        "--lmbda-init",
+        "0.25",
+        "--verify-trainer-accepts-keys",
+        "true",
+    ]
+
+    @staticmethod
+    def _fake_packages(root, ascend_flag='(False, "N/A")', fields=None):
+        fields = fields or {"lmbda_schedule": '"constant"', "lmbda_init": "0.0"}
+        (root / "trl").mkdir(parents=True)
+        (root / "trl" / "__init__.py").write_text("")
+        (root / "trl" / "import_utils.py").write_text(
+            f"_vllm_ascend_available = {ascend_flag}\n"
+            '_mergekit_available = (False, "N/A")\n'
+        )
+        dist = root / "gb_steps_post_training" / "distillation"
+        dist.mkdir(parents=True)
+        (root / "gb_steps_post_training" / "__init__.py").write_text("")
+        (dist / "__init__.py").write_text("")
+        body = "".join(
+            f"    {name}: object = {value}\n" for name, value in fields.items()
+        )
+        (dist / "custom_gold_config.py").write_text(
+            "from dataclasses import dataclass\n"
+            "from trl import import_utils\n"
+            "if import_utils._vllm_ascend_available:\n"
+            "    import vllm_ascend  # noqa: F401\n"
+            "@dataclass\n"
+            "class CustomGOLDConfig:\n" + body
+        )
+        return root
+
+    @staticmethod
+    def _render_with(tmp_path, pythonpath, extra):
+        out = tmp_path / "gold_config.yaml"
+        cmd = [sys.executable, str(_RENDER), "--output", str(out), "--total-nodes", "2"]
+        for flag, value in _REQUIRED.items():
+            cmd += [flag, value]
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["PYTHONPATH"] = str(pythonpath)
+        result = subprocess.run(
+            cmd + extra, capture_output=True, text=True, check=False, env=env
+        )
+        return result, out
+
+    def test_a_tuple_guard_does_not_masquerade_as_a_missing_package(self, tmp_path):
+        """The regression: the exact environment of the delivered image."""
+        pkgs = self._fake_packages(tmp_path / "pkgs")
+        result, out = self._render_with(tmp_path, pkgs, self._RAMP)
+        assert result.returncode == 0, result.stderr
+        config = yaml.safe_load(out.read_text())
+        assert config["lmbda_schedule"] == "linear"
+        assert config["lmbda_init"] == pytest.approx(0.25)
+
+    def test_a_plain_bool_guard_still_passes(self, tmp_path):
+        """TRL versions that store a bool must not be disturbed by the unwrap."""
+        pkgs = self._fake_packages(tmp_path / "pkgs", ascend_flag="False")
+        result, _ = self._render_with(tmp_path, pkgs, self._RAMP)
+        assert result.returncode == 0, result.stderr
+
+    def test_a_trainer_without_the_fields_is_still_refused(self, tmp_path):
+        """The unwrap must not turn the check into a pass: it exists to refuse this."""
+        pkgs = self._fake_packages(
+            tmp_path / "pkgs", fields={"lmbda_schedule": '"constant"'}
+        )
+        result, out = self._render_with(tmp_path, pkgs, self._RAMP)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "has no field(s) lmbda_init" in result.stderr
+        assert not out.exists()
+
+    def test_no_trl_at_all_is_still_reported_as_not_importable(self, tmp_path):
+        result, out = self._render_with(tmp_path, tmp_path / "empty", self._RAMP)
+        assert result.returncode == 2, result.stdout + result.stderr
+        assert "gb_steps_post_training is not importable" in result.stderr
+        assert not out.exists()
