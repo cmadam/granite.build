@@ -492,6 +492,39 @@ class TestLaunchSkypilot:
         mock_sky.stream_and_get.assert_called_once_with("req-123")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "infra, ssh_hpc, lsf_cluster",
+        [
+            ("lsf/bluevela/normal", True, "bluevela"),
+            ("slurm/mycluster/gpu", True, None),
+            ("k8s", False, None),
+            ("aws", False, None),
+        ],
+    )
+    async def test_launch_registers_the_poll_failure_grace(
+        self, skypilot_env, infra, ssh_hpc, lsf_cluster
+    ):
+        """What switches the poll loop's grace and `bjobs` check on in
+        production: an SSH HPC launch registers for the grace, and an LSF one
+        also records the ~/.lsf/config host to ask."""
+        mock_sky = MagicMock()
+        mock_sky.launch = MagicMock(return_value="req-123")
+        mock_sky.stream_and_get = MagicMock(return_value=(42, MagicMock()))
+        launch_id = "test-launch-hpc"
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        ):
+            skypilot_env._get_launch_ready_event(launch_id)
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi", "resources": {"infra": infra}},
+                config={},
+            )
+        assert (launch_id in skypilot_env._ssh_hpc_launches) is ssh_hpc
+        assert skypilot_env._lsf_clusters.get(launch_id) == lsf_cluster
+
+    @pytest.mark.asyncio
     async def test_launch_embeds_target_and_build_in_cluster_name(self, skypilot_env):
         mock_sky = MagicMock()
         mock_sky.Resources = MagicMock(return_value=MagicMock())
@@ -2027,6 +2060,49 @@ class TestInlineConfigMaterialization:
 
                 _reload_skypilot_client_config()
                 assert sent() == "select[hname!='old-host'&&hname!='new-host']"
+            finally:
+                mp.undo()
+                skypilot_config.reload_config()
+
+    def test_reload_never_exposes_an_empty_config(self, tmp_path):
+        """SkyPilot's own client reload empties the loaded config before
+        re-reading the files; a concurrent build's request in that window would
+        send no override at all. Every read during the reload must still see
+        the old config."""
+        pytest.importorskip("sky")
+        from sky import skypilot_config
+
+        from gbserver.environment.skypilot import _reload_skypilot_client_config
+
+        cfg = tmp_path / "config.yaml"
+        key = ("lsf", "cluster_configs", "bluevela", "bsub_options", "R")
+
+        def write(select):
+            cfg.write_text(
+                "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+                f'        R: "{select}"\n'
+            )
+
+        seen_mid_reload = []
+        real_get = skypilot_config._get_config_from_path
+
+        def spying_get(path):
+            seen_mid_reload.append(skypilot_config.to_dict().get_nested(key, None))
+            return real_get(path)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("SKYPILOT_GLOBAL_CONFIG", str(cfg))
+            mp.delenv("SKYPILOT_CONFIG", raising=False)
+            mp.delenv("IS_SKYPILOT_SERVER", raising=False)
+            mp.chdir(tmp_path)
+            try:
+                write("old")
+                _reload_skypilot_client_config()
+                write("new")
+                mp.setattr(skypilot_config, "_get_config_from_path", spying_get)
+                _reload_skypilot_client_config()
+                assert seen_mid_reload and set(seen_mid_reload) == {"old"}
+                assert skypilot_config.to_dict().get_nested(key, None) == "new"
             finally:
                 mp.undo()
                 skypilot_config.reload_config()
