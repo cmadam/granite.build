@@ -8,15 +8,14 @@ LSF a direct ``bjobs`` check gets the last word until a hard ceiling.
 """
 
 import asyncio
-import inspect
-import re
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from gbserver.environment import skypilot as skypilot_mod
 from gbserver.environment.skypilot import Skypilot
+from gbserver.types.buildevent import BuildEventType, EntityRunMetadata
 from gbserver.types.environmentconfig import EnvironmentConfig
 from gbserver.types.errors import WorkloadFailedException
 
@@ -181,7 +180,7 @@ class TestGracePeriod:
         probe.assert_not_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("bad", ["nan", "inf", float("nan"), "-5", "soon"])
+    @pytest.mark.parametrize("bad", ["nan", "inf", float("nan"), "-5", "soon", True])
     async def test_a_bad_grace_falls_back_to_the_default(self, slurm_env, bad):
         """``nan`` would make every ``>=`` test False: a monitor that never
         gives up, with nothing else on SLURM to end it."""
@@ -224,10 +223,15 @@ class TestOtherClouds:
         assert 5 <= sky.job_status.call_count <= 7
 
 
+# The name SkyPilot submitted the job under, as the launch records it.
+JOB = "gb-train-l1-0a1b2c3d"
+
+
 class TestLsfProbe:
     @pytest.fixture(autouse=True)
     def _lsf(self, lsf_env):
         lsf_env._lsf_clusters["l1"] = "bluevela"
+        lsf_env._lsf_job_names["l1"] = JOB
 
     @pytest.mark.asyncio
     async def test_lsf_saying_gone_is_final_right_after_the_grace(self, lsf_env):
@@ -238,7 +242,7 @@ class TestLsfProbe:
             await _poll(
                 lsf_env, sky, clock, probe=probe, poll_failure_grace_seconds=300
             )
-        probe.assert_called_once_with("bluevela", "gb-train-l1")
+        probe.assert_called_once_with("bluevela", JOB)
 
     @pytest.mark.asyncio
     async def test_lsf_saying_alive_keeps_the_cluster_until_the_ceiling(self, lsf_env):
@@ -262,7 +266,7 @@ class TestLsfProbe:
         assert 10 <= probe.call_count <= 12
         # At the ceiling the job is bkill-ed: sky.down cannot reach a cluster
         # SkyPilot has no record of, so the retry would otherwise run beside it.
-        kill.assert_called_once_with("bluevela", "gb-train-l1")
+        kill.assert_called_once_with("bluevela", JOB)
 
     @pytest.mark.asyncio
     async def test_no_bkill_before_the_ceiling(self, lsf_env):
@@ -301,6 +305,80 @@ class TestLsfProbe:
                 ),
                 timeout=10,
             )
+
+    @pytest.mark.asyncio
+    async def test_failed_bkill_says_why_and_stops_the_log_stream(self, lsf_env):
+        """The no-retry raise leaves through the same door as a terminal
+        status: the live log stream is stopped, and a MESSAGE says what to do.
+        No FAILED WORKLOAD_STATUS event, which is what a RetryHandler acts on."""
+        clock = _Clock(step=60)
+        running = MagicMock()
+        running.is_terminal.return_value = False
+        running.__str__ = lambda self: "JobStatus.RUNNING"
+        sky, _ = _sky([running] + [SSH] * 500, clock)
+        stream_task = asyncio.create_task(asyncio.sleep(60))
+        event_q = asyncio.Queue()
+        with (
+            patch.object(
+                lsf_env,
+                "_start_log_stream_task",
+                MagicMock(return_value=(stream_task, MagicMock())),
+            ),
+            pytest.raises(WorkloadFailedException, match="without a retry"),
+        ):
+            await _poll(
+                lsf_env,
+                sky,
+                clock,
+                probe=MagicMock(return_value=True),
+                kill=MagicMock(return_value=False),
+                poll_failure_grace_seconds=300,
+                poll_failure_max_seconds=1800,
+                event_q=event_q,
+                entityrun_metadata=EntityRunMetadata(build_id="b1"),
+                event_configs=[
+                    {"event_type": "MESSAGE_EVENT", "line_regex": "never matches"}
+                ],
+                log_retrieval={"mode": "stream"},
+            )
+        assert stream_task.cancelled()
+        events = [event_q.get_nowait() for _ in range(event_q.qsize())]
+        assert not [e for e in events if e.type is BuildEventType.WORKLOAD_STATUS_EVENT]
+        assert "bkill it by hand" in events[-1].payload.msg
+
+    @pytest.mark.asyncio
+    async def test_failed_bkill_never_reaches_the_retry_handler(self, lsf_env):
+        """End to end through monitor_skypilot_monitor and a real
+        RetryHandler: the step fails, and retry_workload is never called."""
+        clock = _Clock(step=60)
+        sky, _ = _sky([SSH] * 500, clock)
+        lsf_env._release_monitors("l1")
+        event_q = asyncio.Queue()
+        retry = AsyncMock()
+        with (
+            patch.object(skypilot_mod, "sky", sky),
+            patch.object(skypilot_mod, "HAS_SKYPILOT", True),
+            patch.object(skypilot_mod, "_poll_failure_clock", clock),
+            patch.object(skypilot_mod, "_lsf_job_alive", MagicMock(return_value=True)),
+            patch.object(
+                skypilot_mod, "_lsf_cancel_job", MagicMock(return_value=False)
+            ),
+            patch.object(lsf_env, "retry_workload", retry),
+            pytest.raises(WorkloadFailedException, match="without a retry"),
+        ):
+            await asyncio.wait_for(
+                lsf_env.monitor_skypilot_monitor(
+                    launch_id="l1",
+                    event_q=event_q,
+                    entityrun_metadata=EntityRunMetadata(build_id="b1"),
+                    poll_interval=0,
+                    poll_failure_grace_seconds=300,
+                    poll_failure_max_seconds=1800,
+                ),
+                timeout=10,
+            )
+        assert lsf_env._get_retry_strategies(), "no RetryHandler was created"
+        retry.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_ceiling_below_the_grace_is_the_grace(self, lsf_env):
@@ -354,6 +432,32 @@ class TestLsfProbe:
         assert sky.job_status.call_count == 7
 
     @pytest.mark.asyncio
+    async def test_a_hung_login_node_does_not_starve_another_cluster(self):
+        """Each timed-out call keeps its thread. If every LSF cluster shared one
+        pool, a login node that hangs every call would fill it, and a healthy
+        cluster's `bjobs` -- and its bkill at the ceiling -- would time out in
+        the queue."""
+        release = threading.Event()
+
+        def hung(_cluster):
+            release.wait(5)
+
+        try:
+            with (
+                patch.object(skypilot_mod, "_LSF_COMMAND_TIMEOUT_SECONDS", 0.05),
+                patch.dict(skypilot_mod._LSF_EXECUTORS, clear=True),
+            ):
+                for _ in range(8):  # more than one pool's worth of threads
+                    with pytest.raises(asyncio.TimeoutError):
+                        await skypilot_mod._run_lsf_call(hung, "hung-cluster")
+                result = await skypilot_mod._run_lsf_call(
+                    lambda cluster, name: (cluster, name), "healthy", JOB
+                )
+        finally:
+            release.set()
+        assert result == ("healthy", JOB)
+
+    @pytest.mark.asyncio
     async def test_lsf_unreachable_is_treated_like_alive(self, lsf_env):
         """SSH down to the login node too: no evidence the job is dead."""
         clock = _Clock(step=60)
@@ -402,48 +506,45 @@ class TestLsfJobAlive:
             patch("sky.adaptors.lsf.LsfClient", return_value=client),
             patch("sky.provision.lsf.utils.get_lsf_ssh_config", return_value=ssh_cfg),
         ):
-            result = (func or skypilot_mod._lsf_job_alive)("bluevela", "gb-train-l1")
+            result = (func or skypilot_mod._lsf_job_alive)("bluevela", JOB)
         return result, client
 
     def test_running_job_is_alive(self):
         result, client = self._run(["RUN"])
         assert result is True
-        client.get_jobs_state_by_name.assert_called_once_with(
-            skypilot_mod._lsf_job_name("gb-train-l1")
-        )
+        client.get_jobs_state_by_name.assert_called_once_with(JOB)
 
-    def test_job_name_is_the_one_skypilot_submits(self):
-        """bjobs must look up the exact name SkyPilot's LSF provisioner
-        passes to ``bsub -J``: its cluster_name_on_cloud. A mismatch finds
-        nothing and reads as "gone" -- the direction that tears a run down.
-        Built here the way SkyPilot's backend builds it, from a name that
-        exercises the rewriting (case, ``_``, ``.``)."""
+    def test_unrecorded_job_name_falls_back_to_skypilots_rewriting(self):
+        """Only when a launch recorded no name: bjobs must then look up the
+        name SkyPilot's LSF provisioner passes to ``bsub -J``, its
+        cluster_name_on_cloud, built from a display name that exercises the
+        rewriting (case, ``_``, ``.``)."""
         pytest.importorskip("sky")
-        from sky import clouds
-        from sky.backends import backend_utils
         from sky.utils import common_utils
 
         display = "gb-My_Build.v2-train-3168aa02-123"
-        on_cloud = common_utils.make_cluster_name_on_cloud(
-            display, max_length=clouds.LSF.max_cluster_name_length()
+        tracker = skypilot_mod._PollFailureTracker(
+            display, grace=0, ceiling=0, ssh_hpc=True, lsf_cluster="bluevela"
         )
-        assert skypilot_mod._lsf_job_name(display) == on_cloud
-        assert on_cloud == (
+        assert tracker.lsf_job_name == (
             f"gb-my-build-v2-train-3168aa02-123-{common_utils.get_user_hash()}"
         )
-        # The backend still names clusters with this exact call.
-        assert re.search(
-            r"make_cluster_name_on_cloud\(\s*cluster_name,\s*"
-            r"max_length=cloud\.max_cluster_name_length\(\)\s*\)",
-            inspect.getsource(backend_utils.write_cluster_config),
+
+    def test_recorded_job_name_wins(self):
+        tracker = skypilot_mod._PollFailureTracker(
+            "gb-train-l1",
+            grace=0,
+            ceiling=0,
+            ssh_hpc=True,
+            lsf_cluster="bluevela",
+            lsf_job_name=JOB,
         )
+        assert tracker.lsf_job_name == JOB
 
     def test_bkill_targets_the_same_job(self):
         result, client = self._run(func=skypilot_mod._lsf_cancel_job)
         assert result is True
-        client.cancel_jobs_by_name.assert_called_once_with(
-            skypilot_mod._lsf_job_name("gb-train-l1")
-        )
+        client.cancel_jobs_by_name.assert_called_once_with(JOB)
 
     def test_bkill_ssh_failure_is_false(self):
         result, _ = self._run(
@@ -474,6 +575,7 @@ async def test_cleanup_forgets_the_hpc_registration(lsf_env):
     """A relaunch re-registers from its own infra; a stale entry would give a
     k8s relaunch the LSF grace and `bjobs` check."""
     lsf_env._lsf_clusters["l1"] = "bluevela"
+    lsf_env._lsf_job_names["l1"] = JOB
     with (
         patch.object(skypilot_mod, "HAS_SKYPILOT", True),
         patch.object(skypilot_mod, "sky", MagicMock()),
@@ -481,6 +583,7 @@ async def test_cleanup_forgets_the_hpc_registration(lsf_env):
     ):
         await lsf_env.cleanup_skypilot(launch_id="l1")
     assert "l1" not in lsf_env._lsf_clusters
+    assert "l1" not in lsf_env._lsf_job_names
     assert "l1" not in lsf_env._ssh_hpc_launches
 
 

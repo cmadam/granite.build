@@ -509,7 +509,9 @@ class TestLaunchSkypilot:
         also records the ~/.lsf/config host to ask."""
         mock_sky = MagicMock()
         mock_sky.launch = MagicMock(return_value="req-123")
-        mock_sky.stream_and_get = MagicMock(return_value=(42, MagicMock()))
+        # The handle carries the name SkyPilot submitted the LSF job under.
+        handle = MagicMock(cluster_name_on_cloud="gb-test-launch-hpc-0a1b2c3d")
+        mock_sky.stream_and_get = MagicMock(return_value=(42, handle))
         launch_id = "test-launch-hpc"
         with (
             patch("gbserver.environment.skypilot.sky", mock_sky),
@@ -523,6 +525,9 @@ class TestLaunchSkypilot:
             )
         assert (launch_id in skypilot_env._ssh_hpc_launches) is ssh_hpc
         assert skypilot_env._lsf_clusters.get(launch_id) == lsf_cluster
+        assert skypilot_env._lsf_job_names.get(launch_id) == (
+            "gb-test-launch-hpc-0a1b2c3d" if lsf_cluster else None
+        )
 
     @pytest.mark.asyncio
     async def test_launch_embeds_target_and_build_in_cluster_name(self, skypilot_env):
@@ -2106,6 +2111,56 @@ class TestInlineConfigMaterialization:
             finally:
                 mp.undo()
                 skypilot_config.reload_config()
+
+    def test_reload_matches_skypilots_own_reload(self, tmp_path):
+        """Drift guard: the replica must load what SkyPilot's own client reload
+        loads from the same files -- user and project layers, overlay order,
+        recorded paths. The SkyPilot pin is a moving tag."""
+        pytest.importorskip("sky")
+        from sky import skypilot_config
+
+        from gbserver.environment.skypilot import _reload_skypilot_client_config
+
+        user = tmp_path / "config.yaml"
+        user.write_text(
+            "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+            '        R: "user"\n        q: "normal"\n'
+            "jobs:\n  controller:\n    resources:\n      cpus: 2\n"
+        )
+        # The project file overrides one nested key and adds another.
+        (tmp_path / ".sky.yaml").write_text(
+            "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+            '        R: "project"\n'
+            "kubernetes:\n  pod_config:\n    metadata:\n      labels:\n"
+            "        team: gb\n"
+        )
+
+        def loaded():
+            return (
+                skypilot_config.to_dict(),
+                skypilot_config.loaded_config_path(),
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("SKYPILOT_GLOBAL_CONFIG", str(user))
+            mp.delenv("SKYPILOT_CONFIG", raising=False)
+            mp.delenv("IS_SKYPILOT_SERVER", raising=False)
+            mp.chdir(tmp_path)
+            try:
+                skypilot_config.reload_config()
+                theirs = loaded()
+                _reload_skypilot_client_config()
+                ours = loaded()
+            finally:
+                mp.undo()
+                skypilot_config.reload_config()
+        assert ours == theirs
+        assert (
+            theirs[0].get_nested(
+                ("lsf", "cluster_configs", "bluevela", "bsub_options", "R"), None
+            )
+            == "project"
+        ), "the project layer did not load; the test proves nothing"
 
     @pytest.mark.asyncio
     async def test_ssh_materialized_per_launch(self):

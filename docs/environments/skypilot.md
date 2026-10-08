@@ -442,7 +442,15 @@ dual-accept the legacy `LLMB_` prefix) to the job log. These config keys shape i
   `bjobs` directly (at most every 5 min): a job LSF reports as gone is final, one it reports alive (or
   cannot be asked about) is kept until the ceiling (default **7200s**). At the ceiling the job is
   `bkill`-ed before the retry; if the `bkill` fails too, the step fails **without** a retry so two
-  allocations are never held. Values must be finite and non-negative.
+  allocations are never held. Values must be finite, non-negative numbers (a boolean is rejected);
+  anything else falls back to the default.
+  - A ceiling of **0** (or any value at or below the grace) means "`bkill` as soon as the grace is
+    over", with no `bjobs` check in between.
+  - A `bkill` LSF accepts does not always free the allocation at once: a job in `UNKWN` (its
+    execution host unreachable) moves to `ZOMBI` and keeps its hosts until LSF reaches them again, so
+    the retry can briefly overlap it.
+  - SLURM has no counterpart yet: after the grace a SLURM cluster is declared gone and handed to the
+    retry handler without an `scancel`, so an allocation SkyPilot lost track of is not killed.
 
 #### Log retrieval modes
 

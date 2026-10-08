@@ -203,46 +203,55 @@ _poll_failure_clock = time.monotonic
 
 # Threads for the `bjobs` / `bkill` calls, kept off the loop's shared default
 # pool: a call that outlives _LSF_COMMAND_TIMEOUT_SECONDS is abandoned, not
-# killed, and must not hold a slot other offloaded work needs. Bounded, so a
-# login node that hangs every call cannot grow it without limit -- once all
-# workers are stuck, later calls time out in the queue and read as "unknown".
-_LSF_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+# killed, and must not hold a slot other offloaded work needs. One pool per LSF
+# cluster (~/.lsf/config host), so a login node that hangs every call fills only
+# its own pool and cannot starve another cluster's checks. Bounded, so that hung
+# login node cannot grow its pool without limit -- once all its workers are
+# stuck, its later calls time out in the queue and read as "unknown".
+_LSF_EXECUTORS: Dict[str, concurrent.futures.ThreadPoolExecutor] = {}
 _LSF_EXECUTOR_LOCK = threading.Lock()
 
 
-def _get_lsf_executor() -> concurrent.futures.ThreadPoolExecutor:
-    """Return the thread pool for LSF login-node calls, creating it once."""
-    global _LSF_EXECUTOR
-    if _LSF_EXECUTOR is None:
-        with _LSF_EXECUTOR_LOCK:
-            if _LSF_EXECUTOR is None:
-                _LSF_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=4, thread_name_prefix="gb-lsf-probe"
-                )
-    return _LSF_EXECUTOR
+def _get_lsf_executor(lsf_cluster: str) -> concurrent.futures.ThreadPoolExecutor:
+    """Return the thread pool for one LSF cluster's login-node calls, creating
+    it once."""
+    with _LSF_EXECUTOR_LOCK:
+        executor = _LSF_EXECUTORS.get(lsf_cluster)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix=f"gb-lsf-{lsf_cluster}"
+            )
+            _LSF_EXECUTORS[lsf_cluster] = executor
+    return executor
 
 
-async def _run_lsf_call(func: Callable[..., Any], *args: Any) -> Any:
-    """Run a blocking LSF login-node call with a time limit.
+async def _run_lsf_call(func: Callable[..., Any], lsf_cluster: str, *args: Any) -> Any:
+    """Run a blocking call against one LSF cluster's login node, on that
+    cluster's pool and with a time limit. ``lsf_cluster`` is also passed to
+    ``func`` as its first argument.
 
     :raises asyncio.TimeoutError: if it takes over _LSF_COMMAND_TIMEOUT_SECONDS.
         The worker thread is left to finish on its own.
     """
     loop = asyncio.get_running_loop()
     return await asyncio.wait_for(
-        loop.run_in_executor(_get_lsf_executor(), functools.partial(func, *args)),
+        loop.run_in_executor(
+            _get_lsf_executor(lsf_cluster),
+            functools.partial(func, lsf_cluster, *args),
+        ),
         timeout=_LSF_COMMAND_TIMEOUT_SECONDS,
     )
 
 
 def _lsf_job_name(cluster_name: str) -> str:
-    """The LSF job name SkyPilot gives a cluster's allocation.
+    """The LSF job name SkyPilot gives a cluster's allocation, recomputed here.
 
-    SkyPilot submits the job as the cluster's ``cluster_name_on_cloud``, which is
-    the display name lowercased, with ``.``/``_`` turned into ``-``, plus the user
-    hash (and truncated if the cloud sets a length limit). Built with the same
-    call SkyPilot's backend uses, so a change there cannot make ``bjobs`` look
-    for a name that was never submitted -- which would read as "gone".
+    Only a fallback: the launch records the name SkyPilot actually used (the
+    handle's ``cluster_name_on_cloud``), which this process cannot get wrong.
+    SkyPilot submits the job as that ``cluster_name_on_cloud``: the display name
+    lowercased, with ``.``/``_`` turned into ``-``, plus the user hash (and
+    truncated if the cloud sets a length limit). Built with the same call
+    SkyPilot's backend uses.
     """
     from sky import clouds as sky_clouds
     from sky.utils import common_utils
@@ -270,29 +279,28 @@ def _lsf_client(lsf_cluster: str):
     )
 
 
-def _lsf_job_alive(lsf_cluster: str, cluster_name: str) -> Optional[bool]:
+def _lsf_job_alive(lsf_cluster: str, job_name: str) -> Optional[bool]:
     """Ask LSF directly whether the job behind a SkyPilot cluster is alive.
 
     Runs one ``bjobs`` on the login node over the same ``~/.lsf/config`` entry
     SkyPilot's LSF cloud uses. Blocking; callers bound it with
     :func:`_run_lsf_call`.
 
-    :returns: ``True`` if LSF has an unfinished job for the cluster, ``False`` if
+    :param job_name: the LSF job name (the cluster's ``cluster_name_on_cloud``).
+    :returns: ``True`` if LSF has an unfinished job by that name, ``False`` if
         it has none, ``None`` if LSF could not be asked (SSH down, bad config).
     """
     try:
-        states = _lsf_client(lsf_cluster).get_jobs_state_by_name(
-            _lsf_job_name(cluster_name)
-        )
+        states = _lsf_client(lsf_cluster).get_jobs_state_by_name(job_name)
     except Exception as e:  # pylint: disable=broad-except
         logger.warning(
-            "Could not ask LSF (%s) about cluster %s: %s", lsf_cluster, cluster_name, e
+            "Could not ask LSF (%s) about job %s: %s", lsf_cluster, job_name, e
         )
         return None
     return any(state in _LSF_ALIVE_STATES for state in states)
 
 
-def _lsf_cancel_job(lsf_cluster: str, cluster_name: str) -> bool:
+def _lsf_cancel_job(lsf_cluster: str, job_name: str) -> bool:
     """``bkill`` the LSF job behind a SkyPilot cluster.
 
     Used when the monitor gives up on a cluster SkyPilot can no longer see:
@@ -300,17 +308,15 @@ def _lsf_cancel_job(lsf_cluster: str, cluster_name: str) -> bool:
     this the job would keep its GPUs while a retry submits another. Blocking;
     callers bound it with :func:`_run_lsf_call`.
 
+    :param job_name: the LSF job name (the cluster's ``cluster_name_on_cloud``).
     :returns: ``True`` if LSF accepted the kill or has no such job, ``False`` if
         LSF could not be asked.
     """
     try:
-        _lsf_client(lsf_cluster).cancel_jobs_by_name(_lsf_job_name(cluster_name))
+        _lsf_client(lsf_cluster).cancel_jobs_by_name(job_name)
     except Exception as e:  # pylint: disable=broad-except
         logger.warning(
-            "Could not bkill the LSF (%s) job of cluster %s: %s",
-            lsf_cluster,
-            cluster_name,
-            e,
+            "Could not bkill the LSF (%s) job %s: %s", lsf_cluster, job_name, e
         )
         return False
     return True
@@ -347,16 +353,27 @@ class _PollFailureTracker:
         ceiling: float,
         ssh_hpc: bool,
         lsf_cluster: Optional[str],
+        lsf_job_name: Optional[str] = None,
     ) -> None:
         self.cluster_name = cluster_name
         self.grace = grace
         self.ceiling = max(grace, ceiling)
         self.ssh_hpc = ssh_hpc
         self.lsf_cluster = lsf_cluster
+        # The name SkyPilot submitted the LSF job under, as recorded at launch;
+        # recomputed (on first use) only when the launch did not record one.
+        self._lsf_job_name = lsf_job_name
         self.count = 0
         self.failing_for = 0.0
         self._first_at: Optional[float] = None
         self._last_probe_at: Optional[float] = None
+
+    @property
+    def lsf_job_name(self) -> str:
+        """The LSF job name ``bjobs`` / ``bkill`` look up."""
+        if not self._lsf_job_name:
+            self._lsf_job_name = _lsf_job_name(self.cluster_name)
+        return self._lsf_job_name
 
     def reset(self) -> None:
         """A poll succeeded: the next failure starts a new run."""
@@ -379,7 +396,7 @@ class _PollFailureTracker:
         if not self.lsf_cluster:
             return _POLL_GONE
         if self.failing_for >= self.ceiling:
-            return await self._give_up_on_lsf_job()
+            return await self._give_up_on_lsf_job(self.lsf_cluster)
         if (
             self._last_probe_at is not None
             and now - self._last_probe_at < _LSF_PROBE_INTERVAL_SECONDS
@@ -388,7 +405,7 @@ class _PollFailureTracker:
         self._last_probe_at = now
         try:
             alive = await _run_lsf_call(
-                _lsf_job_alive, self.lsf_cluster, self.cluster_name
+                _lsf_job_alive, self.lsf_cluster, self.lsf_job_name
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -407,12 +424,12 @@ class _PollFailureTracker:
         )
         return _POLL_GONE if alive is False else _POLL_KEEP
 
-    async def _give_up_on_lsf_job(self) -> str:
+    async def _give_up_on_lsf_job(self, lsf_cluster: str) -> str:
         """The ceiling is reached: kill the LSF job so a retry does not run
         beside it."""
         try:
             killed = await _run_lsf_call(
-                _lsf_cancel_job, self.lsf_cluster, self.cluster_name
+                _lsf_cancel_job, lsf_cluster, self.lsf_job_name
             )
         except asyncio.TimeoutError:
             killed = False
@@ -903,7 +920,8 @@ def _coerce_seconds(value, default: float, name: str) -> float:
     the monitor would never give up)."""
     if value is None:
         return default
-    seconds = _coerce_float(value, math.nan)
+    # A bool is an int to float(), so `true` would silently mean 1 s.
+    seconds = math.nan if isinstance(value, bool) else _coerce_float(value, math.nan)
     if not math.isfinite(seconds) or seconds < 0:
         logger.warning("Invalid %s %r; falling back to %s", name, value, default)
         return default
@@ -1789,6 +1807,10 @@ class Skypilot(Environment):
         # launch_id -> LSF cluster name (the ~/.lsf/config host), for lsf launches
         # only: what the poll loop asks `bjobs` before tearing a cluster down.
         self._lsf_clusters: Dict[str, str] = {}
+        # launch_id -> the LSF job name SkyPilot submitted (the launch handle's
+        # cluster_name_on_cloud), so `bjobs` / `bkill` use the real name rather
+        # than one recomputed in this process.
+        self._lsf_job_names: Dict[str, str] = {}
         # launch_ids on an _SSH_HPC_CLOUDS cloud: the poll loop gives these the
         # poll-failure grace by default and does not trust "does not exist".
         self._ssh_hpc_launches: Set[str] = set()
@@ -3227,6 +3249,9 @@ class Skypilot(Environment):
                 self._ssh_hpc_launches.add(launch_id)
             if cloud_group == "lsf" and target_alias:
                 self._lsf_clusters[launch_id] = target_alias
+                on_cloud = getattr(_handle, "cluster_name_on_cloud", None)
+                if isinstance(on_cloud, str) and on_cloud:
+                    self._lsf_job_names[launch_id] = on_cloud
 
             logger.info(
                 "SkyPilot cluster %s launched: job_id=%s launch_id=%s",
@@ -3712,6 +3737,7 @@ class Skypilot(Environment):
             ),
             ssh_hpc=ssh_hpc,
             lsf_cluster=self._lsf_clusters.get(launch_id),
+            lsf_job_name=self._lsf_job_names.get(launch_id),
         )
 
         # Live log streaming state (only used in ``stream`` mode)
@@ -3791,6 +3817,15 @@ class Skypilot(Environment):
                     f"not be bkill-ed; failing without a retry. Check it with "
                     f"`bjobs` and bkill it by hand (launch_id={launch_id})."
                 )
+                # No WORKLOAD_STATUS FAILED event: that is what a RetryHandler
+                # acts on. The raise below is what marks the step FAILED.
+                if log_stream_task is not None and not log_stream_task.done():
+                    log_stream_stop.set()
+                    log_stream_task.cancel()
+                    try:
+                        await log_stream_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 if event_q and entityrun_metadata:
                     from gbserver.types.buildevent import (
                         BuildEvent,
@@ -4260,6 +4295,7 @@ class Skypilot(Environment):
         finally:
             self._cluster_names.pop(launch_id, None)
             self._lsf_clusters.pop(launch_id, None)
+            self._lsf_job_names.pop(launch_id, None)
             self._ssh_hpc_launches.discard(launch_id)
             self._job_ids.pop(launch_id, None)
             self._launch_kwargs.pop(launch_id, None)
