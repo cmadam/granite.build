@@ -56,7 +56,7 @@ granite.build:
     # the Hub, or "s3://bucket/key" / "cos://bucket/key" for object storage —
     # see ibm-bluevela's environment.yaml assetstores block for what's wired
     # in. Whichever scheme wins, the step reads the RESOLVED binding path of
-    # its `teacher_model` / `student` inputs, never the URI itself.
+    # its `teacher` / `student` inputs, never the URI itself.
     #
     # CHAT_TEMPLATE is NOT one of these: its default is a path RELATIVE to the
     # ported step's own code checkout, and that default is currently BROKEN
@@ -66,7 +66,7 @@ granite.build:
     align:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
         student:
@@ -288,7 +288,7 @@ granite.build:
           binding: train-sft.checkpoint
         corpus:
           binding: corpus.corpus
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:

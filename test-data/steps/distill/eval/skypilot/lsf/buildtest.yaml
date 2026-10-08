@@ -28,7 +28,7 @@ target_expectations:
     jobstats_count: 1
   - target_name: eval-transfer-baseline
     # Three inputs (the bound student, the corpus as an ordering edge, and the env://
-    # teacher_model), one fileset out.
+    # teacher), one fileset out.
     step_count: 1
     input_artifact_count: 3
     output_artifact_count: 1

@@ -54,7 +54,7 @@ granite.build:
     align:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
         student:

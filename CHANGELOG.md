@@ -36,14 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   | Step | Old config key | Input |
   |---|---|---|
-  | `distill/tokenizer-align` | `align_config.teacher_model`, `.student_model` | `teacher_model`, `student`, `chat_template` (optional) |
+  | `distill/tokenizer-align` | `align_config.teacher_model`, `.student_model` | `teacher`, `student`, `chat_template` (optional) |
   | `distill/corpus-prep` | `corpus_config.dataset`, `.tokenizer` | `source_dataset`, `tokenizer` |
   | `distill/corpus-pin-check` | `pin_check_config.tokenizer_dir` | `tokenizer` |
   | `distill/sft` | `sft_config.student_model_path`, `.corpus_path` | `student`, `corpus` |
-  | `distill/gold` | `gold_config.model_name_or_path`, `.teacher_model_name_or_path`, `.dataset_name`, `.vllm_server_url` | `student`, `teacher_model`, `corpus`, `vllm` (optional) |
-  | `distill/eval` | `eval_config.student_model`, `.teacher_model` | `student`, `teacher_model` (optional) |
+  | `distill/gold` | `gold_config.model_name_or_path`, `.teacher_model_name_or_path`, `.dataset_name`, `.vllm_server_url` | `student`, `teacher`, `corpus`, `vllm` (optional) |
+  | `distill/eval` | `eval_config.student_model`, `.teacher_model` | `student`, `teacher` (optional) |
   | `distill/hf-export` | `export_config.train_output_dir`, `.expect_tokenizer_from` | `train_output`, `expected_tokenizer` (optional) |
-  | `distill/logit-precompute` | `precompute_config.corpus_path`, `.teacher_model_path`, `.teacher_tokenizer_path` | `corpus`, `teacher_model`, `teacher_tokenizer` |
+  | `distill/logit-precompute` | `precompute_config.corpus_path`, `.teacher_model_path`, `.teacher_tokenizer_path` | `corpus`, `teacher`, `teacher_tokenizer` |
   | `distill/vllm-server` | `vllm_config.model_path` | `model` |
 
   The shipped recipes, examples and step READMEs bind the new names. See

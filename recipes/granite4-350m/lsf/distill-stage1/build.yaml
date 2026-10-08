@@ -169,7 +169,7 @@ granite.build:
         # align_config carries neither. env:// means "already on a filesystem this
         # environment can reach", so the pull is a no-op: these add input
         # artifacts and no extra step.
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
         student:
@@ -387,7 +387,7 @@ granite.build:
 <% endif %>
         corpus:
           binding: corpus.corpus
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
       outputs:
@@ -520,9 +520,9 @@ granite.build:
         corpus:
           binding: corpus.corpus
         # The teacher the divergence is measured against: the step's optional
-        # teacher_model input, read as a resolved path (a path, never a hub id —
+        # teacher input, read as a resolved path (a path, never a hub id —
         # this teacher is not publicly fetchable).
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
       outputs:
@@ -573,9 +573,9 @@ granite.build:
         corpus:
           binding: corpus.corpus
         # The teacher the divergence is measured against: the step's optional
-        # teacher_model input, read as a resolved path (a path, never a hub id —
+        # teacher input, read as a resolved path (a path, never a hub id —
         # this teacher is not publicly fetchable).
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
       outputs:

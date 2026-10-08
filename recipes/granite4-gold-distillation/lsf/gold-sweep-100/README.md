@@ -116,7 +116,7 @@ the multi-node proof. The on-policy arms are the ones that need a split allocati
 ## Lineage
 
 `TEACHER_MODEL`, `STUDENT_MODEL` and `TRAINING_DATASET` reach the trainer only as input
-artifacts on the target — the gold step's required inputs `teacher_model`, `student` and
+artifacts on the target — the gold step's required inputs `teacher`, `student` and
 `corpus`, which it reads by their resolved binding paths — so they appear as this
 target's inputs alongside the `checkpoint` output. Lineage is built from the target's
 input artifacts, and there is no `gold_config` key for these paths, so the lineage record

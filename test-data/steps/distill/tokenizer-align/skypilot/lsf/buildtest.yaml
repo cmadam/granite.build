@@ -12,7 +12,7 @@ targets:
 target_expectations:
   - target_name: align
     # One workload. The env:// input pulls and output pushes are shared-FS no-ops,
-    # so the two named inputs (teacher_model, student) and all three outputs register
+    # so the two named inputs (teacher, student) and all three outputs register
     # off their URI strings with no extra pull/push step.
     step_count: 1
     input_artifact_count: 2

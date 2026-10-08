@@ -25,7 +25,7 @@ target_expectations:
           gold_config:
             run_name: "gold-smoke"
             # The student/teacher pair is no longer config: the step reads it from its
-            # named inputs (student, teacher_model), counted in input_artifact_count.
+            # named inputs (student, teacher), counted in input_artifact_count.
             # Pin the two settings whose wrong value corrupts a run silently
             # rather than failing it.
             use_liger_fused_jsd: false

@@ -25,7 +25,7 @@ def _bindings(vllm_url=""):
     """The `bindings` a target binding the required inputs renders with."""
     bindings = {
         "student": {"binding": {"path": "/models/student"}},
-        "teacher_model": {"binding": {"path": "/models/teacher"}},
+        "teacher": {"binding": {"path": "/models/teacher"}},
         "corpus": {"binding": {"path": "/data/corpus/train.jsonl"}},
     }
     if vllm_url:
@@ -228,7 +228,7 @@ class TestStepDeclaration:
 
     def test_model_and_data_are_required_inputs(self, step):
         """Silently distilling the wrong model is worse than failing to start."""
-        assert set(step["inputs"]["required"]) == {"student", "teacher_model", "corpus"}
+        assert set(step["inputs"]["required"]) == {"student", "teacher", "corpus"}
         gold = step["config"]["gold_config"]
         for key in ("model_name_or_path", "teacher_model_name_or_path", "dataset_name"):
             assert key not in gold

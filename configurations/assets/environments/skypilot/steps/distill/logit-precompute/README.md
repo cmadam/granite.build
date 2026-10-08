@@ -25,7 +25,7 @@ The workload fields live under `config.precompute_config`; the allocation under
 `config.workload`; the trainer source under `config.code_config`.
 
 The corpus, the teacher model and the teacher tokenizer are no longer config fields; they
-are the required `corpus`, `teacher_model` and `teacher_tokenizer` target inputs — see
+are the required `corpus`, `teacher` and `teacher_tokenizer` target inputs — see
 [Inputs](#inputs) below. The corpus must be **the same corpus the arm will train on** — the
 index is keyed to it, so a precompute against a different corpus is a silent mismatch. The
 teacher tokenizer is kept **separate** from the teacher model on purpose, as in the trainer:
@@ -83,7 +83,7 @@ The step declares three required inputs, read as `{{ bindings.<name>.binding.pat
 | Input | Required | Type | Typical source |
 |---|---|---|---|
 | `corpus` | yes | dataset | the `corpus` output of `space://steps/distill/corpus-prep` |
-| `teacher_model` | yes | model | a teacher checkpoint directory, usually a direct `uri:` |
+| `teacher` | yes | model | a teacher checkpoint directory, usually a direct `uri:` |
 | `teacher_tokenizer` | yes | model | the `teacher_overlay` output of `space://steps/distill/tokenizer-align` |
 
 `precompute_config.corpus_path`, `teacher_model_path` and `teacher_tokenizer_path` are no
@@ -115,7 +115,7 @@ when unset) is the base for relative paths. The step's `src/` is mounted at `./s
 trainer source is cloned into `<workdir>/distill-code` (`code_config.workdir`) unless
 `code_config.code_dir` points at an existing checkout. A relative `output_dir` is
 absolutised against `$GB_BUILD_WORKDIR` before the script runs, so the marker always carries
-an absolute path. The resolved `corpus`, `teacher_model` and `teacher_tokenizer` input paths
+an absolute path. The resolved `corpus`, `teacher` and `teacher_tokenizer` input paths
 are passed through unchanged; bind inputs that resolve to absolute paths.
 
 ## Example build.yaml
@@ -129,7 +129,7 @@ granite.build:
       inputs:
         corpus:
           binding: corpus.corpus            # a space://steps/distill/corpus-prep target
-        teacher_model:
+        teacher:
           uri: "env:///proj/run/teacher"
           type: model
         teacher_tokenizer:

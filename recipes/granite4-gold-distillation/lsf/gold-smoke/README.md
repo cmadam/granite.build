@@ -56,7 +56,7 @@ in the step's `USAGE.md` for the survey and the grouping command.
 ## Lineage
 
 `TEACHER_MODEL`, `STUDENT_MODEL` and `TRAINING_DATASET` reach the trainer only as
-input artifacts on the target — the gold step's required inputs `teacher_model`,
+input artifacts on the target — the gold step's required inputs `teacher`,
 `student` and `corpus`, which it reads by their resolved binding paths. They appear
 as this target's inputs alongside the `checkpoint` output, and
 `gb build status <build-id>` shows them. Because lineage is built from the target's

@@ -275,12 +275,12 @@ def test_the_gpu_targets_are_not_serialised_by_hand(off):
     assert set(targets["eval-transfer-baseline"]["inputs"]) == {
         "student",
         "corpus",
-        "teacher_model",
+        "teacher",
     }
     assert set(targets["eval-transfer"]["inputs"]) == {
         "student",
         "corpus",
-        "teacher_model",
+        "teacher",
     }
     assert set(targets["eval-bfcl"]["inputs"]) == {"model"}
 
@@ -323,9 +323,9 @@ def test_one_teacher_for_the_whole_pipeline(off, on):
     trained toward."""
     for rendered in (off, on):
         targets = _targets(rendered)
-        teacher = targets["align"]["inputs"]["teacher_model"]["uri"]
+        teacher = targets["align"]["inputs"]["teacher"]["uri"]
         for target in ("train-gold", "eval-transfer-baseline", "eval-transfer"):
-            assert targets[target]["inputs"]["teacher_model"]["uri"] == teacher, target
+            assert targets[target]["inputs"]["teacher"]["uri"] == teacher, target
 
 
 def test_one_length_budget_for_the_whole_pipeline(on):

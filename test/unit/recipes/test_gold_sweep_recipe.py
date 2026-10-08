@@ -160,8 +160,8 @@ def test_three_lineage_inputs_declared(recipe, tmp_path):
     trainer."""
     inputs = _target(_render(recipe, tmp_path), recipe)["inputs"]
 
-    assert set(inputs) == {"teacher_model", "student", "corpus"}
-    assert inputs["teacher_model"]["type"] == "model"
+    assert set(inputs) == {"teacher", "student", "corpus"}
+    assert inputs["teacher"]["type"] == "model"
     assert inputs["student"]["type"] == "model"
     assert inputs["corpus"]["type"] == "dataset"
     for name, spec in inputs.items():

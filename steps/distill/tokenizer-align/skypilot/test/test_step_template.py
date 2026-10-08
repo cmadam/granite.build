@@ -295,7 +295,7 @@ class TestFlagSurface:
 class TestConfigDefaults:
     def test_models_are_required_inputs_not_defaults(self, step):
         """A wrong default here trains a plausible, meaningless run."""
-        assert set(step["inputs"]["required"]) == {"teacher_model", "student"}
+        assert set(step["inputs"]["required"]) == {"teacher", "student"}
         align = step["config"]["align_config"]
         assert "teacher_model" not in align
         assert "student_model" not in align

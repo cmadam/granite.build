@@ -154,10 +154,10 @@ inputs:
       type: dataset
       accept: [uri, binding]
     # The teacher, loaded once. This is the only step that holds it without a student.
-    teacher_model:
+    teacher:
       type: model
       accept: [uri, binding]
-    # Kept SEPARATE from teacher_model on purpose, as in the trainer: the tokenizer that
+    # Kept SEPARATE from teacher on purpose, as in the trainer: the tokenizer that
     # defines the token ids in the index need not be the model directory's own. Normally
     # distill-tokenizer-align's `teacher_overlay`.
     teacher_tokenizer:
@@ -362,7 +362,7 @@ environment_configs:
             {% if config.precompute_config.check_weight_residency %}
             "$PYBIN" ./src/check_weight_residency.py \
               {% if config.precompute_config.allow_offline_weights %}--allow-offline{% endif %} \
-              "teacher={{ bindings.teacher_model.binding.path }}"
+              "teacher={{ bindings.teacher.binding.path }}"
             {% endif %}
 
             # Absolutise before the script runs: IT prints the artifact marker, from its own
@@ -384,7 +384,7 @@ environment_configs:
             # dropped.
             PYBIN="$PYBIN" bash ./src/run-precompute.sh \
               --corpus-path "{{ bindings.corpus.binding.path }}" \
-              --teacher-model-path "{{ bindings.teacher_model.binding.path }}" \
+              --teacher-model-path "{{ bindings.teacher.binding.path }}" \
               --teacher-tokenizer-path "{{ bindings.teacher_tokenizer.binding.path }}" \
               --output-dir "$OUT_DIR" \
               --top-k {{ config.precompute_config.top_k }} \

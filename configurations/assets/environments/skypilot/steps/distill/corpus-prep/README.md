@@ -140,7 +140,7 @@ granite.build:
           uri: "env://{{ binding.path }}"
           type: model
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///path/to/teacher"
           type: model
         student:

@@ -244,7 +244,7 @@ class TestConfigDefaults:
     def test_the_inputs_are_required_not_defaulted(self, step):
         assert set(step["inputs"]["required"]) == {
             "corpus",
-            "teacher_model",
+            "teacher",
             "teacher_tokenizer",
         }
         cfg = step["config"]["precompute_config"]

@@ -30,7 +30,7 @@ carries a `config.code_config` block, described in
 [`code_config`](#code_config) below.
 
 The teacher and student models are no longer config fields; they are target inputs — see
-[Inputs](#inputs) below. `teacher_model` must be a **directory**, not an HF repo id (the
+[Inputs](#inputs) below. `teacher` must be a **directory**, not an HF repo id (the
 teacher for the reference pairing is not publicly fetchable), and `student` must be the
 **raw, pre-retag** base student directory — the one directory in the pipeline that
 genuinely mis-segments.
@@ -78,13 +78,13 @@ The step declares its inputs, read as `{{ bindings.<name>.binding.path }}`:
 
 | Input | Required | Type | Typical source |
 |---|---|---|---|
-| `teacher_model` | yes | model | a direct `uri:` to the teacher directory |
+| `teacher` | yes | model | a direct `uri:` to the teacher directory |
 | `student` | yes | model | a direct `uri:` to the RAW base student directory |
 | `chat_template` | no | fileset | a template file; unbound uses `align_config.chat_template` |
 
 ```yaml
 inputs:
-  teacher_model: { uri: "env:///path/to/teacher", type: model }
+  teacher: { uri: "env:///path/to/teacher", type: model }
   student: { uri: "env:///path/to/raw-base-student", type: model }
 ```
 
@@ -153,7 +153,7 @@ granite.build:
     align:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///proj/models/granite-4.2-30b"
           type: model
         student:

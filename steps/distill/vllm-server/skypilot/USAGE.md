@@ -168,7 +168,7 @@ granite.build:
         student:
           uri: "env:///proj/.../student"
           type: model
-        teacher_model:
+        teacher:
           uri: "env:///proj/.../teacher"
           type: model
         vllm: {binding: vllm-server.vllm_url}

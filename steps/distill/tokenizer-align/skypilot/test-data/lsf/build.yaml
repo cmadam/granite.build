@@ -15,7 +15,7 @@ granite.build:
       # The step declares both models as named inputs and reads their resolved paths
       # itself; env:// because they already sit on /proj.
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///proj/granite-build/g4os/models/granite-4.2-3b-nothink"
           type: model
         # A RAW, un-retagged base student, which is what this step is for: its

@@ -33,14 +33,14 @@ granite.build:
   targets:
     gold-smoke:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
-      # Same three named inputs (student, teacher_model, corpus) as the lsf/
+      # Same three named inputs (student, teacher, corpus) as the lsf/
       # fixture; the step reads their resolved paths itself.
       # This variant has no buildtest.yaml — it is launched by hand as the 1-node
       # control — which is exactly why it needs them: a control run whose lineage
       # omits the pair and dataset cannot be compared against the 2-node run it
       # exists to control for.
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
           type: model
         student:

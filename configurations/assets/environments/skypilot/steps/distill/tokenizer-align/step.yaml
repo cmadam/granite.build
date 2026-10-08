@@ -163,7 +163,7 @@ inputs:
     # The 4.2 30B teacher, as a DIRECTORY (not an HF repo id: the teacher for this
     # pairing is not publicly fetchable, and a repo id would put a network fetch
     # inside the step). Its tokenizer is the one the student is retagged ONTO.
-    teacher_model:
+    teacher:
       type: model
       accept: [uri, binding]
     # The RAW 4.1 3B base student — the PRE-retag directory. This is the one
@@ -366,7 +366,7 @@ environment_configs:
             esac
 
             PYBIN="$PYBIN" bash ./src/run-align.sh \
-              --teacher-model "{{ bindings.teacher_model.binding.path }}" \
+              --teacher-model "{{ bindings.teacher.binding.path }}" \
               --student-model "{{ bindings.student.binding.path }}" \
               --out-dir "$OUT_DIR" \
               --chat-template "$CHAT_TEMPLATE" \

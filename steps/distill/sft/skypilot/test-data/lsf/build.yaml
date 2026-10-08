@@ -19,7 +19,7 @@ granite.build:
     align:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///proj/granite-build/g4os/models/granite-4.2-3b-nothink"
           type: model
         # DENSE (granite / GraniteForCausalLM), and that matters for the eval

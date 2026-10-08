@@ -26,7 +26,7 @@ granite.build:
     gold-sweep-smoke:
       environment_uri: "$${ENVIRONMENT_URI}"
       # The teacher, the student and the dataset: the gold step's three required
-      # inputs (`teacher_model`, `student`, `corpus`), which it reads by their
+      # inputs (`teacher`, `student`, `corpus`), which it reads by their
       # resolved binding paths — there is no gold_config key for them. Being inputs
       # is also what makes the three appear in `gb build status` and as OpenLineage
       # inputs[] where a lineage provider is configured, so the lineage record and
@@ -36,7 +36,7 @@ granite.build:
       # a no-op, so these add three input artifacts and no extra step. `type` is what
       # gives each one a lineage artifact type.
       inputs:
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
         student:

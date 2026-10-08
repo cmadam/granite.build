@@ -151,7 +151,7 @@ class TestThePair:
         that aligns against one teacher and scores against another reports a
         divergence from a model it never trained towards.
 
-        Every consumer binds the step's declared ``teacher_model`` input to the
+        Every consumer binds the step's declared ``teacher`` input to the
         same TEACHER_MODEL_URI, and the step reads the RESOLVED path itself — so
         the same assertion holds regardless of which uri scheme TEACHER_MODEL_URI
         names, and no step config carries the teacher as a path any more.
@@ -163,7 +163,7 @@ class TestThePair:
             ("eval-transfer", "eval_config", "teacher_model"),
             ("eval-transfer-baseline", "eval_config", "teacher_model"),
         ):
-            spec = _targets(off)[target]["inputs"]["teacher_model"]
+            spec = _targets(off)[target]["inputs"]["teacher"]
             assert spec["uri"] == teacher_uri, target
             assert spec["type"] == "model", target
             assert retired not in _config(off, target)[block], target
@@ -173,7 +173,7 @@ class TestThePair:
         path handed only to align_config would run and record nothing."""
         align_inputs = _targets(off)["align"]["inputs"]
         assert set(align_inputs) == {
-            "teacher_model",
+            "teacher",
             "student",
             "chat_template",
         }
@@ -196,7 +196,7 @@ class TestThePair:
         )
         align_inputs = _targets(rendered)["align"]["inputs"]
         assert (
-            align_inputs["teacher_model"]["uri"] == "hf:///ibm-granite/granite-4.1-3b"
+            align_inputs["teacher"]["uri"] == "hf:///ibm-granite/granite-4.1-3b"
         )
         corpus_inputs = _targets(rendered)["corpus"]["inputs"]
         assert (

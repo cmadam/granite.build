@@ -120,8 +120,8 @@ def test_three_lineage_inputs_declared(rendered):
     required for the artifact to appear.
     """
     inputs = _target(rendered)["inputs"]
-    assert set(inputs) == {"teacher_model", "student", "corpus"}
-    assert inputs["teacher_model"]["type"] == "model"
+    assert set(inputs) == {"teacher", "student", "corpus"}
+    assert inputs["teacher"]["type"] == "model"
     assert inputs["student"]["type"] == "model"
     assert inputs["corpus"]["type"] == "dataset"
     for name, spec in inputs.items():
@@ -143,7 +143,7 @@ def test_inputs_are_the_only_route_to_the_trainer(rendered):
     params = get_params_from_file(str(_RECIPE / "parameters.yaml"))
 
     assert inputs["student"]["uri"] == "env://" + params["STUDENT_MODEL"]
-    assert inputs["teacher_model"]["uri"] == "env://" + params["TEACHER_MODEL"]
+    assert inputs["teacher"]["uri"] == "env://" + params["TEACHER_MODEL"]
     assert inputs["corpus"]["uri"] == "env://" + params["TRAINING_DATASET"]
     for retired in ("model_name_or_path", "teacher_model_name_or_path", "dataset_name"):
         assert retired not in gold, retired
@@ -170,7 +170,7 @@ def test_fixture_declares_the_same_three_paths(rendered):
     ]["targets"]["gold-smoke"]["inputs"]
     params = get_params_from_file(str(_RECIPE / "parameters.yaml"))
 
-    assert fixture_inputs["teacher_model"]["uri"] == "env://" + params["TEACHER_MODEL"]
+    assert fixture_inputs["teacher"]["uri"] == "env://" + params["TEACHER_MODEL"]
     assert fixture_inputs["student"]["uri"] == "env://" + params["STUDENT_MODEL"]
     assert fixture_inputs["corpus"]["uri"] == "env://" + params["TRAINING_DATASET"]
 

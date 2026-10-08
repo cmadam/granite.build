@@ -286,11 +286,11 @@ def test_three_lineage_inputs_on_the_training_target(targets):
     inputs must be declared alongside it rather than displaced by it."""
     inputs = targets["train"]["inputs"]
 
-    assert {"teacher_model", "student", "corpus"} <= set(inputs)
-    assert inputs["teacher_model"]["type"] == "model"
+    assert {"teacher", "student", "corpus"} <= set(inputs)
+    assert inputs["teacher"]["type"] == "model"
     assert inputs["student"]["type"] == "model"
     assert inputs["corpus"]["type"] == "dataset"
-    for name in ("teacher_model", "student", "corpus"):
+    for name in ("teacher", "student", "corpus"):
         assert inputs[name]["uri"].startswith("env:///"), name
     assert "type" not in inputs["vllm"]
 
@@ -302,7 +302,7 @@ def test_inputs_are_the_only_route_to_the_trainer(targets, params):
     gold = _gold(targets)
 
     assert inputs["student"]["uri"] == "env://" + params["STUDENT_MODEL"]
-    assert inputs["teacher_model"]["uri"] == "env://" + params["TEACHER_MODEL"]
+    assert inputs["teacher"]["uri"] == "env://" + params["TEACHER_MODEL"]
     assert inputs["corpus"]["uri"] == "env://" + params["TRAINING_DATASET"]
     for retired in ("model_name_or_path", "teacher_model_name_or_path", "dataset_name"):
         assert retired not in gold, retired

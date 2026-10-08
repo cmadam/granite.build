@@ -87,7 +87,7 @@ granite.build:
     align:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        # The step's named inputs (teacher_model, student, and the optional
+        # The step's named inputs (teacher, student, and the optional
         # chat_template). TEACHER_MODEL_URI / STUDENT_MODEL_URI /
         # CHAT_TEMPLATE_URI carry a FULL uri, not a bare path: "env://" for
         # something already on a filesystem this environment can reach (the
@@ -96,7 +96,7 @@ granite.build:
         # ibm-bluevela's environment.yaml assetstores block for what's wired
         # in. Whichever scheme wins, the step reads the RESOLVED binding path
         # itself, never the URI — align_config carries no path for them.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
         student:
@@ -321,7 +321,7 @@ granite.build:
         # TEACHER_MODEL_URI: same full-URI convention as align's inputs. The
         # step reads the RESOLVED local path, whatever the scheme was — gold.py
         # takes it as a directory either way.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
@@ -458,7 +458,7 @@ granite.build:
         # teacher is resolved and cached through granite.build's own asset
         # stores, instead of a bare hub id reaching the step and triggering an
         # uncached fetch inside transformers at eval time.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
@@ -509,7 +509,7 @@ granite.build:
         corpus:
           binding: corpus.corpus
         # TEACHER_MODEL_URI: same full-URI convention as align's inputs.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:

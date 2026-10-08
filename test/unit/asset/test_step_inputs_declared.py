@@ -46,17 +46,17 @@ _AWS = "environments/skypilot/aws/steps"
 EXPECTED = {
     # Distillation: not in any tag yet, so the inputs are required outright.
     f"{_SKY}/distill/tokenizer-align": (
-        {"teacher_model", "student"},
+        {"teacher", "student"},
         {"chat_template"},
     ),
     f"{_SKY}/distill/corpus-prep": ({"source_dataset", "tokenizer"}, set()),
     f"{_SKY}/distill/corpus-pin-check": ({"tokenizer"}, set()),
     f"{_SKY}/distill/sft": ({"student", "corpus"}, set()),
-    f"{_SKY}/distill/gold": ({"student", "teacher_model", "corpus"}, {"vllm"}),
-    f"{_SKY}/distill/eval": ({"student"}, {"teacher_model"}),
+    f"{_SKY}/distill/gold": ({"student", "teacher", "corpus"}, {"vllm"}),
+    f"{_SKY}/distill/eval": ({"student"}, {"teacher"}),
     f"{_SKY}/distill/hf-export": ({"train_output"}, {"expected_tokenizer"}),
     f"{_SKY}/distill/logit-precompute": (
-        {"corpus", "teacher_model", "teacher_tokenizer"},
+        {"corpus", "teacher", "teacher_tokenizer"},
         set(),
     ),
     f"{_SKY}/distill/vllm-server": ({"model"}, set()),

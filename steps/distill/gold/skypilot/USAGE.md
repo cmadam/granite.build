@@ -27,7 +27,7 @@ The trainer's settings live under `config.gold_config`. Checkpoint emission, res
 the monitor are top-level `config` keys; the trainer source is `config.code_config`.
 
 The student, teacher and corpus are no longer config fields; they are the required
-`student`, `teacher_model` and `corpus` target inputs — see [Inputs](#inputs) below. The
+`student`, `teacher` and `corpus` target inputs — see [Inputs](#inputs) below. The
 student is also, on the on-policy path, the model the vLLM server nodes serve, and must
 share a tokenizer with the teacher (see
 [Choosing a student/teacher pair](#choosing-a-studentteacher-pair)). The corpus **must be
@@ -174,7 +174,7 @@ The step declares its inputs; the run script reads path inputs as
 | Input | Required | Type | Typical source |
 |---|---|---|---|
 | `student` | yes | model | `align.retagged_student`, or the `checkpoint` of `space://steps/distill/sft` |
-| `teacher_model` | yes | model | a direct `uri:` to the teacher directory |
+| `teacher` | yes | model | a direct `uri:` to the teacher directory |
 | `corpus` | yes | dataset | `corpus.corpus` (the `space://steps/distill/corpus-prep` step) |
 | `vllm` | no | `mem://` | `<server>.vllm_url` (the `space://steps/distill/vllm-server` step) |
 
@@ -184,7 +184,7 @@ inputs:
     binding: align.retagged_student   # or an SFT target's checkpoint
   corpus:
     binding: corpus.corpus
-  teacher_model:
+  teacher:
     uri: "env:///proj/.../teacher"
     type: model
   vllm:                               # external-server on-policy path only
@@ -231,7 +231,7 @@ identity-mounted into the container), falling back to the current directory when
 - `checkpoints/<run_name>_node<N>/` — the trainer's `--output_dir`, and the `checkpoint`
   artifact.
 
-The resolved `student`, `teacher_model` and `corpus` input paths, and
+The resolved `student`, `teacher` and `corpus` input paths, and
 `resume_from_checkpoint_dir`, are used as given; pass/bind absolute paths.
 
 ## Example build.yaml
@@ -248,7 +248,7 @@ granite.build:
         student:
           uri: "env:///proj/.../student_overlays/granite-4.1-3b-base-hub"
           type: model
-        teacher_model:
+        teacher:
           uri: "env:///proj/.../teacher_overlays/granite-4.2-30b"
           type: model
         corpus:

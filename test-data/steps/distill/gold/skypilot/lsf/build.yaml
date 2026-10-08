@@ -20,13 +20,13 @@ granite.build:
   targets:
     gold-smoke:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
-      # The pair and the dataset as the step's named inputs (student, teacher_model,
+      # The pair and the dataset as the step's named inputs (student, teacher,
       # corpus) — the step reads their resolved paths itself, so gold_config carries
       # no path for them. Literal paths because the build-test harness passes no
       # parameters file. env:// pulls are shared-FS no-ops, so these register three
       # input artifacts and add no step.
       inputs:
-        teacher_model:
+        teacher:
           uri: "env:///proj/granite-build/g4os/kd-sandbox/teacher_overlays/granite-4.2-30b"
           type: model
         student:

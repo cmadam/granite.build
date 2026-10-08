@@ -342,7 +342,7 @@ inputs:
       type: model
       accept: [uri, binding]
     # Frozen, forward-only in the training loop.
-    teacher_model:
+    teacher:
       type: model
       accept: [uri, binding]
     # distill-corpus-prep's `corpus`. Must be think-filtered ("nothink"): an
@@ -608,7 +608,7 @@ environment_configs:
             /stage/.venv/bin/python ./src/check_weight_residency.py \
               {% if config.gold_config.allow_offline_weights %}--allow-offline{% endif %} \
               "student={{ bindings.student.binding.path }}" \
-              "teacher={{ bindings.teacher_model.binding.path }}"
+              "teacher={{ bindings.teacher.binding.path }}"
             {% endif %}
 
             # accelerate gets an IP, not a hostname. The provisioner exports
@@ -829,7 +829,7 @@ environment_configs:
               --output "$CFG" \
               --total-nodes "$NODES" \
               --model-name-or-path "{{ bindings.student.binding.path }}" \
-              --teacher-model-name-or-path "{{ bindings.teacher_model.binding.path }}" \
+              --teacher-model-name-or-path "{{ bindings.teacher.binding.path }}" \
               --dataset-name "{{ bindings.corpus.binding.path }}" \
               --num-train-epochs {{ config.gold_config.num_train_epochs }} \
               --max-steps {{ config.gold_config.max_steps }} \

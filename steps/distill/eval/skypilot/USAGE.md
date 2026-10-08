@@ -25,7 +25,7 @@ steps:
 All fields in the first two tables live under the step's `config.eval_config`.
 
 The student and the teacher are no longer config fields; they are the required `student`
-and optional `teacher_model` target inputs — see [Inputs](#inputs) below. With no teacher
+and optional `teacher` target inputs — see [Inputs](#inputs) below. With no teacher
 only `entropy` is computable, and asking for `jsd` (or `kld`/`rkld`) without one is
 **refused** rather than defaulted; leave it unbound only together with
 `metrics: "entropy"`.
@@ -92,7 +92,7 @@ The step declares its models as inputs, read as `{{ bindings.<name>.binding.path
 | Input | Required | Type | Typical source |
 |---|---|---|---|
 | `student` | yes | model | `align.retagged_student` (baseline) or `export.hf_model` (post-training) |
-| `teacher_model` | no | model | a direct `uri:`; unbound, only `entropy` is computable |
+| `teacher` | no | model | a direct `uri:`; unbound, only `entropy` is computable |
 
 Binding the teacher (rather than passing a bare hub id) lets a `hf://` or `s3://` teacher
 be resolved and cached through granite.build's asset stores instead of triggering an
@@ -128,7 +128,7 @@ Declare `eval_metrics` on the target (typically `uri: "env://{{ binding.path }}"
 - The run block sets `WORK="${GB_BUILD_WORKDIR:-$PWD}"`. A relative `output_dir` is
   absolutised to `$WORK/<output_dir>` before the script runs, because the marker path is
   handed to the `env://` store, possibly from another host.
-- The resolved `student` and `teacher_model` input paths, and `corpus`, are passed to the
+- The resolved `student` and `teacher` input paths, and `corpus`, are passed to the
   script unchanged. Use absolute paths; bindings already resolve to absolute paths.
 - The source is cloned into `$WORK/<code_config.workdir>` (default `distill-code/`), or
   taken from `code_config.code_dir`, and `$CODE_DIR/src` is prepended to `PYTHONPATH`.
@@ -158,7 +158,7 @@ granite.build:
           binding: align.retagged_student
         corpus:
           binding: corpus.corpus        # ordering edge; the path is composed below
-        teacher_model:
+        teacher:
           uri: "env:///proj/models/teacher"
           type: model
       outputs:
@@ -189,7 +189,7 @@ granite.build:
           binding: export.hf_model
         corpus:
           binding: corpus.corpus
-        teacher_model:
+        teacher:
           uri: "env:///proj/models/teacher"
           type: model
       outputs:
@@ -280,7 +280,7 @@ manifest's `splits.eval.path` or compose it from the same parameters.
 - **`allow_tokenizer_mismatch`**: keep it `false`. Index *i* denotes a different token to each
   model, so the arithmetic **succeeds and measures nothing**. It is kept as a knob only for a
   deliberate cross-tokenizer experiment, and setting it prints a warning in the step's log.
-- **`teacher_model` empty** is "no teacher", not a blank path: the script omits the flag
+- **`teacher` empty** is "no teacher", not a blank path: the script omits the flag
   entirely rather than passing `""`.
 
 ### `output_dir` is a FILESET

@@ -104,7 +104,7 @@ granite.build:
         # lineage inputs. env:// means "already on a filesystem this environment
         # can reach", so the pull is a no-op; the step reads each one's resolved
         # binding path.
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
         student:

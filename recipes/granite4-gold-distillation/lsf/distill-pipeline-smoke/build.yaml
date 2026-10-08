@@ -73,14 +73,14 @@ granite.build:
         # "s3://bucket/key" / "cos://bucket/key" for object storage — see
         # ibm-bluevela's environment.yaml assetstores block for what's wired
         # in. Whichever scheme wins, the step reads the RESOLVED binding path
-        # of its `teacher_model` / `student` inputs, never the URI itself.
+        # of its `teacher` / `student` inputs, never the URI itself.
         #
         # CHAT_TEMPLATE is NOT one of these: its default is a path RELATIVE to
         # the ported step's own code checkout (see align_config.chat_template
         # below), not an external artifact to pull, so it stays a plain
         # parameter rather than an input binding. Pass an absolute path via
         # --param CHAT_TEMPLATE=/your/template.jinja for a custom one.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
         student:
@@ -283,7 +283,7 @@ granite.build:
           binding: corpus.corpus
         # TEACHER_MODEL_URI: same full-URI convention as align's inputs. The
         # step hands gold.py the RESOLVED local path, whatever the scheme was.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
@@ -421,7 +421,7 @@ granite.build:
         # teacher is resolved and cached through granite.build's own asset
         # stores, instead of a bare hub id reaching the step and triggering an
         # uncached fetch inside transformers at eval time.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
@@ -472,7 +472,7 @@ granite.build:
         corpus:
           binding: corpus.corpus
         # TEACHER_MODEL_URI: same full-URI convention as align's inputs.
-        teacher_model:
+        teacher:
           uri: "$${TEACHER_MODEL_URI}"
           type: model
       outputs:
