@@ -67,6 +67,8 @@ environment_configs:
             MODEL_PATH="{{ bindings.model.binding.path }}"
             {% if config.sft_config.model_path and config.sft_config.model_path != bindings.model.binding.path %}
             echo "openinstruct-sft: WARNING: sft_config.model_path is ignored because the 'model' input is bound" >&2
+            {% elif config.sft_config.model_path %}
+            echo "openinstruct-sft: DEPRECATED: sft_config.model_path duplicates the bound 'model' input; remove it from the recipe" >&2
             {% endif %}
             {% else %}
             MODEL_PATH="{{ config.sft_config.model_path }}"

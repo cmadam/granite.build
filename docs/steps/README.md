@@ -141,12 +141,16 @@ name the step declares:
   target binds them.
 - **`type` isn't checked.** Validation checks presence, `accept`, and (with
   `allow_unknown: false`) extra inputs.
+- **`allow_unknown: true` catches misnamed required inputs only.** A required input the
+  target binds under the wrong name still fails validation as missing. An optional input
+  bound under the wrong name is accepted as an extra, and the step sees it as unbound.
 - **Steps with no fixed set of names** (a variable-length list of sources, a free-form
   `byoc` command, a diagnostic run on literal paths) still declare
   `inputs: {allow_unknown: true}`, with a comment explaining why.
 - **Renaming an input in a step that has shipped in a tag:** declare the new input as
   optional. Have the step fall back to the old config key when the input isn't bound,
-  and print a `DEPRECATED` warning when it does. A bound input wins over the config key.
+  and print a `DEPRECATED` warning when it does. A bound input wins over the config key;
+  a key that is still set alongside it gets a warning too.
   Make it required in a later release.
 
 ## Step configuration in build.yaml

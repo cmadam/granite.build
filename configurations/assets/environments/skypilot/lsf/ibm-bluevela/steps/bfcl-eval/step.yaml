@@ -60,6 +60,8 @@ environment_configs:
             export MODEL_PATH="{{ bindings.model.binding.path }}"
             {% if config.bfcl_config.model_path and config.bfcl_config.model_path != bindings.model.binding.path %}
             echo "bfcl-eval: WARNING: bfcl_config.model_path is ignored because the 'model' input is bound" >&2
+            {% elif config.bfcl_config.model_path %}
+            echo "bfcl-eval: DEPRECATED: bfcl_config.model_path duplicates the bound 'model' input; remove it from the recipe" >&2
             {% endif %}
             {% else %}
             export MODEL_PATH="{{ config.bfcl_config.model_path }}"

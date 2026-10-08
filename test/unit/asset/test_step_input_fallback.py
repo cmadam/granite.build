@@ -114,14 +114,16 @@ def test_the_bound_input_wins_over_the_config_key(step, section, key, inp, field
 
 
 @pytest.mark.parametrize("step,section,key,inp,field,var", CASES, ids=IDS)
-def test_the_same_value_in_both_is_not_warned_about(
+def test_the_same_value_in_both_is_flagged_as_redundant(
     step, section, key, inp, field, var
 ):
-    """A recipe that still copies the binding into the key is not 'ignored'."""
+    """A recipe that still copies the binding into the key is not 'ignored', but the
+    key is still deprecated, so it is told to drop it."""
     bindings = {inp: {"binding": {field: "/same"}}}
     rendered = _render(step, section, key, "/same", bindings)
     assert _assigned(rendered, var) == "/same"
     assert "is ignored" not in rendered
+    assert f"DEPRECATED: {section}.{key} duplicates the bound '{inp}' input" in rendered
 
 
 @pytest.mark.parametrize("step,section,key,inp,field,var", CASES, ids=IDS)

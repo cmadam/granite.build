@@ -309,6 +309,8 @@ environment_configs:
             {%- set input_path = bindings.docs.binding.path if docs_bound else config.dpk_config.input_path %}
             {%- if docs_bound and config.dpk_config.input_path and config.dpk_config.input_path != input_path %}
             echo "dpk: WARNING: dpk_config.input_path is ignored because the 'docs' input is bound" >&2
+            {%- elif docs_bound and config.dpk_config.input_path %}
+            echo "dpk: DEPRECATED: dpk_config.input_path duplicates the bound 'docs' input; remove it from the recipe" >&2
             {%- elif not docs_bound and config.dpk_config.input_path %}
             echo "dpk: DEPRECATED: dpk_config.input_path will be removed in a future release; bind the target input 'docs' instead" >&2
             {%- endif %}

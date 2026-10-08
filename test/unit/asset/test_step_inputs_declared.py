@@ -27,6 +27,7 @@ requires, means changing this table — a decision, not a silent drift.
 """
 
 import pathlib
+import re
 
 import pytest
 import yaml
@@ -140,7 +141,14 @@ def test_an_exception_says_why(step_yaml):
     if required or optional:
         return
     lines = step_yaml.read_text(encoding="utf-8").splitlines()
-    at = lines.index("inputs:")
-    assert lines[at - 1].startswith(
-        "#"
+    # Block (`inputs:`) or flow (`inputs: {allow_unknown: true}`) style.
+    at = next(i for i, line in enumerate(lines) if re.match(r"inputs:(\s|$)", line))
+    comment = []
+    for line in reversed(lines[:at]):
+        if not line.startswith("#"):
+            break
+        comment.insert(0, line.lstrip("#").strip())
+    why = " ".join(comment)
+    assert len(why.split()) >= 4 and not re.match(
+        r"(TODO|FIXME|XXX)\b", why, re.IGNORECASE
     ), f"{_rel(step_yaml)} declares no named inputs without a comment saying why"

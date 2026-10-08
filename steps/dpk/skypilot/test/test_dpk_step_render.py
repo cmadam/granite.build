@@ -643,11 +643,13 @@ class TestDocsInput:
         assert _opt(_script_argv(rendered, "run"), "--input-path") == "/staged/docs"
         assert "dpk_config.input_path is ignored" in rendered
 
-    def test_the_same_path_in_both_is_not_warned_about(self, launcher, defaults):
-        """A recipe that still copies the binding into the key is not 'ignored'."""
+    def test_the_same_path_in_both_is_flagged_as_redundant(self, launcher, defaults):
+        """A recipe that still copies the binding into the key is not 'ignored', but
+        the key is still deprecated, so it is told to drop it."""
         cfg = _transform_cfg(defaults, input_path="/staged/docs")
         rendered = _render(launcher["run"], cfg, _BINDINGS)
         assert "WARNING" not in rendered
+        assert "dpk: DEPRECATED: dpk_config.input_path duplicates" in rendered
 
     @pytest.mark.parametrize(
         "path", ["/staged/o'brien", "/staged/it's/docs", "/staged/a'b'c"]

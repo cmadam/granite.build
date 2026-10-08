@@ -101,6 +101,8 @@ environment_configs:
             export MODEL_PATH="{{ bindings.model.binding.path }}"
             {% if config.sage_eval_config.model_path and config.sage_eval_config.model_path != bindings.model.binding.path %}
             echo "sage-eval: WARNING: sage_eval_config.model_path is ignored because the 'model' input is bound" >&2
+            {% elif config.sage_eval_config.model_path %}
+            echo "sage-eval: DEPRECATED: sage_eval_config.model_path duplicates the bound 'model' input; remove it from the recipe" >&2
             {% endif %}
             {% else %}
             export MODEL_PATH="{{ config.sage_eval_config.model_path }}"

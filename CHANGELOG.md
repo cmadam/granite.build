@@ -36,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   | Step | Old config key | Input |
   |---|---|---|
-  | `distill/tokenizer-align` | `align_config.teacher_model`, `.student_model` | `teacher_model`, `student` |
+  | `distill/tokenizer-align` | `align_config.teacher_model`, `.student_model` | `teacher_model`, `student`, `chat_template` (optional) |
   | `distill/corpus-prep` | `corpus_config.dataset`, `.tokenizer` | `source_dataset`, `tokenizer` |
   | `distill/corpus-pin-check` | `pin_check_config.tokenizer_dir` | `tokenizer` |
   | `distill/sft` | `sft_config.student_model_path`, `.corpus_path` | `student`, `corpus` |
@@ -95,7 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config keys that carried an input path in steps shipped in v0.3.x (#453).** These
   steps now declare the input as optional and read the binding when it is bound. A bound
   input wins over the key. When the input isn't bound, the step falls back to the old
-  key and prints a `DEPRECATED` warning. The fallback will be removed in a future release.
+  key and prints a `DEPRECATED` warning. A key set to the same value as the bound input
+  also gets a `DEPRECATED` note asking the recipe to drop it. The fallback will be removed
+  in a future release.
 
   | Step | Deprecated key | Input |
   |---|---|---|
@@ -104,6 +106,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   | `openinstruct-sft` (LSF) | `sft_config.model_path` | `model` |
   | `openinstruct-rl` (LSF) | `rl_config.rm_server_url`, `rl_config.code_server_url` | `rm_url`, `code_url` (`mem://`) |
   | `dpk` | `dpk_config.input_path` | `docs` |
+
+  The AWS `openinstruct-sft` also declares an optional `model` input, but its
+  `sft_config.model_path` is **not** deprecated: it is the Hugging Face id the trainer
+  downloads when `model` is not bound, so it stays as a real default with no warning.
 
 ### Fixed
 

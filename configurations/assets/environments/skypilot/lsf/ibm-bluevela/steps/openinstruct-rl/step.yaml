@@ -147,6 +147,8 @@ environment_configs:
             export CODE_SERVER_URL="{{ bindings.code_url.binding.state }}"
             {% if config.rl_config.code_server_url and config.rl_config.code_server_url != bindings.code_url.binding.state %}
             echo "openinstruct-rl: WARNING: rl_config.code_server_url is ignored because the 'code_url' input is bound" >&2
+            {% elif config.rl_config.code_server_url %}
+            echo "openinstruct-rl: DEPRECATED: rl_config.code_server_url duplicates the bound 'code_url' input; remove it from the recipe" >&2
             {% endif %}
             {% elif config.rl_config.code_server_url %}
             export CODE_SERVER_URL="{{ config.rl_config.code_server_url }}"
@@ -157,6 +159,8 @@ environment_configs:
             export RM_SERVER_URL="{{ bindings.rm_url.binding.state }}"
             {% if config.rl_config.rm_server_url and config.rl_config.rm_server_url != bindings.rm_url.binding.state %}
             echo "openinstruct-rl: WARNING: rl_config.rm_server_url is ignored because the 'rm_url' input is bound" >&2
+            {% elif config.rl_config.rm_server_url %}
+            echo "openinstruct-rl: DEPRECATED: rl_config.rm_server_url duplicates the bound 'rm_url' input; remove it from the recipe" >&2
             {% endif %}
             {% elif config.rl_config.rm_server_url %}
             export RM_SERVER_URL="{{ config.rl_config.rm_server_url }}"
