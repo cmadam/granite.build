@@ -195,9 +195,7 @@ class TestThePair:
             DATASET_URI="s3://my-bucket/corpora/smoke.jsonl",
         )
         align_inputs = _targets(rendered)["align"]["inputs"]
-        assert (
-            align_inputs["teacher"]["uri"] == "hf:///ibm-granite/granite-4.1-3b"
-        )
+        assert align_inputs["teacher"]["uri"] == "hf:///ibm-granite/granite-4.1-3b"
         corpus_inputs = _targets(rendered)["corpus"]["inputs"]
         assert (
             corpus_inputs["source_dataset"]["uri"]
