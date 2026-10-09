@@ -1,7 +1,9 @@
 """Contract tests for step-template.yaml.
 
-Every steps/eval/*/ step shares this shape and differs only in `name`, BENCHMARK and
-its defaults, so this suite checks every sibling as well as this one.
+Every steps/eval/*/ step is one granite-evals image family: it shares this shape and
+differs only in `name`, the family's image env var, and its config defaults.
+`granite_config.benchmark` selects which benchmark in the family a target runs; this
+suite checks every sibling as well as this one.
 """
 
 import re
@@ -48,11 +50,13 @@ def test_this_step_is_found():
     assert _HERE / "step-template.yaml" in _TEMPLATES
 
 
-def test_name_matches_directory_and_benchmark(template, step, run_script):
-    name = template.parent.parent.name
-    assert step["name"] == name
-    (bench,) = re.findall(r"^BENCHMARK=(\S+)$", run_script, flags=re.M)
-    assert name == bench
+def test_name_matches_directory(template, step):
+    assert step["name"] == template.parent.parent.name
+
+
+def test_benchmark_is_a_required_config_field(step, run_script):
+    assert step["config"]["granite_config"]["benchmark"] == ""
+    assert 'BENCHMARK="{{ config.granite_config.benchmark }}"' in run_script
 
 
 def test_type_is_a_real_step_type(step):
@@ -103,6 +107,13 @@ def test_monitor_honours_recipe_poll_keys(step):
     assert mon["ref"] == "space://monitors/skypilot"
     assert "config.poll_interval_seconds" in mon["config"]["poll_interval_seconds"]
     assert "config.log_retrieval_interval_seconds" in mon["config"]["log_retrieval"]["interval_seconds"]
+
+
+def test_monitor_regex_is_keyed_on_the_configured_benchmark(step):
+    mon = step["environment_configs"]["Skypilot"]["monitors"]["skypilot_monitor"]
+    regex = mon["config"]["extra_event_configs"][0]["line_regex"]
+    assert "{{ config.granite_config.benchmark }}" in regex
+    assert "vLLM ready at" in regex
 
 
 def test_every_config_key_reaches_the_script(step, run_script):
