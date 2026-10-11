@@ -1,0 +1,65 @@
+# distill-safety-frontload-corpus — build the pinned corpus with safety rows FRONT-LOADED
+# into the first steps, for arm A6 and Track B of the on-policy study
+# (distillation-reports/20261008-2345, section 5, Track 0 check 6). CPU only. BlueVela.
+#
+# THE OUTPUT IS A DROP-IN CORPUS_DIR for distill-onpolicy-switch-study: train.jsonl,
+# eval.jsonl (the base corpus's, unchanged) and a corpus_manifest.json that passes
+# corpus-pin-check and the trainer's row-count check. It only works in FILE ORDER: the
+# training recipe must set TRAIN_SAMPLING_STRATEGY=sequential, or the trainer's shuffle
+# spreads the safety rows over the whole epoch and undoes the front-loading.
+#
+# Override any value with: gb build start --param KEY=VALUE
+
+# ─── Where things are ─────────────────────────────────────────────────
+# The corpus every study arm trains on, by default: the one c2000 trained on.
+BASE_CORPUS_DIR: "/proj/granite-build/g4os/distill/distill-350m-stage1/df8512e0-be93-4762-85ad-813d9080d72f/corpus"
+# The tokenizer that DEFINES that corpus -- its manifest's tokenizer_path. The safety rows
+# are filtered with it, so they obey the same max_length budget as every other row.
+BASE_TOKENIZER: "/proj/granite-build/g4os/distill/distill-350m-stage1/df8512e0-be93-4762-85ad-813d9080d72f/align/retagged_student"
+# The pinned corpus carries NO safety label: its rows are {messages, row_id}, and the
+# granite-4.0 SFT source it came from labels rows only general / tools / rag. The labelled
+# rows live in the granite-4.1 SFT set, whose general.jsonl has 12,817 rows with
+# domain "safety" (counted 2026-10-11) -- the same 12,817 the 09-24 report mixed 5x for
+# karve's 30B-teacher run. 41 GB, so the filter pre-screens each line as text first.
+SAFETY_SOURCE: "/proj/granite-build/g4os/datasets/ibm-granite--granite-4.1-sft-datasets-r260414a/general.jsonl"
+SAFETY_DOMAIN: "safety"
+# Absolute, outside any build directory: this is a pinned input other builds read.
+# Name it after its settings so two variants never share a directory.
+OUTPUT_DIR: "/proj/granite-build/g4os/distill/corpora/safety-frontload-x5-w1000"
+
+# ─── The front-load ───────────────────────────────────────────────────
+# The window is the rows the first FRONT_STEPS optimizer steps consume, at the training
+# recipe's effective batch (2 per device x 3 accumulation x 2 nodes x 8 GPUs = 96).
+# 1,000 steps: where the off-policy run's safety damage happened (09-29 1019 report).
+FRONT_STEPS: 1000
+EFFECTIVE_BATCH: 96
+# The share of the window that is safety rows. 0.038 is the density 09-24 measured as
+# working -- its 12,817 rows mixed 5x came to ~3.8% of that run's corpus and gave SALAD 93.9
+# / AttaQ 82.1 at no net capability cost -- concentrated into the window instead of spread
+# over an epoch: 3,648 of the first 96,000 rows, all distinct. Above 12,817 / 96,000 =
+# 0.1335 the rows repeat, and the build log says how often.
+SAFETY_WINDOW_FRACTION: 0.038
+# After the window the base corpus continues at its own density, i.e. no labelled safety
+# rows are added there. The base rows are shuffled once, with this seed, so the window is
+# a random sample of the corpus rather than its first rows in prep order.
+SHUFFLE_SEED: 45
+
+# ─── Prep policy for the safety rows ──────────────────────────────────
+# The base corpus's own policies (its corpus_manifest.json), so a safety row survives on
+# exactly the terms a base row did.
+MAX_LENGTH: 8192
+THINK_POLICY: "keep"
+DOCUMENTS_POLICY: "keep"
+SEED: 42
+
+# ─── Infrastructure ───────────────────────────────────────────────────
+IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
+CLUSTER: "bluevela"
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
+QUEUE: "normal"
+# The merge holds the 3 GB base train.jsonl in memory while it shuffles.
+CPUS: 8
+MEMORY: 64
+POLL_INTERVAL_SECONDS: 30
+LOG_RETRIEVAL_INTERVAL_SECONDS: 120
+MAX_RETRIES: 1

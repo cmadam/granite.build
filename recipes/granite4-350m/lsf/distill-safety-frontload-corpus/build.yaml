@@ -1,0 +1,235 @@
+######
+# distill-safety-frontload-corpus -- the pinned GOLD corpus with labelled safety rows
+# placed in the rows the first FRONT_STEPS steps consume. BlueVela (SkyPilot / LSF),
+# CPU only, three targets:
+#
+#   safety-source   filter SAFETY_SOURCE to domain SAFETY_DOMAIN, spelled as messages
+#   safety-prep     distill/corpus-prep on those rows, with the base corpus's tokenizer
+#                   and policies, so a safety row survives exactly as a base row did
+#   frontload       shuffle the base rows once, mix the safety rows into the first window
+#                   at SAFETY_WINDOW_FRACTION, write train.jsonl + eval.jsonl + manifest
+#
+# The output directory is a CORPUS_DIR for distill-onpolicy-switch-study, which must then
+# read it with TRAIN_SAMPLING_STRATEGY=sequential: the default shuffle would spread the
+# safety rows over the epoch. The manifest is the base corpus's with its split and row
+# counts rewritten (the trainer refuses a row count that disagrees with it) and a
+# `frontload` section recording how the file was built.
+#
+# Values come from parameters.yaml beside this file.
+######
+granite.build:
+  name: distill-350m-safety-frontload-corpus
+  retries:
+    max_retries: $${MAX_RETRIES}
+    target_reuse_enabled: true
+  targets:
+
+    safety-source:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        source:
+          uri: "env://$${SAFETY_SOURCE}"
+          type: dataset
+      outputs:
+        safety_source:
+          uri: "env://{{ binding.path }}"
+          type: dataset
+      steps:
+        - step_uri: space://steps/command
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${MEMORY}
+            command_config:
+              command: |
+                set -euo pipefail
+                OUT="$${OUTPUT_DIR}/safety-source"
+                mkdir -p "$OUT"
+                /stage/.venv/bin/python - "$${SAFETY_SOURCE}" "$${SAFETY_DOMAIN}" "$OUT/safety.jsonl" <<'PY'
+                import json, sys
+                src, domain, dst = sys.argv[1:]
+                # A text pre-screen first: the file is 41 GB and almost no line matches.
+                needle = '"domain":"' + domain + '"'
+                n = 0
+                with open(src, encoding="utf-8") as fin, open(dst + ".tmp", "w", encoding="utf-8") as fout:
+                    for line in fin:
+                        if needle not in line.replace('": "', '":"'):
+                            continue
+                        row = json.loads(line)
+                        if row.get("domain") != domain:
+                            continue
+                        messages = row.get("messages") or row.get("conversations")
+                        if not messages:
+                            continue
+                        fout.write(json.dumps({"messages": messages, "src_uuid": row.get("uuid"),
+                                               "source": row.get("source")}, ensure_ascii=False) + "\n")
+                        n += 1
+                if n == 0:
+                    sys.exit(f"safety-source: FATAL: no rows with domain {domain!r} in {src}")
+                import os
+                os.replace(dst + ".tmp", dst)
+                print(f"safety-source: {n} rows with domain {domain!r}")
+                PY
+                echo "GB_ARTIFACT_ID:safety_source GB_ARTIFACT_PATH:$OUT/safety.jsonl"
+
+    safety-prep:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        tokenizer:
+          uri: "env://$${BASE_TOKENIZER}"
+          type: model
+        source_dataset:
+          binding: safety-source.safety_source
+      outputs:
+        corpus:
+          uri: "env://{{ binding.path }}"
+          type: dataset
+      steps:
+        - step_uri: space://steps/distill/corpus-prep
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${MEMORY}
+            corpus_config:
+              out_dir: "$${OUTPUT_DIR}/safety-prep"
+              max_length: $${MAX_LENGTH}
+              length_policy: "drop"
+              think_policy: "$${THINK_POLICY}"
+              completion_boundary: "last_message"
+              min_messages: 2
+              documents_policy: "$${DOCUMENTS_POLICY}"
+              # Zero: every surviving safety row is a training row. The corpus's held-out
+              # split is the base corpus's eval.jsonl, copied unchanged by frontload.
+              eval_fraction: 0.0
+              seed: $${SEED}
+              max_examples: 0
+              emit_row_id: true
+
+    frontload:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        base_corpus:
+          uri: "env://$${BASE_CORPUS_DIR}/train.jsonl"
+          type: dataset
+        safety_corpus:
+          binding: safety-prep.corpus
+      outputs:
+        corpus:
+          uri: "env://{{ binding.path }}"
+          type: dataset
+      steps:
+        - step_uri: space://steps/command
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${MEMORY}
+            command_config:
+              command: |
+                set -euo pipefail
+                /stage/.venv/bin/python - <<'PY'
+                import hashlib, json, os, random, shutil, sys
+                base_dir = "$${BASE_CORPUS_DIR}".rstrip("/")
+                safety_path = "{{ bindings.safety_corpus.binding.path }}"
+                out = "$${OUTPUT_DIR}"
+                window = int("$${FRONT_STEPS}") * int("$${EFFECTIVE_BATCH}")
+                fraction = float("$${SAFETY_WINDOW_FRACTION}")
+                seed = int("$${SHUFFLE_SEED}")
+
+                with open(os.path.join(base_dir, "corpus_manifest.json")) as f:
+                    manifest = json.load(f)
+                with open(os.path.join(base_dir, "train.jsonl"), encoding="utf-8") as f:
+                    base = f.readlines()
+                with open(safety_path, encoding="utf-8") as f:
+                    safety = f.readlines()
+                if not 0.0 < fraction < 1.0:
+                    sys.exit(f"frontload: FATAL: SAFETY_WINDOW_FRACTION {fraction} not in (0, 1)")
+                if not safety:
+                    sys.exit(f"frontload: FATAL: no safety rows survived prep in {safety_path}")
+                if window >= len(base):
+                    sys.exit(f"frontload: FATAL: window {window} rows >= base corpus {len(base)}")
+
+                def row_id(line):
+                    return json.loads(line).get("row_id")
+
+                base_ids = {row_id(l) for l in base}
+                overlap = sum(1 for l in safety if row_id(l) in base_ids)
+
+                rng = random.Random(seed)
+                rng.shuffle(base)
+                n_safe = round(fraction * window)
+                picked = []
+                while len(picked) < n_safe:
+                    pool = list(safety)
+                    rng.shuffle(pool)
+                    picked += pool[: n_safe - len(picked)]
+                repeats = n_safe / len(safety)
+                head = base[: window - n_safe] + picked
+                rng.shuffle(head)
+                rows = head + base[window - n_safe :]
+                safe_set = {id(l) for l in picked}
+
+                os.makedirs(out, exist_ok=True)
+                train = os.path.join(out, "train.jsonl")
+                rows_path = os.path.join(out, "corpus_rows.jsonl")
+                with open(train + ".tmp", "w", encoding="utf-8") as ft, open(rows_path, "w", encoding="utf-8") as fr:
+                    for i, line in enumerate(rows):
+                        ft.write(line if line.endswith("\n") else line + "\n")
+                        fr.write(json.dumps({"index": i, "row_id": row_id(line),
+                                             "origin": "safety" if id(line) in safe_set else "base"}) + "\n")
+                os.replace(train + ".tmp", train)
+                shutil.copyfile(os.path.join(base_dir, "eval.jsonl"), os.path.join(out, "eval.jsonl"))
+                with open(rows_path, "rb") as f:
+                    rows_sha = hashlib.sha256(f.read()).hexdigest()
+
+                in_window = sum(1 for l in rows[:window] if id(l) in safe_set)
+                manifest["splits"]["train"] = {"path": train, "examples": len(rows)}
+                manifest["splits"]["eval"]["path"] = os.path.join(out, "eval.jsonl")
+                manifest["rows"] = dict(manifest.get("rows") or {}, path=rows_path, sha256=rows_sha,
+                                        entries=len(rows), training_rows=len(rows))
+                manifest["frontload"] = {
+                    "base_corpus_dir": base_dir,
+                    "base_training_rows": len(base),
+                    "safety_source": "$${SAFETY_SOURCE}",
+                    "safety_domain": "$${SAFETY_DOMAIN}",
+                    "safety_rows_available": len(safety),
+                    "safety_rows_already_in_base": overlap,
+                    "front_steps": int("$${FRONT_STEPS}"),
+                    "effective_batch": int("$${EFFECTIVE_BATCH}"),
+                    "window_rows": window,
+                    "window_fraction": fraction,
+                    "safety_rows_in_window": in_window,
+                    "safety_repeats": round(repeats, 4),
+                    "shuffle_seed": seed,
+                    "requires": "train_sampling_strategy sequential",
+                }
+                with open(os.path.join(out, "corpus_manifest.json"), "w") as f:
+                    json.dump(manifest, f, indent=2)
+                print(f"frontload: {len(rows)} rows; {in_window} safety rows in the first {window} "
+                      f"({in_window / window:.2%}); {len(safety)} available, {overlap} already in the base "
+                      f"corpus; each used {repeats:.2f}x")
+                PY
+                echo "GB_ARTIFACT_ID:corpus GB_ARTIFACT_PATH:$${OUTPUT_DIR}/train.jsonl"

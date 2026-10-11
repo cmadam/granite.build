@@ -1,0 +1,305 @@
+######
+# distill-model-screening-eval -- the on-policy study's SCREENING evals on models that
+# no training build produced: weight interpolations of two checkpoints of one lineage
+# (Track 0 check 2), and any model given by path (Track 0 check 7, the measured cost of
+# one screening launch). BlueVela (SkyPilot / LSF). No training.
+#
+#   INTERP_RATIOS   "0.3,0.5,0.7": for each ratio r, interp-<id> writes
+#                   r * INTERP_MODEL_A + (1 - r) * INTERP_MODEL_B, tensor by tensor, and
+#                   <id> is r x 100 (30, 50, 70). Empty: no interpolation.
+#   EVAL_MODELS     "<id>=<path>;<id>=<path>": models evaluated as they are. <id> must be
+#                   numeric -- the roll-up keys each column on ckpt_<id>. Empty: none.
+#   EVALS           which evals, as EVAL_CATALOG names plus "bfcl". Default: SCREEN_EVALS.
+#                   For a full battery on a ratio that earned one, pass every name.
+#
+# Every model then gets the selected evals, one CSV per eval kind, and all of them land
+# in one combined.csv whose columns are ckpt_<id>.
+#
+# Parameters come from distill-onpolicy-switch-study's parameters.yaml -- the eval
+# catalog, the images, the queues, SCREEN_EVALS -- so the two cannot drift. Everything
+# specific to this build is a --param with a default here:
+#
+#   gb build start -f recipes/granite4-350m/lsf/distill-model-screening-eval/build.yaml \
+#     --parameters-path recipes/granite4-350m/lsf/distill-onpolicy-switch-study/parameters.yaml \
+#     --space public \
+#     --param EXPERIMENT=<a fresh name> \
+#     --param INTERP_RATIOS=0.3,0.5,0.7 \
+#     --param OE_EVAL_BCB_API_URL=<bcb-server url, if EVALS names olmes-bigcodebench>
+######
+<% set CATS = (EVAL_CATEGORIES | string | replace(" ", "") | lower).split(",") %>
+<% set PICK = (EVALS | default(SCREEN_EVALS) | string | replace(" ", "") | lower).split(",") %>
+<% set A = INTERP_MODEL_A | default("/proj/granite-build/g4os/distill/distill-350m-ckpt-eval-20260929/1e2e969e-0a26-46f2-be2b-74e351e6ca24/export-2000") %>
+<% set B = INTERP_MODEL_B | default("/proj/granite-build/g4os/distill/distill-350m-ck2500-lmbda05-20261006_0000/8d81d262-407a-4f62-bcf2-09036cb3af60/export-2500") %>
+<% set OUT = (INTERP_OUTPUT_DIR | default("/proj/granite-build/g4os/distill/interpolations") | string).rstrip("/") %>
+<% set RATIOS = (INTERP_RATIOS | default("0.3,0.5,0.7") | string | replace(" ", "")).split(",") if INTERP_RATIOS | default("0.3,0.5,0.7") | string | trim else [] %>
+<% set PLAIN = (EVAL_MODELS | default("") | string | replace(" ", "")).split(";") if EVAL_MODELS | default("") | string | trim else [] %>
+<% set IDS = [] %>
+<% for r in RATIOS %><% set _ = IDS.append(((r | float) * 100) | round | int | string) %><% endfor %>
+<% for m in PLAIN %><% set _ = IDS.append(m.split("=")[0]) %><% endfor %>
+<% set SAGE = [] %>
+<% for e in EVAL_CATALOG %><% if e.category in CATS and e.name in PICK %><% set _ = SAGE.append(e) %><% endif %><% endfor %>
+<% set WANT_BFCL = "bfcl" in CATS and "bfcl" in PICK %>
+granite.build:
+  name: distill-350m-model-screening-eval
+  retries:
+    max_retries: $${MAX_RETRIES}
+    target_reuse_enabled: true
+  targets:
+
+<% for r in RATIOS %>
+<% set ID = ((r | float) * 100) | round | int | string %>
+    # Tensor-by-tensor r * A + (1 - r) * B in float32, cast back to each tensor's own
+    # dtype. Refuses two models whose tensor names, shapes or tokenizer.json differ: an
+    # interpolation is only meaningful inside one lineage and one vocabulary. Every
+    # non-weight file (config, tokenizer, chat template) is A's.
+    interp-$${ID}:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        model_a:
+          uri: "env://$${A}"
+          type: model
+        model_b:
+          uri: "env://$${B}"
+          type: model
+      outputs:
+        hf_model:
+          uri: "env://{{ binding.path }}"
+          type: model
+      steps:
+        - step_uri: space://steps/command
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_cpus_per_node: $${EXPORT_CPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+            command_config:
+              command: |
+                set -euo pipefail
+                DEST="$${OUT}/$${EXPERIMENT}/interp-$${ID}"
+                /stage/.venv/bin/python - "$${A}" "$${B}" "$${r}" "$DEST" <<'PY'
+                import hashlib, os, shutil, sys
+                from pathlib import Path
+                import torch
+                from safetensors.torch import load_file, save_file
+                a, b, ratio, dest = Path(sys.argv[1]), Path(sys.argv[2]), float(sys.argv[3]), Path(sys.argv[4])
+                if not 0.0 <= ratio <= 1.0:
+                    sys.exit(f"interp: FATAL: ratio {ratio} not in [0, 1]")
+                def sha(p):
+                    return hashlib.sha256(p.read_bytes()).hexdigest()
+                if sha(a / "tokenizer.json") != sha(b / "tokenizer.json"):
+                    sys.exit("interp: FATAL: tokenizer.json differs between the two models")
+                shards = sorted(p.name for p in a.glob("*.safetensors"))
+                if not shards or shards != sorted(p.name for p in b.glob("*.safetensors")):
+                    sys.exit(f"interp: FATAL: safetensors files differ: {shards}")
+                tmp = dest.with_name(dest.name + ".tmp")
+                shutil.rmtree(tmp, ignore_errors=True)
+                tmp.mkdir(parents=True)
+                for f in a.iterdir():
+                    if f.is_file() and f.suffix != ".safetensors":
+                        shutil.copy2(f, tmp / f.name)
+                n = 0
+                for shard in shards:
+                    ta, tb = load_file(str(a / shard)), load_file(str(b / shard))
+                    if ta.keys() != tb.keys():
+                        sys.exit(f"interp: FATAL: {shard}: tensor names differ")
+                    out = {}
+                    for k, x in ta.items():
+                        y = tb[k]
+                        if x.shape != y.shape:
+                            sys.exit(f"interp: FATAL: {k}: shape {tuple(x.shape)} != {tuple(y.shape)}")
+                        out[k] = (ratio * x.float() + (1.0 - ratio) * y.float()).to(x.dtype).contiguous()
+                        n += 1
+                    save_file(out, str(tmp / shard), metadata={"format": "pt"})
+                (tmp / "interpolation.txt").write_text(f"{ratio} * {a}\n+ {1.0 - ratio} * {b}\n")
+                shutil.rmtree(dest, ignore_errors=True)
+                os.replace(tmp, dest)
+                print(f"interp: {n} tensors, {ratio} * A + {1.0 - ratio:.2f} * B -> {dest}")
+                PY
+                echo "GB_ARTIFACT_ID:hf_model GB_ARTIFACT_PATH:$DEST"
+
+<% endfor %>
+
+<% for ID in IDS %>
+<% set PATHS = [] %><% for m in PLAIN %><% if m.split("=")[0] == ID %><% set _ = PATHS.append(m.split("=", 1)[1]) %><% endif %><% endfor %>
+<% for e in SAGE %>
+    eval-$${e.name}-m$${ID}:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        model:
+<% if PATHS %>
+          uri: "env://$${PATHS[0]}"
+          type: model
+<% else %>
+          binding: interp-$${ID}.hf_model
+<% endif %>
+      outputs:
+        sage_eval_results:
+          type: dataset
+          uri: "env://$${SAGE_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${ID}/$${e.output_subpath}"
+      steps:
+        - step_uri: space://steps/sage-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            sage_eval_config:
+              gb_script: "$${e.gb_script}"
+              experiment: "$${EXPERIMENT}-ckpt_$${ID}"
+              batch_size: $${e.batch_size | default(SAGE_BATCH_SIZE)}
+              max_length: $${e.max_length | default(SAGE_MAX_LENGTH)}
+              num_gpus: $${SAGE_NUM_GPUS}
+              output_dir: "$${SAGE_OUTPUT_DIR}"
+              image_id: "$${e.image_id}"
+<% if e.extra_env | default({}) or e.needs_bcb_url | default(false) %>
+              extra_env:
+<% for k, v in (e.extra_env | default({})).items() %>
+                $${k}: "$${v}"
+<% endfor %>
+<% if e.needs_bcb_url | default(false) %>
+                OE_EVAL_BCB_API_URL: "$${OE_EVAL_BCB_API_URL}"
+<% endif %>
+<% else %>
+              extra_env: {}
+<% endif %>
+            launcher_config:
+              resources:
+                accelerators: "$${EVAL_ACCELERATORS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${EVAL_MEMORY}
+<% endfor %>
+<% if SAGE %>
+
+    export-sage-m$${ID}:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+<% for e in SAGE %>
+        gate_$${e.name | replace("-", "_")}:
+          binding: eval-$${e.name}-m$${ID}.sage_eval_results
+<% endfor %>
+      outputs:
+        sage_export_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${ID}-sage.csv"
+      steps:
+        - step_uri: space://steps/sage-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            sage_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${ID}"
+              export_stack: "$${EXPORT_STACK}"
+              input_dir: "$${SAGE_OUTPUT_DIR}"
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${ID}-sage.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endif %>
+<% if WANT_BFCL %>
+
+    eval-bfcl-m$${ID}:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        model:
+<% if PATHS %>
+          uri: "env://$${PATHS[0]}"
+          type: model
+<% else %>
+          binding: interp-$${ID}.hf_model
+<% endif %>
+      outputs:
+        bfcl_results:
+          type: dataset
+          uri: "env://$${BFCL_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${ID}/$${BFCL_EVAL_NAME}"
+      steps:
+        - step_uri: space://steps/bfcl-eval
+          config:
+            poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            bfcl_config:
+              model_id: "$${BFCL_MODEL_ID}"
+              experiment: "$${EXPERIMENT}-ckpt_$${ID}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              test_categories: "$${BFCL_TEST_CATEGORIES}"
+              num_gpus_generate: $${BFCL_NUM_GPUS}
+              num_gpus_evaluate: $${BFCL_NUM_GPUS}
+              gpu_memory_utilization: "$${BFCL_GPU_MEMORY_UTILIZATION}"
+              output_dir: "$${BFCL_OUTPUT_DIR}"
+            launcher_config:
+              resources:
+                accelerators: "H100:$${BFCL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${EVAL_QUEUE}"
+                memory: $${GPU_MEMORY}
+
+    export-bfcl-m$${ID}:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+        gate_bfcl:
+          binding: eval-bfcl-m$${ID}.bfcl_results
+      outputs:
+        bfcl_export_csv:
+          type: dataset
+          uri: "env://$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${ID}-bfcl.csv"
+      steps:
+        - step_uri: space://steps/bfcl-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            bfcl_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${ID}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              input_dir: "$${BFCL_OUTPUT_DIR}"
+              output_csv: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${ID}-bfcl.csv"
+              filter: "$${BFCL_FILTER}"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endif %>
+<% endfor %>
+
+    export-combined:
+      environment_uri: "$${ENVIRONMENT_URI}"
+      inputs:
+<% for ID in IDS %>
+<% if SAGE %>
+        gate_sage_$${ID}:
+          binding: export-sage-m$${ID}.sage_export_csv
+<% endif %>
+<% if WANT_BFCL %>
+        gate_bfcl_$${ID}:
+          binding: export-bfcl-m$${ID}.bfcl_export_csv
+<% endif %>
+<% endfor %>
+      outputs:
+        combined_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/combined.csv"
+      steps:
+        - step_uri: space://steps/combined-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            combined_export_config:
+<% if SAGE %>
+              sage_input_dir: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}"
+<% else %>
+              sage_input_dir: ""
+<% endif %>
+<% if WANT_BFCL %>
+              bfcl_input_dir: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}"
+<% else %>
+              bfcl_input_dir: ""
+<% endif %>
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/combined.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
