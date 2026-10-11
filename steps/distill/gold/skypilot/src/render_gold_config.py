@@ -40,7 +40,7 @@ renders is a config the trainer can read.
 import argparse
 import dataclasses
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 
 import yaml
 
@@ -214,6 +214,22 @@ def _lr(value: float) -> float:
     return float(f"{float(value):.2e}")
 
 
+def _lmbda_range_enters(args: argparse.Namespace, bound: Tuple[float, float]) -> bool:
+    """Whether the run's lmbda is ever strictly inside ``bound``.
+
+    A constant schedule has one value. A linear ramp visits every value between lmbda_init and
+    lmbda, so a 0 -> 1 ramp has both policy classes in play for all but its two end steps --
+    which is what lmbda_strictly_between exists to guarantee -- even though neither end is
+    inside the bound.
+    """
+    if args.lmbda_schedule != "linear":
+        return bound[0] < args.lmbda < bound[1]
+    lo, hi = sorted((float(args.lmbda_init), float(args.lmbda)))
+    if lo == hi:
+        return bound[0] < lo < bound[1]
+    return lo < bound[1] and hi > bound[0]
+
+
 def _validate_arm(args: argparse.Namespace, *, online: bool) -> Dict[str, Any]:
     """Return the loss-arm's flags, or {} when no arm was named.
 
@@ -258,10 +274,16 @@ def _validate_arm(args: argparse.Namespace, *, online: bool) -> Dict[str, Any]:
                 f"loss_arm={args.loss_arm!r} requires {bound[0]} < beta < {bound[1]}; "
                 f"got beta={args.beta}.{tail}"
             )
-        if kind == "lmbda_strictly_between" and not bound[0] < args.lmbda < bound[1]:
+        if kind == "lmbda_strictly_between" and not _lmbda_range_enters(args, bound):
             raise ValueError(
                 f"loss_arm={args.loss_arm!r} requires {bound[0]} < lmbda < {bound[1]}; "
-                f"got lmbda={args.lmbda}.{tail}"
+                f"got lmbda={args.lmbda}"
+                + (
+                    f" (linear from lmbda_init={args.lmbda_init})"
+                    if args.lmbda_schedule == "linear"
+                    else ""
+                )
+                + f".{tail}"
             )
         if kind == "last_message_only" and bool(args.last_message_only) != bool(bound):
             raise ValueError(
@@ -381,6 +403,34 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
                 "lmbda_schedule linear ramps towards on-policy sampling, so it needs a "
                 "vLLM server; set vllm_num_servers > 0 or leave the schedule constant"
             )
+    if (
+        args.lmbda_ramp_start_step or args.lmbda_ramp_steps
+    ) and args.lmbda_schedule != "linear":
+        raise ValueError(
+            "lmbda_ramp_start_step and lmbda_ramp_steps shape the linear ramp; with "
+            f"lmbda_schedule {args.lmbda_schedule!r} they would be silently inert"
+        )
+    if args.lmbda_ramp_start_step < 0 or args.lmbda_ramp_steps < 0:
+        raise ValueError("lmbda_ramp_start_step and lmbda_ramp_steps must be >= 0")
+    if args.stop_at_step < 0:
+        raise ValueError(f"stop_at_step must be >= 0; got {args.stop_at_step}")
+    if args.stop_at_step and args.max_steps > 0 and args.stop_at_step > args.max_steps:
+        raise ValueError(
+            f"stop_at_step {args.stop_at_step} is past max_steps {args.max_steps}, so it "
+            "would never fire"
+        )
+    if args.adam_beta2 >= 0 and not 0.0 < args.adam_beta2 < 1.0:
+        raise ValueError(f"adam_beta2 must be in (0, 1); got {args.adam_beta2}")
+    if args.train_sampling_strategy not in (
+        "",
+        "random",
+        "sequential",
+        "group_by_length",
+    ):
+        raise ValueError(
+            "train_sampling_strategy must be random, sequential or group_by_length; got "
+            f"{args.train_sampling_strategy!r}"
+        )
     if args.min_completion_length > 0 and not online:
         raise ValueError(
             "min_completion_length bounds the student's vLLM rollout, so it does nothing "
@@ -407,6 +457,18 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
         # already trained on. Emitted ONLY when >= 0, for the same byte-identity reason as
         # max_steps above. A stock TrainingArguments field, so not a trainer extension.
         **({"data_seed": args.data_seed} if args.data_seed >= 0 else {}),
+        # Two more stock TrainingArguments fields, emitted only when set for the same
+        # byte-identity reason. adam_beta2 is the optimizer's second-moment horizon,
+        # about 1 / (1 - beta2) steps: 1,000 at the default 0.999, 20 at 0.95.
+        # "sequential" feeds the corpus in file order, which is the only way a corpus
+        # whose row ORDER carries meaning (rows front-loaded into the first steps)
+        # survives the default shuffle.
+        **({"adam_beta2": float(args.adam_beta2)} if args.adam_beta2 >= 0 else {}),
+        **(
+            {"train_sampling_strategy": args.train_sampling_strategy}
+            if args.train_sampling_strategy
+            else {}
+        ),
         "learning_rate": _lr(args.learning_rate),
         "warmup_ratio": float(args.warmup_ratio),
         "lr_scheduler_type": args.lr_scheduler_type,
@@ -470,6 +532,18 @@ def build_config(args: argparse.Namespace) -> Dict[str, Any]:
             if args.min_completion_length > 0
             else {}
         ),
+        # The ramp's window, patch-gated (patches/onpolicy_study.diff); only with linear.
+        **(
+            {"lmbda_ramp_start_step": args.lmbda_ramp_start_step}
+            if args.lmbda_ramp_start_step > 0
+            else {}
+        ),
+        **(
+            {"lmbda_ramp_steps": args.lmbda_ramp_steps}
+            if args.lmbda_ramp_steps > 0
+            else {}
+        ),
+        **({"stop_at_step": args.stop_at_step} if args.stop_at_step > 0 else {}),
     }
 
     # The arm's flags, and ONLY the ones not already emitted above. A flag that is also a
@@ -574,6 +648,9 @@ _TRAINER_EXTENSION_KEYS = frozenset(
         "lmbda_schedule",
         "lmbda_init",
         "min_completion_length",
+        "lmbda_ramp_start_step",
+        "lmbda_ramp_steps",
+        "stop_at_step",
     }
 )
 
@@ -655,9 +732,10 @@ def check_trainer_accepts(config: Dict[str, Any]) -> None:
             f"{', '.join(missing)}, so emitting them would make TrlParser reject this config "
             "on every node after the allocation is already held. The trainer comes from "
             "code_config (see the step's step-template.yaml); to use these keys, point "
-            "code_config.code_dir at a checkout carrying "
-            "steps/distill/gold/skypilot/patches/ce_anchor_and_entropy_guard.diff -- its "
-            "header has the exact patch invocation and the directory remap it needs. To run "
+            "code_config.code_dir at a checkout carrying the patch that defines them: "
+            "steps/distill/gold/skypilot/patches/ce_anchor_and_entropy_guard.diff for the CE "
+            "anchor and the guard, onpolicy_study.diff for min_completion_length, the lmbda "
+            "ramp window and stop_at_step. Each header has the exact invocation. To run "
             "without them, leave the corresponding gold_config keys at their defaults"
         )
 
@@ -691,6 +769,10 @@ def _parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--max-steps", type=int, default=0)
     # -1 => absent from the rendered config, i.e. the sampler follows `seed`.
     p.add_argument("--data-seed", type=int, default=-1)
+    # -1 => absent, i.e. the trainer's 0.999.
+    p.add_argument("--adam-beta2", type=float, default=-1.0)
+    # empty => absent, i.e. the trainer's "random".
+    p.add_argument("--train-sampling-strategy", default="")
     p.add_argument("--learning-rate", type=float, default=1.0e-05)
     p.add_argument("--min-lr", type=float, default=1.0e-06)
     p.add_argument("--warmup-ratio", type=float, default=0.05)
@@ -752,6 +834,24 @@ def _parse_args(argv=None) -> argparse.Namespace:
         help="constant, or linear to ramp lmbda from --lmbda-init up to --lmbda.",
     )
     p.add_argument("--lmbda-init", type=float, default=0.0)
+    p.add_argument(
+        "--lmbda-ramp-start-step",
+        type=int,
+        default=0,
+        help="linear schedule: the step the ramp starts at (lmbda_init before it).",
+    )
+    p.add_argument(
+        "--lmbda-ramp-steps",
+        type=int,
+        default=0,
+        help="linear schedule: the ramp's length in steps; 0 ramps to max_steps.",
+    )
+    p.add_argument(
+        "--stop-at-step",
+        type=int,
+        default=0,
+        help="save and stop at this step without changing max_steps; 0 disables.",
+    )
     p.add_argument(
         "--min-completion-length",
         type=int,

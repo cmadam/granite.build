@@ -1,0 +1,197 @@
+gold: lmbda ramp window, generation floor, stop_at_step
+
+Applies to: github.com/laminair/gb-steps-distillation at
+            288bfc6bdab589eca394ca9f7229f1138a6da1c4 -- the commit
+            lmbda_linear_schedule.diff produces from a5d59bc4 -- from the checkout ROOT:
+
+              git -C <checkout> apply steps/distill/gold/skypilot/patches/onpolicy_study.diff
+
+            git apply skips this header.
+
+Four CustomGOLDConfig fields, each needed by an arm of the on-policy study
+(recipes/granite4-350m/lsf/distill-onpolicy-switch-study). Every one defaults to the
+behaviour of 288bfc6b, so a run that leaves them alone trains exactly as it did there.
+
+  lmbda_ramp_start_step, lmbda_ramp_steps
+      The linear schedule ramped over global_step / max_steps, so it could neither ramp
+      over part of a run (0 -> 1 over the first half, then 1) nor start at a resumed run's
+      own first step (a run resumed at 2,000 of an 8,150-step schedule began its ramp at
+      0.25 of the way up). The ramp now runs from lmbda_ramp_start_step for
+      lmbda_ramp_steps steps, 0 meaning "until max_steps".
+
+  min_completion_length
+      The generation floor. trl 0.26.2's vllm_serve merges a request's generation_kwargs
+      into SamplingParams last, so the trainer sends {"min_tokens": N} with every server
+      request and the floor needs no server-side patch. Colocate mode sets
+      SamplingParams.min_tokens directly. 0 sends nothing.
+
+  stop_at_step
+      Save and stop at a fixed step while leaving max_steps -- and with it the LR
+      schedule's shape -- alone. A resume of an 8,150-step run that should train 2,500
+      more steps cannot lower max_steps without reshaping the schedule it restores.
+
+Verified 2026-10-11 on stubs of the patched methods: the defaults reproduce
+0.25 / 0.3125 / 0.375 / 0.4375 / 0.5 at steps 0 / 625 / 1250 / 1875 / 2500 for 0.25 -> 0.5
+over 2,500; ramp (0, 1250) gives 0 / 0.5 / 1 / 1 at 0 / 625 / 1250 / 2500; ramp
+(2000, 2500) on an 8,150-step schedule gives 0 / 0.5 / 1 at 2000 / 3250 / 4500.
+
+A REPRODUCIBLE COMMIT, as for lmbda_linear_schedule.diff. With this identity and date,
+and UNSIGNED, the patched commit is 00edb0db1978c385e1469361f8bcb9293b396222:
+
+  git clone https://github.com/laminair/gb-steps-distillation.git <checkout>
+  git -C <checkout> checkout a5d59bc45524a8d75706e20d44ae1a254f273f23
+  git -C <checkout> apply lmbda_linear_schedule.diff
+  GIT_AUTHOR_NAME=granite.build GIT_AUTHOR_EMAIL=granite.build@localhost \
+  GIT_COMMITTER_NAME=granite.build GIT_COMMITTER_EMAIL=granite.build@localhost \
+  GIT_AUTHOR_DATE=2026-10-05T00:00:00+0000 GIT_COMMITTER_DATE=2026-10-05T00:00:00+0000 \
+    git -C <checkout> -c commit.gpgsign=false commit -qam "gold: restore the linear lmbda schedule"
+  git -C <checkout> apply onpolicy_study.diff
+  GIT_AUTHOR_NAME=granite.build GIT_AUTHOR_EMAIL=granite.build@localhost \
+  GIT_COMMITTER_NAME=granite.build GIT_COMMITTER_EMAIL=granite.build@localhost \
+  GIT_AUTHOR_DATE=2026-10-11T00:00:00+0000 GIT_COMMITTER_DATE=2026-10-11T00:00:00+0000 \
+    git -C <checkout> -c commit.gpgsign=false commit -qam "gold: lmbda ramp window, generation floor, stop_at_step"
+
+diff --git a/src/gb_steps_post_training/distillation/custom_gold_config.py b/src/gb_steps_post_training/distillation/custom_gold_config.py
+index 8aab605..9d2b343 100644
+--- a/src/gb_steps_post_training/distillation/custom_gold_config.py
++++ b/src/gb_steps_post_training/distillation/custom_gold_config.py
+@@ -119,6 +119,22 @@ class CustomGOLDConfig(GOLDConfig):
+         default=1.0,
+         metadata={"help": "Fraction (0~1] of tokens to keep by student entropy (batch-global) after switching. E.g., 0.2 = top 20% highest-entropy tokens."},
+     )
++    lmbda_ramp_start_step: int = field(
++        default=0,
++        metadata={"help": "Linear lmbda schedule only: the optimizer step at which the ramp from lmbda_init starts. Before it lmbda is lmbda_init. Lets a run resumed at step N ramp over its own steps rather than over the whole schedule."},
++    )
++    lmbda_ramp_steps: int = field(
++        default=0,
++        metadata={"help": "Linear lmbda schedule only: the ramp's length in optimizer steps; lmbda holds at lmbda after it. 0 ramps until max_steps, the original behaviour."},
++    )
++    min_completion_length: int = field(
++        default=0,
++        metadata={"help": "vLLM server mode: minimum tokens the student must generate before EOS, sent as min_tokens in every request's generation_kwargs. 0 sends nothing."},
++    )
++    stop_at_step: int = field(
++        default=0,
++        metadata={"help": "Save a checkpoint and end training at this optimizer step, leaving max_steps -- and with it the LR schedule's shape -- unchanged. 0 trains to max_steps."},
++    )
+     opd_importance_sampling: bool = field(
+         default=False,
+         metadata={"help": "Enable truncated importance sampling for sampled_opd_loss to correct vLLM/HF distribution mismatch."},
+@@ -335,9 +351,14 @@ class CustomGOLDConfig(GOLDConfig):
+                 raise ValueError("lmbda_init must be in range [0, 1].")
+             if not (0.0 <= self.lmbda <= 1.0):
+                 raise ValueError("lmbda must be in range [0, 1].")
++            if self.lmbda_ramp_start_step < 0 or self.lmbda_ramp_steps < 0:
++                raise ValueError("lmbda_ramp_start_step and lmbda_ramp_steps must be >= 0.")
+         elif self.lmbda_schedule != "constant":
+             raise ValueError(f"lmbda_schedule must be 'constant' or 'linear', got '{self.lmbda_schedule}'.")
+ 
++        if self.min_completion_length < 0 or self.stop_at_step < 0:
++            raise ValueError("min_completion_length and stop_at_step must be >= 0.")
++
+         # Validate clip_alpha
+         if not (0.0 <= self.clip_alpha < 1.0):
+             raise ValueError("clip_alpha must be in range [0.0, 1.0).")
+diff --git a/src/gb_steps_post_training/distillation/custom_gold_trainer.py b/src/gb_steps_post_training/distillation/custom_gold_trainer.py
+index 40073c2..397e20b 100755
+--- a/src/gb_steps_post_training/distillation/custom_gold_trainer.py
++++ b/src/gb_steps_post_training/distillation/custom_gold_trainer.py
+@@ -2029,6 +2029,24 @@ class CustomULDLoss(ULDLoss):
+             )
+             return jsd_loss
+ 
++class _StopAtStepCallback(TrainerCallback):
++    """Save and stop at a fixed optimizer step without changing max_steps.
++
++    max_steps is what the LR scheduler is built from, so ending a run early by lowering it
++    reshapes the whole schedule -- and on a resume, the restored scheduler state is then read
++    against a different curve. This leaves the schedule alone and ends the loop instead.
++    """
++
++    def __init__(self, stop_at_step: int):
++        self.stop_at_step = stop_at_step
++
++    def on_step_end(self, args, state, control, **kwargs):
++        if state.global_step >= self.stop_at_step:
++            control.should_save = True
++            control.should_training_stop = True
++        return control
++
++
+ class CustomGOLDTrainer(GOLDTrainer):
+     """Custom trainer extending GOLDTrainer"""
+ 
+@@ -2109,6 +2127,8 @@ class CustomGOLDTrainer(GOLDTrainer):
+         super().__init__(*args, **kwargs)
+         self.model_accepts_loss_kwargs = False
+         self._last_log_time = time.time()
++        if int(getattr(self.args, "stop_at_step", 0) or 0) > 0:
++            self.add_callback(_StopAtStepCallback(int(self.args.stop_at_step)))
+ 
+         # GENERATION EFFICIENCY COUNTERS, reset at every log emit like the t_* timers beside them.
+         #
+@@ -2330,6 +2350,17 @@ class CustomGOLDTrainer(GOLDTrainer):
+                 from transformers.convert_slow_tokenizer import bytes_to_unicode
+                 self._unicode_to_byte = {v: k for k, v in bytes_to_unicode().items()}
+ 
++    def _min_tokens_kwargs(self) -> dict:
++        """generation_kwargs carrying the floor, for VLLMClient.generate; empty at 0.
++
++        trl 0.26's vllm_serve applies a request's generation_kwargs to SamplingParams last
++        (GenerateRequest.generation_kwargs, merged with .update()), so min_tokens set here is
++        what the server samples with. Empty at 0 so a floor-less run sends the request it
++        always sent.
++        """
++        n = int(getattr(self.args, "min_completion_length", 0) or 0)
++        return {"generation_kwargs": {"min_tokens": n}} if n > 0 else {}
++
+     def _get_current_lmbda(self) -> float:
+         """
+         Compute current lmbda value based on training progress.
+@@ -2341,13 +2372,18 @@ class CustomGOLDTrainer(GOLDTrainer):
+             return self.lmbda
+ 
+         if self.args.lmbda_schedule == "linear":
+-            max_steps = self.state.max_steps
++            # The ramp runs from lmbda_ramp_start_step for lmbda_ramp_steps steps (0 = until
++            # max_steps). At the defaults (0, 0) this is the original global_step / max_steps.
++            start = int(getattr(self.args, "lmbda_ramp_start_step", 0) or 0)
++            length = int(getattr(self.args, "lmbda_ramp_steps", 0) or 0)
++            if length <= 0:
++                length = self.state.max_steps - start
+             current_step = self.state.global_step
+ 
+-            if max_steps <= 0:
++            if length <= 0:
+                 return self.args.lmbda_init
+ 
+-            progress = min(1.0, current_step / max_steps)
++            progress = min(1.0, max(0.0, (current_step - start) / length))
+             current_lmbda = self.args.lmbda_init + progress * (self.args.lmbda - self.args.lmbda_init)
+             return current_lmbda
+ 
+@@ -2870,6 +2906,7 @@ class CustomGOLDTrainer(GOLDTrainer):
+                         min_p=_min_p,
+                         max_tokens=_max_tokens,
+                         guided_decoding_regex=self.vllm_guided_decoding_regex,
++                        **self._min_tokens_kwargs(),
+                     )
+                     _overlap_future._submit_time = _t_submit
+                     def _on_done(fut, _trainer=self):
+@@ -3268,6 +3305,7 @@ class CustomGOLDTrainer(GOLDTrainer):
+                     min_p=min_p,
+                     max_tokens=max_completion_length,
+                     guided_decoding_regex=self.vllm_guided_decoding_regex,
++                    **self._min_tokens_kwargs(),
+                 )
+                 completion_ids = vllm_response["completion_ids"]
+                 vllm_logprobs_raw = vllm_response["logprobs"]
+@@ -3297,6 +3335,7 @@ class CustomGOLDTrainer(GOLDTrainer):
+                 max_tokens=max_completion_length,
+                 guided_decoding=guided_decoding,
+                 logprobs=1 if self.args.opd_importance_sampling else None,
++                min_tokens=int(getattr(self.args, "min_completion_length", 0) or 0),
+             )
+ 
+             if hasattr(self, "vllm_tp_group") and self.vllm_tensor_parallel_size > 1:

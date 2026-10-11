@@ -1025,3 +1025,114 @@ class TestTrainerKeyCheck:
         assert result.returncode == 2, result.stdout + result.stderr
         assert "gb_steps_post_training is not importable" in result.stderr
         assert not out.exists()
+
+
+class TestOnPolicyStudyKeys:
+    """The keys the on-policy study adds: two stock TrainingArguments fields and three that
+    need patches/onpolicy_study.diff. All five are absent unless asked for, so every existing
+    recipe renders the config it rendered before."""
+
+    _ONLINE = ["--vllm-num-servers", "1", "--lmbda", "1.0"]
+    _RAMP = _ONLINE + ["--lmbda-schedule", "linear", "--lmbda-init", "0.0"]
+    _NEW = (
+        "adam_beta2",
+        "train_sampling_strategy",
+        "lmbda_ramp_start_step",
+        "lmbda_ramp_steps",
+        "stop_at_step",
+    )
+
+    def test_none_of_them_are_emitted_by_default(self, tmp_path):
+        assert not [k for k in self._NEW if k in _render(_dir(tmp_path, "a"))]
+        on = _render(_dir(tmp_path, "b"), extra=self._RAMP)
+        assert not [k for k in self._NEW if k in on]
+
+    def test_adam_beta2_is_emitted_as_a_float(self, tmp_path):
+        config = _render(tmp_path, extra=["--adam-beta2", "0.95"])
+        assert config["adam_beta2"] == pytest.approx(0.95)
+        assert isinstance(config["adam_beta2"], float)
+
+    @pytest.mark.parametrize("value", ["0", "1", "1.5"])
+    def test_adam_beta2_outside_the_open_interval_is_refused(self, tmp_path, value):
+        result = _render(tmp_path, extra=["--adam-beta2", value], expect_rc=2)
+        assert "adam_beta2 must be in (0, 1)" in result.stderr
+
+    def test_sequential_sampling_is_emitted(self, tmp_path):
+        config = _render(tmp_path, extra=["--train-sampling-strategy", "sequential"])
+        assert config["train_sampling_strategy"] == "sequential"
+
+    def test_an_unknown_sampling_strategy_is_refused(self, tmp_path):
+        result = _render(
+            tmp_path, extra=["--train-sampling-strategy", "ordered"], expect_rc=2
+        )
+        assert "train_sampling_strategy must be" in result.stderr
+
+    def test_the_stock_fields_are_not_trainer_extensions(self):
+        sys.path.insert(0, str(_RENDER.parent))
+        try:
+            import render_gold_config as rgc  # noqa: PLC0415
+        finally:
+            sys.path.pop(0)
+        assert (
+            not {"adam_beta2", "train_sampling_strategy"} & rgc._TRAINER_EXTENSION_KEYS
+        )
+        assert {"lmbda_ramp_start_step", "lmbda_ramp_steps", "stop_at_step"} <= (
+            rgc._TRAINER_EXTENSION_KEYS
+        )
+
+    def test_the_ramp_window_travels_with_a_linear_schedule(self, tmp_path):
+        config = _render(
+            tmp_path,
+            extra=self._RAMP
+            + ["--lmbda-ramp-start-step", "2000", "--lmbda-ramp-steps", "2500"],
+        )
+        assert config["lmbda_ramp_start_step"] == 2000
+        assert config["lmbda_ramp_steps"] == 2500
+
+    def test_the_ramp_window_is_refused_on_a_constant_schedule(self, tmp_path):
+        result = _render(
+            tmp_path, extra=self._ONLINE + ["--lmbda-ramp-steps", "1250"], expect_rc=2
+        )
+        assert "silently inert" in result.stderr
+
+    def test_stop_at_step_is_emitted_and_leaves_the_horizon_alone(self, tmp_path):
+        config = _render(tmp_path, extra=["--stop-at-step", "4500"])
+        assert config["stop_at_step"] == 4500
+        assert "max_steps" not in config
+
+    def test_stop_at_step_past_max_steps_is_refused(self, tmp_path):
+        result = _render(
+            tmp_path,
+            extra=["--max-steps", "2500", "--stop-at-step", "3000"],
+            expect_rc=2,
+        )
+        assert "would never fire" in result.stderr
+
+
+class TestLossArmRequirementsUnderARamp:
+    """lmbda_strictly_between asks that both policy classes occur. A linear ramp from 0 to 1
+    has both for every step but its two ends, so it must render, while a constant lmbda at
+    an end, or a ramp that never leaves one, is still refused."""
+
+    _ONLINE = ["--vllm-num-servers", "1", "--loss-arm", "distillm2_like"]
+
+    def test_a_ramp_from_zero_to_one_renders(self, tmp_path):
+        config = _render(
+            tmp_path,
+            extra=self._ONLINE
+            + ["--lmbda", "1.0", "--lmbda-schedule", "linear", "--lmbda-init", "0.0"],
+        )
+        assert config["use_distillm2_like"] is True
+
+    def test_a_constant_lmbda_of_one_is_still_refused(self, tmp_path):
+        result = _render(tmp_path, extra=self._ONLINE + ["--lmbda", "1.0"], expect_rc=2)
+        assert "0.0 < lmbda < 1.0" in result.stderr
+
+    def test_a_ramp_that_never_moves_is_judged_by_its_one_value(self, tmp_path):
+        result = _render(
+            tmp_path,
+            extra=self._ONLINE
+            + ["--lmbda", "1.0", "--lmbda-schedule", "linear", "--lmbda-init", "1.0"],
+            expect_rc=2,
+        )
+        assert "linear from lmbda_init=1.0" in result.stderr

@@ -171,6 +171,15 @@ config:
     learning_rate: 1.0e-05
     min_lr: 1.0e-06
     warmup_ratio: 0.05
+    # Adam's beta2. -1 leaves the key out and the trainer keeps 0.999, whose
+    # second-moment average spans ~1,000 steps; 0.95 spans ~20. A stock
+    # TrainingArguments field, so no trainer patch.
+    adam_beta2: -1.0
+    # The sampler. EMPTY leaves the key out (the trainer's "random", seeded by
+    # data_seed). "sequential" feeds the corpus in file order -- the only setting under
+    # which a corpus whose row order is part of its design (rows front-loaded into the
+    # first steps) reaches the trainer in that order.
+    train_sampling_strategy: ""
     lr_scheduler_type: cosine_with_min_lr
     per_device_train_batch_size: 1
     # Effective batch = per_device * grad_accum * nodes * gpus_per_node. The
@@ -330,8 +339,19 @@ config:
     # refuses linear at vllm_num_servers 0 rather than leaving it inert.
     lmbda_schedule: "constant"
     lmbda_init: 0.0
+    # The linear ramp's window: it starts at lmbda_ramp_start_step (lmbda_init before
+    # it) and reaches lmbda after lmbda_ramp_steps steps; 0 ramps until max_steps. Both
+    # need a trainer carrying patches/onpolicy_study.diff, as does stop_at_step: save
+    # and end training at that step while max_steps -- and the LR schedule built from
+    # it -- stays as it is. That is what a resume of a longer run needs to train a
+    # fixed number of extra steps on its original schedule.
+    lmbda_ramp_start_step: 0
+    lmbda_ramp_steps: 0
+    stop_at_step: 0
     # vLLM min_tokens for the student's rollout. >0 blocks the immediate-EOS mode
-    # collapse. For vllm_mode server the SERVER must agree, via GOLD_MIN_TOKENS.
+    # collapse. With patches/onpolicy_study.diff the trainer sends it as min_tokens in
+    # every request's generation_kwargs, which trl 0.26's vllm_serve applies to
+    # SamplingParams; without that patch the SERVER must agree, via GOLD_MIN_TOKENS.
     min_completion_length: 0
 
 # I/O schema, validated against the build.yaml target at build time: a target that
@@ -866,6 +886,11 @@ environment_configs:
               --lmbda-schedule "{{ config.gold_config.lmbda_schedule | default('constant') }}" \
               --lmbda-init {{ config.gold_config.lmbda_init | default(0.0) }} \
               --min-completion-length {{ config.gold_config.min_completion_length | default(0) }} \
+              --lmbda-ramp-start-step {{ config.gold_config.lmbda_ramp_start_step | default(0) }} \
+              --lmbda-ramp-steps {{ config.gold_config.lmbda_ramp_steps | default(0) }} \
+              --stop-at-step {{ config.gold_config.stop_at_step | default(0) }} \
+              --adam-beta2 {{ config.gold_config.adam_beta2 | default(-1.0) }} \
+              --train-sampling-strategy "{{ config.gold_config.train_sampling_strategy | default('') }}" \
               --loss-arm "{{ config.gold_config.loss_arm }}" \
               --verify-trainer-accepts-keys {{ config.gold_config.verify_trainer_accepts_keys | default(true) }} \
               --check-corpus-tokenizer {{ config.gold_config.check_corpus_tokenizer }} \
