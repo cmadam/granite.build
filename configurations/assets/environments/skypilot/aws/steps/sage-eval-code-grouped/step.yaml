@@ -105,6 +105,12 @@ environment_configs:
             export TMP="$TMPDIR"
             export TEMP="$TMPDIR"
 
+            # vLLM's V1 engine binds its ZMQ ipc sockets under tempfile.gettempdir(),
+            # i.e. $TMPDIR. With SKYPILOT_TASK_ID in it, the socket path runs to about
+            # 150 characters, over the 107-character sun_path limit, and the engine
+            # dies at startup. The sockets are tiny: give them a short directory.
+            export VLLM_RPC_BASE_PATH="/tmp"
+
             # Patch bigcode-evaluation-harness max_workers
             if [ -f /workspace/bigcode-evaluation-harness/bigcode_eval/tasks/multiple.py ]; then
               sed -i 's/^        max_workers = 1$/        max_workers = max(cpu_count() - 1, 8) if cpu_count() > 1 else 1/' \

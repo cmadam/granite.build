@@ -111,6 +111,12 @@ environment_configs:
             export TMP="$TMPDIR"
             export TEMP="$TMPDIR"
 
+            # vLLM's V1 engine binds its ZMQ ipc sockets under tempfile.gettempdir(),
+            # i.e. $TMPDIR. With SKYPILOT_TASK_ID in it, the socket path runs to about
+            # 150 characters, over the 107-character sun_path limit, and the engine
+            # dies at startup. The sockets are tiny: give them a short directory.
+            export VLLM_RPC_BASE_PATH="/tmp"
+
             # Standard vars consumed by sage gb_scripts
             export MODEL_PATH="{{ config.sage_eval_config.model_path }}"
             export EXPERIMENT="{{ config.sage_eval_config.experiment }}"
