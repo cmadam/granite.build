@@ -748,7 +748,7 @@ class TestResumeFromCheckpointDir:
     _WORLD = 16  # 2 nodes x 8 GPUs, the recipe's topology
 
     @staticmethod
-    def _render(_vllm_url="", **overrides):
+    def _render(_vllm_url="", _gold=None, **overrides):
         from jinja2 import Template
 
         step = yaml.safe_load(_STEP.read_text())
@@ -757,31 +757,31 @@ class TestResumeFromCheckpointDir:
         ]
         config = dict(step["config"])
         config.update(overrides)
+        config["gold_config"] = dict(config["gold_config"], **(_gold or {}))
         return Template(script).render(config=config, bindings=_bindings(_vllm_url))
 
     @classmethod
     def _seed_block(cls, src, vllm_server_url="", **gold):
-        step = yaml.safe_load(_STEP.read_text())
         rendered = cls._render(
-            resume_from_checkpoint_dir=str(src),
-            _vllm_url=vllm_server_url,
-            gold_config=dict(step["config"]["gold_config"], **gold),
+            resume_from_checkpoint_dir=str(src), _vllm_url=vllm_server_url, _gold=gold
         )
         start = rendered.index('RESUME_SRC="')
         end = rendered.index("# Rendered per node", start)
         return rendered[start:end]
 
     @classmethod
-    def _checkpoint(cls, root, step, complete=True, shards=None):
+    def _checkpoint(
+        cls, root, step, complete=True, shards=None, save_steps=500, logging_steps=5
+    ):
         ckpt = root / f"checkpoint-{step}"
         (ckpt / f"global_step{step}").mkdir(parents=True)
         for name in ["model.safetensors", "tokenizer.json"]:
             (ckpt / name).write_text(name)
         if complete:
-            # The source run's own grid: c2000's, which A1 resumed from.
-            state = dict(global_step=step, max_steps=8150, save_steps=1000)
+            # The template's own grid by default, so a resume rewrites nothing.
+            state = dict(global_step=step, max_steps=8150, save_steps=save_steps)
             (ckpt / "trainer_state.json").write_text(
-                json.dumps(dict(state, logging_steps=1))
+                json.dumps(dict(state, logging_steps=logging_steps))
             )
         for rank in range(cls._WORLD if shards is None else shards):
             shard = f"bf16_zero_pp_rank_{rank}_mp_rank_00_optim_states.pt"
@@ -884,7 +884,8 @@ class TestResumeFromCheckpointDir:
         saves on the source's 1000-step grid, not its own (build 4c758672, A1)."""
         src = tmp_path / "src"
         for step in (1000, 2000):
-            self._checkpoint(src, step)
+            # c2000's grid, which A1 resumed from.
+            self._checkpoint(src, step, save_steps=1000, logging_steps=1)
 
         result, dst = self._run(tmp_path, src, save_steps=250, logging_steps=1)
 
@@ -904,18 +905,35 @@ class TestResumeFromCheckpointDir:
         older = json.loads((dst / "checkpoint-1000/trainer_state.json").read_text())
         assert older["save_steps"] == 1000
 
-    def test_a_fractional_step_count_is_a_share_of_max_steps(self, tmp_path):
+    @pytest.mark.parametrize("max_steps, expected", [(0, 815), (12000, 1200)])
+    def test_a_fractional_step_count_is_a_share_of_max_steps(
+        self, tmp_path, max_steps, expected
+    ):
+        """As HF computes it: of this run's max_steps, or of the source's 8150
+        when the run is epoch-bounded (max_steps 0)."""
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
-        result, dst = self._run(tmp_path, src, save_steps=0.1, logging_steps=1)
+        result, dst = self._run(
+            tmp_path, src, save_steps=0.1, logging_steps=5, max_steps=max_steps
+        )
         assert result.returncode == 0, result.stderr
         state = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
-        assert state["save_steps"] == 815  # ceil(8150 * 0.1), as HF computes it
+        assert state["save_steps"] == expected
+
+    def test_a_non_numeric_step_count_fails_loudly(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        result, dst = self._run(tmp_path, src, save_steps="$${GOLD_SAVE_STEPS}")
+        assert result.returncode == 1
+        assert "FATAL: save_steps, logging_steps and max_steps must be numbers" in (
+            result.stderr
+        )
+        assert not (dst / ".resume-seeded").exists()
 
     def test_matching_steps_leave_the_seeded_state_linked(self, tmp_path):
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
-        result, dst = self._run(tmp_path, src, save_steps=1000, logging_steps=1)
+        result, dst = self._run(tmp_path, src)
         assert result.returncode == 0, result.stderr
         state = "checkpoint-2000/trainer_state.json"
         assert (dst / state).stat().st_ino == (src / state).stat().st_ino
