@@ -11,6 +11,9 @@
 #                   numeric -- the roll-up keys each column on ckpt_<id>. Empty: none.
 #   EVALS           which evals, as EVAL_CATALOG names plus "bfcl". Default: SCREEN_EVALS.
 #                   For a full battery on a ratio that earned one, pass every name.
+#   SCREEN_MAX_RETRIES  automatic retries of a failed target. Default: 5, so a
+#                   preempted eval runs again; targets that already succeeded are
+#                   reused, not re-run (target_reuse_enabled).
 #
 # Every model then gets the selected evals, one CSV per eval kind, and all of them land
 # in one combined.csv whose columns are ckpt_<id>.
@@ -38,11 +41,12 @@
 <% for m in PLAIN %><% set _ = IDS.append(m.split("=")[0]) %><% endfor %>
 <% set SAGE = [] %>
 <% for e in EVAL_CATALOG %><% if e.category in CATS and e.name in PICK %><% set _ = SAGE.append(e) %><% endif %><% endfor %>
+<% set RETRIES = SCREEN_MAX_RETRIES | default(5) %>
 <% set WANT_BFCL = "bfcl" in CATS and "bfcl" in PICK %>
 granite.build:
   name: distill-350m-model-screening-eval
   retries:
-    max_retries: $${MAX_RETRIES}
+    max_retries: $${RETRIES}
     target_reuse_enabled: true
   targets:
 

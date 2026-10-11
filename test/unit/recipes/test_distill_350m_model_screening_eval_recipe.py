@@ -121,6 +121,30 @@ def test_every_sage_eval_binds_vllm_ipc_sockets_under_a_short_path(tmp_path):
         assert sage["extra_env"]["VLLM_RPC_BASE_PATH"] == "/tmp", name
 
 
+def test_evals_default_to_preemptable_with_five_retries(tmp_path):
+    contents = (_RECIPE / "build.yaml").read_text(encoding="utf-8")
+
+    def render(**overrides):
+        out = tmp_path / str(len(overrides))
+        out.mkdir()
+        params = _params(EXPERIMENT="x", INTERP_RATIOS="0.5", **overrides)
+        return yaml.safe_load(apply_parameters(contents, [], params, str(out)))[
+            "granite.build"
+        ]
+
+    build = render()
+    assert build["retries"] == {"max_retries": 5, "target_reuse_enabled": True}
+    for name in ("eval-salad-bench-m50", "eval-bfcl-m50"):
+        launcher = build["targets"][name]["steps"][0]["config"]["launcher_config"]
+        assert launcher["resources"]["zone"] == "preemptable", name
+
+    build = render(SCREEN_MAX_RETRIES=0, EVAL_QUEUE="normal")
+    assert build["retries"]["max_retries"] == 0
+    for name in ("eval-salad-bench-m50", "eval-bfcl-m50"):
+        launcher = build["targets"][name]["steps"][0]["config"]["launcher_config"]
+        assert launcher["resources"]["zone"] == "normal", name
+
+
 def test_no_comment_uses_a_template_variable():
     for line in (_RECIPE / "build.yaml").read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#"):

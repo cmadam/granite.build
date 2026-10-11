@@ -17,7 +17,7 @@
 #   * new knobs: ADAM_BETA2, LOSS_ARM, TRAIN_SAMPLING_STRATEGY, LMBDA_RAMP_START_STEP,
 #     LMBDA_RAMP_STEPS, STOP_AT_STEP, SCREEN_EVALS and FULL_EVAL_RUNGS;
 #   * CODE_DIR and CODE_EXPECT_REF name a checkout carrying onpolicy_study.diff;
-#   * EVAL_QUEUE is normal and NCCL_IB_HCA drops the mlx5_8 rail by default.
+#   * NCCL_IB_HCA drops the mlx5_8 rail by default.
 #
 # BEFORE LAUNCHING: the patched trainer checkout (CODE_DIR) must exist, and
 # OE_EVAL_BCB_API_URL must name a live bcb-server for any rung in FULL_EVAL_RUNGS.
@@ -799,7 +799,7 @@ BFCL_FILTER: ""
 # PREEMPTABLE for both, and safe for both: the evals are short, idempotent and
 # independently retryable, and the exporters are CPU-only minutes. Training and the
 # server stay on `normal` (QUEUE above) so neither can be preempted mid-run.
-EVAL_QUEUE: "normal"
+EVAL_QUEUE: "preemptable"
 EVAL_ACCELERATORS: "H100:1"
 EVAL_MEMORY: 256
 EXPORT_QUEUE: "preemptable"
