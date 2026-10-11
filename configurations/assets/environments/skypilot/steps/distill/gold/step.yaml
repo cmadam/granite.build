@@ -731,6 +731,35 @@ environment_configs:
                 echo "  but this run trains on $RESUME_WORLD ranks. Resume with the source's topology." >&2
                 exit 1
               fi
+              # HF Trainer restores trainer_state.json whole on resume, and with it the
+              # SOURCE run's save_steps and logging_steps: this run's --save-steps is
+              # replaced with a warning nobody sees, and every rung of this run's
+              # ladder that is not also on the source's grid is never written (build
+              # 4c758672, A1: a 250-step ladder on c2000's 1000). Rewrite both to this
+              # run's values, as HF's compute_steps would, so a fraction below 1 is a
+              # share of max_steps. Replaced, never edited: the file is a hardlink
+              # into the source run's checkpoint.
+              "$PYBIN" - "$CKPT_DIR/checkpoint-$RESUME_LAST/trainer_state.json" \
+                "{{ config.gold_config.save_steps }}" "{{ config.gold_config.logging_steps }}" <<'STATE_EOF'
+            import json, math, os, sys
+            path, wanted = sys.argv[1], dict(save_steps=sys.argv[2], logging_steps=sys.argv[3])
+            with open(path) as f:
+                state = json.load(f)
+            changed = []
+            for key, raw in wanted.items():
+                value = float(raw)
+                if value < 1:
+                    value = math.ceil(state["max_steps"] * value)
+                value = int(value)
+                if state.get(key) != value:
+                    changed.append(f"{key} {state.get(key)} -> {value}")
+                    state[key] = value
+            if changed:
+                with open(path + ".tmp", "w") as f:
+                    json.dump(state, f, indent=2, sort_keys=True)
+                os.replace(path + ".tmp", path)
+                print("distill-gold: resume: trainer_state.json " + ", ".join(changed))
+            STATE_EOF
               echo "distill-gold: resume: $RESUME_COUNT checkpoint(s) seeded; the trainer resumes from checkpoint-$RESUME_LAST"
               echo "GB_STEP_METADATA_KEY:resumed_from GB_STEP_METADATA_VALUE:$RESUME_SRC/checkpoint-$RESUME_LAST"
               touch "$RESUME_SEEDED"
