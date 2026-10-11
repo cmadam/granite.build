@@ -102,7 +102,9 @@ config:
   # resumes when its output_dir already holds a checkpoint-*) never finds anything.
   # Before the trainer starts, rank 0 hardlinks every COMPLETE checkpoint-* from
   # here into this run's checkpoint directory; the trainer then resumes from the
-  # highest one — weights, optimizer, scheduler, RNG and data position.
+  # highest one — weights, optimizer, scheduler, RNG and data position. That one's
+  # trainer_state.json is then rewritten to this run's save_steps and logging_steps:
+  # HF restores the state whole, so the run would otherwise save on the source's grid.
   #
   # Three consequences to know before setting it:
   #  * The world size must match the source's. A ZeRO-3 checkpoint holds one
@@ -711,20 +713,27 @@ environment_configs:
               # replaced with a warning nobody sees, and every rung of this run's
               # ladder that is not also on the source's grid is never written (build
               # 4c758672, A1: a 250-step ladder on c2000's 1000). Rewrite both to this
-              # run's values, as HF's compute_steps would, so a fraction below 1 is a
-              # share of max_steps. Replaced, never edited: the file is a hardlink
-              # into the source run's checkpoint.
+              # run's values, as HF's compute_steps would: a fraction below 1 is a
+              # share of this run's max_steps, or of the source's when max_steps is 0
+              # (epoch-bounded), which a resume must match anyway. Replaced, never
+              # edited: the file is a hardlink into the source run's checkpoint.
               "$PYBIN" - "$CKPT_DIR/checkpoint-$RESUME_LAST/trainer_state.json" \
-                "{{ config.gold_config.save_steps }}" "{{ config.gold_config.logging_steps }}" <<'STATE_EOF'
+                "{{ config.gold_config.save_steps }}" "{{ config.gold_config.logging_steps }}" \
+                "{{ config.gold_config.max_steps }}" <<'STATE_EOF'
             import json, math, os, sys
             path, wanted = sys.argv[1], dict(save_steps=sys.argv[2], logging_steps=sys.argv[3])
+            try:
+                wanted = {key: float(raw) for key, raw in wanted.items()}
+                max_steps = int(float(sys.argv[4]))
+            except ValueError:
+                sys.exit(f"distill-gold: FATAL: save_steps, logging_steps and max_steps must be numbers, got {sys.argv[2:]}")
             with open(path) as f:
                 state = json.load(f)
+            max_steps = max_steps if max_steps > 0 else state["max_steps"]
             changed = []
-            for key, raw in wanted.items():
-                value = float(raw)
+            for key, value in wanted.items():
                 if value < 1:
-                    value = math.ceil(state["max_steps"] * value)
+                    value = math.ceil(max_steps * value)
                 value = int(value)
                 if state.get(key) != value:
                     changed.append(f"{key} {state.get(key)} -> {value}")

@@ -477,6 +477,11 @@ never modified.
   than letting DeepSpeed fail after allocation.
 - **The schedule must match too** (`max_steps`, batch sizes, learning rate). The trainer
   restores the scheduler's state, not its shape; nothing checks this.
+- **The save and logging grid are this run's.** HF Trainer restores `trainer_state.json`
+  whole, `save_steps` and `logging_steps` included, so a run seeded from a source saved every
+  1000 steps would save every 1000 whatever its own `save_steps`. Rank 0 rewrites both in the
+  resumed checkpoint's `trainer_state.json` and logs each change. That one file is replaced
+  rather than edited, so it is no longer a hardlink and the source keeps its own.
 - **No complete checkpoint is an error,** not a fresh start: starting from step 0 would
   silently spend the whole schedule again.
 - **With `emit_checkpoint_artifacts` on,** every seeded checkpoint is emitted as
