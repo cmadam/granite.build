@@ -111,6 +111,16 @@ def test_evals_selects_the_battery(tmp_path):
     assert set(targets["export-combined"]["inputs"]) == {"gate_sage_50"}
 
 
+def test_every_sage_eval_binds_vllm_ipc_sockets_under_a_short_path(tmp_path):
+    targets = _render(
+        tmp_path, EXPERIMENT="x", INTERP_RATIOS="", EVALS="salad-bench,attaq,olmes-ifeval",
+        EVAL_MODELS="1=/m/teacher",
+    )
+    for name in ("eval-salad-bench-m1", "eval-attaq-m1", "eval-olmes-ifeval-m1"):
+        sage = targets[name]["steps"][0]["config"]["sage_eval_config"]
+        assert sage["extra_env"]["VLLM_RPC_BASE_PATH"] == "/tmp", name
+
+
 def test_no_comment_uses_a_template_variable():
     for line in (_RECIPE / "build.yaml").read_text(encoding="utf-8").splitlines():
         if line.lstrip().startswith("#"):

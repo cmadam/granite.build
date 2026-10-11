@@ -155,16 +155,18 @@ granite.build:
               num_gpus: $${SAGE_NUM_GPUS}
               output_dir: "$${SAGE_OUTPUT_DIR}"
               image_id: "$${e.image_id}"
-<% if e.extra_env | default({}) or e.needs_bcb_url | default(false) %>
+              # vLLM's V1 engine binds its ZMQ ipc sockets under tempfile.gettempdir(), and
+              # sage-eval points TMPDIR at /opt/nvme/<user>/tmp-<SKYPILOT_TASK_ID>: about
+              # 150 characters with the socket name, over the 107-character sun_path limit.
+              # The hybrid 350m students fall back to V0 and never bind one; a dense model
+              # (the 3B teacher) dies at engine start, and SALAD still reports success.
               extra_env:
+                VLLM_RPC_BASE_PATH: "/tmp"
 <% for k, v in (e.extra_env | default({})).items() %>
                 $${k}: "$${v}"
 <% endfor %>
 <% if e.needs_bcb_url | default(false) %>
                 OE_EVAL_BCB_API_URL: "$${OE_EVAL_BCB_API_URL}"
-<% endif %>
-<% else %>
-              extra_env: {}
 <% endif %>
             launcher_config:
               resources:
