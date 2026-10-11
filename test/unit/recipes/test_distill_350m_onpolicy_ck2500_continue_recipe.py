@@ -110,10 +110,15 @@ def _renderer():
     return module
 
 
-def _renderer_args(module, gold_config, total_nodes) -> argparse.Namespace:
+def _renderer_args(module, target) -> argparse.Namespace:
     """The step hands render_gold_config.py each gold_config key as its kebab-case flag.
     Keys the renderer has no flag for are the step's own, and are dropped here as there.
+    The model, teacher and corpus paths and the server URL come from the target's named
+    inputs, so stand-ins fill them here: only whether a URL is bound matters.
     """
+    config = target["steps"][0]["config"]
+    gold_config = config["gold_config"]
+    total_nodes = int(config["compute_config"]["num_nodes"])
     flags = set(
         re.findall(
             r'"--([a-z0-9-]+)"',
@@ -121,6 +126,10 @@ def _renderer_args(module, gold_config, total_nodes) -> argparse.Namespace:
         )
     )
     argv = ["--output", "/dev/null", "--total-nodes", str(total_nodes)]
+    argv += ["--model-name-or-path", "/student", "--teacher-model-name-or-path"]
+    argv += ["/teacher", "--dataset-name", "/corpus"]
+    if "vllm" in target["inputs"]:
+        argv += ["--vllm-server-url", "http://vllm-host:8001"]
     for key, value in gold_config.items():
         flag = key.replace("_", "-")
         if flag in flags:
@@ -194,9 +203,9 @@ def test_every_arm_passes_the_renderers_checks(arm, tmp_path):
     """
     rendered = _render(tmp_path, LMBDA=arm)
     module = _renderer()
-    gold = _config(rendered, "train-gold")["gold_config"]
-    nodes = int(_config(rendered, "train-gold")["compute_config"]["num_nodes"])
-    config = module.build_config(_renderer_args(module, gold, nodes))
+    config = module.build_config(
+        _renderer_args(module, _targets(rendered)["train-gold"])
+    )
     assert float(config["lmbda"]) == pytest.approx(float(arm))
     if float(arm) > 0:
         assert config["lmbda_schedule"] == "linear"

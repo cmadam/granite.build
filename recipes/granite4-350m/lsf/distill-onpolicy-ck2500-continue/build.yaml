@@ -153,14 +153,14 @@ granite.build:
     align:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        # Recorded as lineage inputs. env:// means "already on a filesystem this
+        # The step's named inputs: it reads their resolved paths itself, so
+        # align_config carries neither. env:// means "already on a filesystem this
         # environment can reach", so the pull is a no-op: these add input
-        # artifacts and no extra step. A path passed only to a step's config
-        # would run fine and record nothing.
-        teacher_model:
+        # artifacts and no extra step.
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
-        student_model:
+        student:
           uri: "env://$${STUDENT_MODEL}"
           type: model
       outputs:
@@ -190,8 +190,6 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${CPU_ONLY_MEMORY}
             align_config:
-              teacher_model: "$${TEACHER_MODEL}"
-              student_model: "$${STUDENT_MODEL}"
               out_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/align"
               # Not optional for this pipeline: without a chat template carrying
               # generation markers, prep cannot build assistant masks and the
@@ -246,8 +244,6 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${CPU_ONLY_MEMORY}
             corpus_config:
-              dataset: "{{ bindings.source_dataset.binding.path }}"
-              tokenizer: "{{ bindings.tokenizer.binding.path }}"
               # ABSOLUTE, and that is forced rather than chosen: the two eval
               # targets have to name eval.jsonl and cannot compose it from their
               # own workdir, because every target run gets its OWN
@@ -341,7 +337,6 @@ granite.build:
               think_policy: "$${THINK_POLICY}"
               documents_policy: "$${DOCUMENTS_POLICY}"
               eval_fraction: $${EVAL_FRACTION}
-              tokenizer_dir: "{{ bindings.tokenizer.binding.path }}"
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/corpus-pin"
 
 <% endif %>
@@ -399,8 +394,6 @@ granite.build:
               gpus_per_node: $${SFT_NUM_GPUS}
               nodes: 1
             sft_config:
-              student_model_path: "{{ bindings.student.binding.path }}"
-              corpus_path: "{{ bindings.corpus.binding.path }}"
               output_dir: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/train-sft"
               response_template: "$${RESPONSE_TEMPLATE}"
               max_length: $${MAX_LENGTH}
@@ -445,7 +438,8 @@ granite.build:
     vllm-server:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        student:
+        # The step's required `model` input; it reads the resolved path itself.
+        model:
           binding: align.retagged_student
       outputs:
         # mem://, NOT env://: the payload is a URL. See the header.
@@ -505,7 +499,6 @@ granite.build:
               python: "/stage/.venv/bin/python"
               setup_command: ""
             vllm_config:
-              model_path: "{{ bindings.student.binding.path }}"
               port: $${VLLM_PORT}
               # Must be >= the trainer's max_length, or a prompt the trainer accepts
               # is one the server refuses mid-run.
@@ -564,7 +557,7 @@ granite.build:
         corpus:
           binding: corpus.corpus
 <% endif %>
-        teacher_model:
+        teacher:
           uri: "env://$${TEACHER_MODEL}"
           type: model
       outputs:
@@ -662,10 +655,6 @@ granite.build:
             gold_config:
               run_name: "$${RUN_NAME}"
               ds_config: "$${DS_CONFIG}"
-              model_name_or_path: "{{ bindings.student.binding.path }}"
-              # A path, never a hub id: this teacher is not publicly fetchable.
-              teacher_model_name_or_path: "$${TEACHER_MODEL}"
-              dataset_name: "{{ bindings.corpus.binding.path }}"
               num_train_epochs: $${GOLD_NUM_TRAIN_EPOCHS}
               # Caps the run by optimizer steps. Here it is the whole horizon — 2,500
               # steps from c2000 — and it overrides num_train_epochs in the trainer.
@@ -719,11 +708,10 @@ granite.build:
               nccl_ib_hca: "$${NCCL_IB_HCA}"
 <% if LMBDA | float > 0 %>
               # ── on-policy ───────────────────────────────────────────────────
-              # The address arrives at RUN TIME through the mem:// binding above, so
-              # it cannot be templated as a parameter. Its presence is what selects
-              # the external-server path over the in-allocation split that
-              # vllm_num_servers alone would pick.
-              vllm_server_url: "{{ bindings.vllm.binding.state }}"
+              # The server address is NOT config: it arrives at RUN TIME through the
+              # step's optional mem:// `vllm` input above, which the step reads
+              # itself. Its presence is what selects the external-server path over
+              # the in-allocation split that vllm_num_servers alone would pick.
               vllm_mode: "$${VLLM_MODE}"
               vllm_sync_frequency: $${VLLM_SYNC_FREQUENCY}
               # 1 external server. The renderer refuses a URL with this at 0 (the
@@ -770,7 +758,7 @@ granite.build:
     export-$${N}:
       environment_uri: "$${ENVIRONMENT_URI}"
       inputs:
-        checkpoint_dir:
+        train_output:
           binding: train-gold.checkpoint_$${N}
         # Bound so the export can assert the tokenizer it ships is the one the run
         # actually trained with, rather than whatever happened to be copied into
@@ -796,20 +784,17 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${EXPORT_MEMORY}
             export_config:
-              # The binding resolves to the CHECKPOINT directory, not to the
-              # trainer's parent output dir, because each rung's artifact has to
-              # carry a distinct URI (see train-gold's outputs). So the checkpoint
-              # is named as an ABSOLUTE PATH, which select_checkpoint returns
-              # directly — export_hf_model.py:301, `if cand.is_absolute()` — and
-              # train_output_dir is then never read. It is set to the same value
-              # rather than left empty because the step passes the flag
-              # unconditionally and the CLI requires it.
+              # The train_output input resolves to the CHECKPOINT directory, not
+              # to the trainer's parent output dir, because each rung's artifact
+              # has to carry a distinct URI (see train-gold's outputs). So the
+              # checkpoint is named as an ABSOLUTE PATH — the same path as the
+              # train_output input — which select_checkpoint returns directly
+              # (export_hf_model.py, `if cand.is_absolute()`).
               #
-              # Naming the rung explicitly, never leaving it empty: empty means
-              # "highest step number", which across nine concurrent exports of one
-              # directory would make every rung export the same model.
-              train_output_dir: "{{ bindings.checkpoint_dir.binding.path }}"
-              checkpoint: "{{ bindings.checkpoint_dir.binding.path }}"
+              # It must NOT be left empty: empty means "highest step number", i.e.
+              # a glob for checkpoint-* UNDER train_output, and train_output here
+              # already IS checkpoint-<N>, so there is nothing under it to find.
+              checkpoint: "{{ bindings.train_output.binding.path }}"
               dest: "$${WORKDIR_ROOT}/$${RUN_NAME}/$${BUILD_SUBDIR}/export-$${N}"
               padding_side: "right"
               chat_template_thinking: "$${CHAT_TEMPLATE_THINKING}"
@@ -823,7 +808,6 @@ granite.build:
               # was dropped. The fix is one line upstream.
               allow_unknown: true
               verify: true
-              expect_tokenizer_from: "{{ bindings.expected_tokenizer.binding.path }}"
 <% endfor %>
 
     # ─── eval-transfer-<N>, one per rung ────────────────────────────────────
@@ -862,6 +846,12 @@ granite.build:
         corpus:
           binding: corpus.corpus
 <% endif %>
+        # The teacher the divergence is measured against: the step's optional
+        # teacher input, read as a resolved path (a path, never a hub id —
+        # this teacher is not publicly fetchable).
+        teacher:
+          uri: "env://$${TEACHER_MODEL}"
+          type: model
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -882,8 +872,6 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${GPU_MEMORY}
             eval_config:
-              student_model: "{{ bindings.student.binding.path }}"
-              teacher_model: "$${TEACHER_MODEL}"
 <% if CORPUS_DIR | string | trim %>
               corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
 <% else %>
@@ -1041,7 +1029,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             sage_eval_config:
               gb_script: "$${e.gb_script}"
-              model_path: "{{ bindings.model.binding.path }}"
               # A FLAT SUFFIX, never a "/"-separated subdir. sage builds a per-eval
               # job-script FILENAME out of this value (sage-<experiment>-<eval>.sh),
               # so a "/" turns that filename into a nested path and its
@@ -1104,7 +1091,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
             bfcl_config:
-              model_path: "{{ bindings.model.binding.path }}"
               model_id: "$${BFCL_MODEL_ID}"
               experiment: "$${EXPERIMENT}-ckpt_$${N}"
               eval_name: "$${BFCL_EVAL_NAME}"

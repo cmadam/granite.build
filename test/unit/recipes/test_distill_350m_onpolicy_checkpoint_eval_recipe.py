@@ -179,10 +179,13 @@ class TestItStartsFromC2000:
     def test_align_server_and_trainer_all_see_that_student(self, built):
         """align is what the student path reaches; the server and the trainer both bind
         align's output, so one parameter decides what is served AND what is trained."""
-        align = _config(built, "align")["align_config"]
-        assert align["student_model"] == _params()["STUDENT_MODEL"]
-        for target in ("vllm-server", "train-gold"):
-            assert _targets(built)[target]["inputs"]["student"]["binding"] == (
+        assert _targets(built)["align"]["inputs"]["student"]["uri"] == (
+            f"env://{_params()['STUDENT_MODEL']}"
+        )
+        # The server's input is the vllm-server step's `model`; the trainer's is gold's
+        # `student`. Both bind align's output.
+        for target, name in (("vllm-server", "model"), ("train-gold", "student")):
+            assert _targets(built)[target]["inputs"][name]["binding"] == (
                 "align.retagged_student"
             ), target
 
@@ -284,12 +287,12 @@ def test_every_export_is_gated_on_its_own_mid_run_checkpoint(built):
     more: rung 500's evals are the earliest read on a collapse, and they arrive while
     there is still a run to cancel."""
     for rung in _LADDER:
-        binding = _targets(built)[f"export-{rung}"]["inputs"]["checkpoint_dir"][
-            "binding"
-        ]
+        binding = _targets(built)[f"export-{rung}"]["inputs"]["train_output"]["binding"]
         assert binding == f"train-gold.checkpoint_{rung}"
         cfg = _config(built, f"export-{rung}")["export_config"]
-        assert cfg["checkpoint"] == "{{ bindings.checkpoint_dir.binding.path }}"
+        assert cfg["checkpoint"] == "{{ bindings.train_output.binding.path }}"
+        # The retired key: the step reads train_output from its input.
+        assert "train_output_dir" not in cfg
 
 
 def test_train_gold_turns_the_watcher_on_and_declares_every_rung(built):
@@ -320,9 +323,11 @@ class TestTheOnPolicyTopology:
         assert names.index("vllm-server") < names.index("train-gold")
 
     def test_the_served_model_is_a_binding_and_not_the_teacher(self, built):
-        cfg = _config(built, "vllm-server")["vllm_config"]
-        assert cfg["model_path"] == "{{ bindings.student.binding.path }}"
-        assert _params()["TEACHER_MODEL"] not in str(cfg["model_path"])
+        # The step reads its declared `model` input; the retired config key is gone.
+        assert "model_path" not in _config(built, "vllm-server")["vllm_config"]
+        model = _targets(built)["vllm-server"]["inputs"]["model"]
+        assert model == {"binding": "align.retagged_student"}
+        assert _params()["TEACHER_MODEL"] not in str(model)
 
     def test_the_server_window_covers_the_trainers_prompts(self, built):
         server = _config(built, "vllm-server")["vllm_config"]
@@ -349,7 +354,9 @@ class TestTheOnPolicyTopology:
             "vllm-server.vllm_url"
         )
         gold = _config(built, "train-gold")["gold_config"]
-        assert gold["vllm_server_url"] == "{{ bindings.vllm.binding.state }}"
+        # The URL is the step's optional mem:// `vllm` input, read by the step itself;
+        # the retired config key must not come back.
+        assert "vllm_server_url" not in gold
         assert gold["vllm_mode"] == "server"
         assert int(gold["vllm_num_servers"]) == 1
         assert float(gold["lmbda"]) > 0
@@ -534,7 +541,6 @@ class TestOneVariable:
         added = set(mine) - set(theirs)
         assert added == {
             "data_seed",
-            "vllm_server_url",
             "vllm_mode",
             "vllm_sync_frequency",
             "top_p",

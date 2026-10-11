@@ -60,7 +60,8 @@ def test_a_bfcl_rerun_reads_the_existing_export(tmp_path):
     model = targets["eval-bfcl-ck2000"]["inputs"]["model"]
     assert model["uri"] == f"env://{_SRC}/export-2000"
     config = targets["eval-bfcl-ck2000"]["steps"][0]["config"]["bfcl_config"]
-    assert config["model_path"] == f"{_SRC}/export-2000"
+    # The step reads its `model` input; the deprecated config key is gone.
+    assert "model_path" not in config
     assert config["experiment"] == "exp-ckpt_2000"
 
 

@@ -68,7 +68,7 @@ granite.build:
     export-$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-        checkpoint_dir:
+        train_output:
           uri: "env://$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
           type: model
         expected_tokenizer:
@@ -93,10 +93,9 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${EXPORT_MEMORY}
             export_config:
-              # Absolute checkpoint path, as in the parent: select_checkpoint returns
-              # it directly and train_output_dir is never read.
-              train_output_dir: "$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
-              checkpoint: "$${CKPT_SRC_DIR.rstrip('/')}/checkpoint-$${N}"
+              # Absolute checkpoint path, as in the parent: the train_output input
+              # already IS checkpoint-<N>, and select_checkpoint returns it directly.
+              checkpoint: "{{ bindings.train_output.binding.path }}"
               # Beside the original build's other exports, so every rung of the run
               # is under one directory.
               dest: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
@@ -104,13 +103,18 @@ granite.build:
               chat_template_thinking: "$${CHAT_TEMPLATE_THINKING}"
               allow_unknown: true
               verify: true
-              expect_tokenizer_from: "$${SRC_BUILD_DIR.rstrip('/')}/align/retagged_student"
 
     eval-transfer-$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
         student:
           binding: export-$${N}.hf_model
+        # The teacher the divergence is measured against: the step's optional
+        # teacher input, read as a resolved path (a path, never a hub id —
+        # this teacher is not publicly fetchable).
+        teacher:
+          uri: "env://$${TEACHER_MODEL}"
+          type: model
       outputs:
         eval_metrics:
           uri: "env://{{ binding.path }}"
@@ -131,8 +135,6 @@ granite.build:
                 zone: "$${QUEUE}"
                 memory: $${GPU_MEMORY}
             eval_config:
-              student_model: "{{ bindings.student.binding.path }}"
-              teacher_model: "$${TEACHER_MODEL}"
               corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
               output_dir: "$${SRC_BUILD_DIR.rstrip('/')}/eval-transfer-$${N}"
               metrics: "$${EVAL_METRICS}"
@@ -160,7 +162,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             sage_eval_config:
               gb_script: "$${e.gb_script}"
-              model_path: "{{ bindings.model.binding.path }}"
               experiment: "$${EXPERIMENT}-ckpt_$${N}"
               batch_size: $${e.batch_size | default(SAGE_BATCH_SIZE)}
               max_length: $${e.max_length | default(SAGE_MAX_LENGTH)}
@@ -230,7 +231,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
             bfcl_config:
-              model_path: "{{ bindings.model.binding.path }}"
               model_id: "$${BFCL_MODEL_ID}"
               experiment: "$${EXPERIMENT}-ckpt_$${N}"
               eval_name: "$${BFCL_EVAL_NAME}"
@@ -298,7 +298,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             sage_eval_config:
               gb_script: "$${e.gb_script}"
-              model_path: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
               # The SAME experiment name as the original rung, so the merged tree
               # is indistinguishable from one the original build wrote; only the
               # base directory differs.
@@ -449,7 +448,6 @@ granite.build:
             poll_interval_seconds: $${EVAL_STATUS_POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
             bfcl_config:
-              model_path: "$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
               model_id: "$${BFCL_MODEL_ID}"
               experiment: "$${EXPERIMENT}-ckpt_$${N}"
               eval_name: "$${BFCL_EVAL_NAME}"
