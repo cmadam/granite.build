@@ -69,6 +69,10 @@ granite.build:
                         messages = row.get("messages") or row.get("conversations")
                         if not messages:
                             continue
+                        # The 4.1 set spells turns ShareGPT-style, {from, value}; corpus-prep
+                        # and the base corpus use {role, content}.
+                        messages = [{"role": m.get("role", m.get("from")),
+                                     "content": m.get("content", m.get("value"))} for m in messages]
                         fout.write(json.dumps({"messages": messages, "src_uuid": row.get("uuid"),
                                                "source": row.get("source")}, ensure_ascii=False) + "\n")
                         n += 1
