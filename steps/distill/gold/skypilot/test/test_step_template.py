@@ -9,9 +9,11 @@ These tests read the template directly (not the rendered Space), so they hold
 whether or not ``make space`` has been run.
 """
 
+import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 from pathlib import Path
 
@@ -756,9 +758,12 @@ class TestResumeFromCheckpointDir:
         return Template(script).render(config=config, bindings=_bindings(_vllm_url))
 
     @classmethod
-    def _seed_block(cls, src, vllm_server_url=""):
+    def _seed_block(cls, src, vllm_server_url="", **gold):
+        step = yaml.safe_load(_STEP.read_text())
         rendered = cls._render(
-            resume_from_checkpoint_dir=str(src), _vllm_url=vllm_server_url
+            resume_from_checkpoint_dir=str(src),
+            _vllm_url=vllm_server_url,
+            gold_config=dict(step["config"]["gold_config"], **gold),
         )
         start = rendered.index('RESUME_SRC="')
         end = rendered.index("# Rendered per node", start)
@@ -768,21 +773,31 @@ class TestResumeFromCheckpointDir:
     def _checkpoint(cls, root, step, complete=True, shards=None):
         ckpt = root / f"checkpoint-{step}"
         (ckpt / f"global_step{step}").mkdir(parents=True)
-        names = ["model.safetensors", "tokenizer.json"]
-        if complete:
-            names.append("trainer_state.json")
-        for name in names:
+        for name in ["model.safetensors", "tokenizer.json"]:
             (ckpt / name).write_text(name)
+        if complete:
+            # The source run's own grid: c2000's, which A1 resumed from.
+            state = dict(global_step=step, max_steps=8150, save_steps=1000)
+            (ckpt / "trainer_state.json").write_text(
+                json.dumps(dict(state, logging_steps=1))
+            )
         for rank in range(cls._WORLD if shards is None else shards):
             shard = f"bf16_zero_pp_rank_{rank}_mp_rank_00_optim_states.pt"
             (ckpt / f"global_step{step}" / shard).write_text("x")
         return ckpt
 
     def _run(
-        self, tmp_path, src, rank="0", nodes="2", vllm_servers="0", vllm_server_url=""
+        self,
+        tmp_path,
+        src,
+        rank="0",
+        nodes="2",
+        vllm_servers="0",
+        vllm_server_url="",
+        **gold,
     ):
         dst = tmp_path / "run" / "checkpoints" / "gold_node2"
-        script = "set -eu\n" + self._seed_block(src, vllm_server_url)
+        script = "set -eu\n" + self._seed_block(src, vllm_server_url, **gold)
         result = subprocess.run(
             ["bash", "-c", script],
             env={
@@ -792,6 +807,7 @@ class TestResumeFromCheckpointDir:
                 "GPUS": "8",
                 "VLLM_SERVERS": vllm_servers,
                 "CKPT_DIR": str(dst),
+                "PYBIN": sys.executable,
             },
             capture_output=True,
             text=True,
@@ -860,6 +876,48 @@ class TestResumeFromCheckpointDir:
         assert (src / "checkpoint-500" / "model.safetensors").read_text() == (
             "model.safetensors"
         )
+
+    def test_the_resumed_state_takes_this_runs_save_and_logging_steps(self, tmp_path):
+        """HF restores trainer_state.json whole, so without the rewrite the run
+        saves on the source's 1000-step grid, not its own (build 4c758672, A1)."""
+        src = tmp_path / "src"
+        for step in (1000, 2000):
+            self._checkpoint(src, step)
+
+        result, dst = self._run(tmp_path, src, save_steps=250, logging_steps=1)
+
+        assert result.returncode == 0, result.stderr
+        state = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
+        assert state["save_steps"] == 250
+        assert state["logging_steps"] == 1
+        assert state["global_step"] == 2000
+        assert "trainer_state.json save_steps 1000 -> 250" in result.stdout
+        # Replaced, not edited: the source keeps its own grid, and the weights
+        # are still a hardlink.
+        source = json.loads((src / "checkpoint-2000/trainer_state.json").read_text())
+        assert source["save_steps"] == 1000
+        weights = "checkpoint-2000/model.safetensors"
+        assert (dst / weights).stat().st_ino == (src / weights).stat().st_ino
+        # Only the checkpoint the trainer resumes from is rewritten.
+        older = json.loads((dst / "checkpoint-1000/trainer_state.json").read_text())
+        assert older["save_steps"] == 1000
+
+    def test_a_fractional_step_count_is_a_share_of_max_steps(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        result, dst = self._run(tmp_path, src, save_steps=0.1, logging_steps=1)
+        assert result.returncode == 0, result.stderr
+        state = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
+        assert state["save_steps"] == 815  # ceil(8150 * 0.1), as HF computes it
+
+    def test_matching_steps_leave_the_seeded_state_linked(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        result, dst = self._run(tmp_path, src, save_steps=1000, logging_steps=1)
+        assert result.returncode == 0, result.stderr
+        state = "checkpoint-2000/trainer_state.json"
+        assert (dst / state).stat().st_ino == (src / state).stat().st_ino
+        assert "trainer_state.json" not in result.stdout
 
     def test_a_missing_source_fails_loudly(self, tmp_path):
         result, _ = self._run(tmp_path, tmp_path / "nope")
