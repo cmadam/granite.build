@@ -12,6 +12,7 @@ import functools
 import glob
 import importlib.util
 import json
+import math
 import os
 import re
 import shlex
@@ -44,6 +45,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from gbcommon.types.gbenvconfig import is_standalone
 from gbcommon.uri.uri import URI
 from gbserver.environment.environment import Environment, EventLogLineParserConfig
 from gbserver.environment.shared_fs import (
@@ -58,7 +60,7 @@ from gbserver.spaces.hf_push_config import (
 )
 from gbserver.types.buildconfig import BuildTargetStepConfig
 from gbserver.types.buildevent import EntityRunMetadata
-from gbserver.types.constants import GBSERVER_LOG_RECORD_MAX_CHARS
+from gbserver.types.constants import FILE_SCHEME, GBSERVER_LOG_RECORD_MAX_CHARS
 from gbserver.types.environment.environment import EnvironmentVariableConfig
 from gbserver.types.environment.skypilot import StepSkypilotConfig
 from gbserver.types.environmentconfig import EnvironmentConfig
@@ -101,15 +103,48 @@ def _reload_skypilot_client_config() -> None:
     whatever the PREVIOUS process had last written, so the first build after it
     still sent the pre-edit value.
 
-    Swaps the client's global config in one assignment under SkyPilot's own file
-    lock, so a concurrent build's request sees either the old or the new config,
-    never a partial one. No-op when SkyPilot is not installed.
+    Not ``sky.reload_config()``: SkyPilot's client reload first resets the loaded
+    config to an empty one and only sets the real one after parsing the files, and
+    readers such as ``to_dict()`` do not take its file lock. A concurrent build's
+    request inside that window would send an empty ``override_skypilot_config`` --
+    for LSF, no ``bsub_options`` host exclusion -- and nothing would report it. So
+    this builds the same layered config (user file, then project file) first and
+    publishes it in one assignment, under SkyPilot's file lock so two reloads do
+    not interleave. A request sees the old config or the new one, never an empty
+    one. Falls back to SkyPilot's own reload when that config is not the plain
+    client one (server process, or ``SKYPILOT_CONFIG`` set). No-op when SkyPilot
+    is not installed.
     """
     if sky is None:
         return
-    from sky.client import sdk as sky_sdk
+    import filelock
+    from sky import skypilot_config as sky_config
+    from sky.skylet import constants as sky_constants
+    from sky.utils import config_utils
 
-    sky_sdk.reload_config()
+    if (
+        os.environ.get(sky_config.ENV_VAR_SKYPILOT_CONFIG) is not None
+        or os.environ.get(sky_constants.ENV_VAR_IS_SKYPILOT_SERVER) is not None
+    ):
+        sky_config.safe_reload_config()
+        return
+    # The private helpers are the ones SkyPilot's own client reload uses; a
+    # test checks that they still never expose an empty config mid-reload.
+    # pylint: disable=protected-access
+    with filelock.FileLock(sky_config.get_skypilot_config_lock_path()):
+        paths = [
+            sky_config.resolve_user_config_path(),
+            sky_config._resolve_project_config_path(),
+        ]
+        config = config_utils.Config()
+        for path in paths:
+            layer = sky_config._get_config_from_path(path)
+            if layer:
+                config = sky_config.overlay_skypilot_config(
+                    original_config=config, override_configs=layer
+                )
+        sky_config._set_loaded_config(config)
+        sky_config._set_loaded_config_path(paths)
 
 
 def _get_step_skypilot_config(config: Optional[Dict]) -> StepSkypilotConfig:
@@ -150,6 +185,11 @@ _DEFAULT_POLL_FAILURE_GRACE_SECONDS = 900
 _DEFAULT_POLL_FAILURE_MAX_SECONDS = 7200
 # How often that `bjobs` check may run while the failures last.
 _LSF_PROBE_INTERVAL_SECONDS = 300
+# How long one `bjobs` / `bkill` round trip may take. The SSH options only cover
+# a dead network; a login node that answers while LSF's scheduler is overloaded
+# keeps `bjobs` retrying ("LSF is processing your request...") indefinitely, and
+# the poll loop must not wait on it past its own ceiling.
+_LSF_COMMAND_TIMEOUT_SECONDS = 60
 # LSF states of a job that still holds (or is waiting for) its allocation.
 # UNKWN is what LSF reports when it loses contact with a running job's execution
 # host -- the same network trouble the grace exists to ride out -- so it must not
@@ -157,39 +197,255 @@ _LSF_PROBE_INTERVAL_SECONDS = 300
 _LSF_ALIVE_STATES = frozenset(
     {"RUN", "PEND", "WAIT", "PROV", "PSUSP", "USUSP", "SSUSP", "UNKWN"}
 )
+# The clock the poll-failure tracker measures outages with. A module alias so
+# tests can drive it without replacing ``time.monotonic`` process-wide (which
+# asyncio's own ``loop.time()`` reads too).
+_poll_failure_clock = time.monotonic
+
+# Threads for the `bjobs` / `bkill` calls, kept off the loop's shared default
+# pool: a call that outlives _LSF_COMMAND_TIMEOUT_SECONDS is abandoned, not
+# killed, and must not hold a slot other offloaded work needs. One pool per LSF
+# cluster (~/.lsf/config host), so a login node that hangs every call fills only
+# its own pool and cannot starve another cluster's checks. Bounded, so that hung
+# login node cannot grow its pool without limit -- once all its workers are
+# stuck, its later calls time out in the queue and read as "unknown".
+_LSF_EXECUTORS: Dict[str, concurrent.futures.ThreadPoolExecutor] = {}
+_LSF_EXECUTOR_LOCK = threading.Lock()
 
 
-def _lsf_job_alive(lsf_cluster: str, cluster_name: str) -> Optional[bool]:
+def _get_lsf_executor(lsf_cluster: str) -> concurrent.futures.ThreadPoolExecutor:
+    """Return the thread pool for one LSF cluster's login-node calls, creating
+    it once."""
+    with _LSF_EXECUTOR_LOCK:
+        executor = _LSF_EXECUTORS.get(lsf_cluster)
+        if executor is None:
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix=f"gb-lsf-{lsf_cluster}"
+            )
+            _LSF_EXECUTORS[lsf_cluster] = executor
+    return executor
+
+
+async def _run_lsf_call(func: Callable[..., Any], lsf_cluster: str, *args: Any) -> Any:
+    """Run a blocking call against one LSF cluster's login node, on that
+    cluster's pool and with a time limit. ``lsf_cluster`` is also passed to
+    ``func`` as its first argument.
+
+    :raises asyncio.TimeoutError: if it takes over _LSF_COMMAND_TIMEOUT_SECONDS.
+        The worker thread is left to finish on its own.
+    """
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(
+            _get_lsf_executor(lsf_cluster),
+            functools.partial(func, lsf_cluster, *args),
+        ),
+        timeout=_LSF_COMMAND_TIMEOUT_SECONDS,
+    )
+
+
+def _lsf_job_name(cluster_name: str) -> str:
+    """The LSF job name SkyPilot gives a cluster's allocation, recomputed here.
+
+    Only a fallback: the launch records the name SkyPilot actually used (the
+    handle's ``cluster_name_on_cloud``), which this process cannot get wrong.
+    SkyPilot submits the job as that ``cluster_name_on_cloud``: the display name
+    lowercased, with ``.``/``_`` turned into ``-``, plus the user hash (and
+    truncated if the cloud sets a length limit). Built with the same call
+    SkyPilot's backend uses.
+    """
+    from sky import clouds as sky_clouds
+    from sky.utils import common_utils
+
+    return common_utils.make_cluster_name_on_cloud(
+        cluster_name, max_length=sky_clouds.LSF.max_cluster_name_length()
+    )
+
+
+def _lsf_client(lsf_cluster: str):
+    """An ``LsfClient`` for one ``~/.lsf/config`` host, as SkyPilot's LSF cloud
+    builds it."""
+    from sky.adaptors import lsf as lsf_adaptor
+    from sky.provision.lsf import utils as lsf_utils
+
+    cfg = lsf_utils.get_lsf_ssh_config().lookup(lsf_cluster)
+    return lsf_adaptor.LsfClient(
+        cfg["hostname"],
+        int(cfg.get("port", 22)),
+        cfg["user"],
+        lsf_utils.get_identity_file(cfg),
+        ssh_proxy_command=cfg.get("proxycommand"),
+        ssh_proxy_jump=cfg.get("proxyjump"),
+        identities_only=lsf_utils.get_identities_only(cfg),
+    )
+
+
+def _lsf_job_alive(lsf_cluster: str, job_name: str) -> Optional[bool]:
     """Ask LSF directly whether the job behind a SkyPilot cluster is alive.
 
-    SkyPilot names the LSF job ``<cluster_name>-<user hash>``, so the job is
-    found by name with a trailing wildcard. Runs one ``bjobs`` on the login node
-    over the same ``~/.lsf/config`` entry SkyPilot's LSF cloud uses.
+    Runs one ``bjobs`` on the login node over the same ``~/.lsf/config`` entry
+    SkyPilot's LSF cloud uses. Blocking; callers bound it with
+    :func:`_run_lsf_call`.
 
-    :returns: ``True`` if LSF has an unfinished job for the cluster, ``False`` if
+    :param job_name: the LSF job name (the cluster's ``cluster_name_on_cloud``).
+    :returns: ``True`` if LSF has an unfinished job by that name, ``False`` if
         it has none, ``None`` if LSF could not be asked (SSH down, bad config).
     """
     try:
-        from sky.adaptors import lsf as lsf_adaptor
-        from sky.provision.lsf import utils as lsf_utils
-
-        cfg = lsf_utils.get_lsf_ssh_config().lookup(lsf_cluster)
-        client = lsf_adaptor.LsfClient(
-            cfg["hostname"],
-            int(cfg.get("port", 22)),
-            cfg["user"],
-            lsf_utils.get_identity_file(cfg),
-            ssh_proxy_command=cfg.get("proxycommand"),
-            ssh_proxy_jump=cfg.get("proxyjump"),
-            identities_only=lsf_utils.get_identities_only(cfg),
-        )
-        states = client.get_jobs_state_by_name(f"{cluster_name}-*")
+        states = _lsf_client(lsf_cluster).get_jobs_state_by_name(job_name)
     except Exception as e:  # pylint: disable=broad-except
         logger.warning(
-            "Could not ask LSF (%s) about cluster %s: %s", lsf_cluster, cluster_name, e
+            "Could not ask LSF (%s) about job %s: %s", lsf_cluster, job_name, e
         )
         return None
     return any(state in _LSF_ALIVE_STATES for state in states)
+
+
+def _lsf_cancel_job(lsf_cluster: str, job_name: str) -> bool:
+    """``bkill`` the LSF job behind a SkyPilot cluster.
+
+    Used when the monitor gives up on a cluster SkyPilot can no longer see:
+    ``sky.down`` on a cluster with no SkyPilot record is a no-op, so without
+    this the job would keep its GPUs while a retry submits another. Blocking;
+    callers bound it with :func:`_run_lsf_call`.
+
+    :param job_name: the LSF job name (the cluster's ``cluster_name_on_cloud``).
+    :returns: ``True`` if LSF accepted the kill or has no such job, ``False`` if
+        LSF could not be asked.
+    """
+    try:
+        _lsf_client(lsf_cluster).cancel_jobs_by_name(job_name)
+    except Exception as e:  # pylint: disable=broad-except
+        logger.warning(
+            "Could not bkill the LSF (%s) job %s: %s", lsf_cluster, job_name, e
+        )
+        return False
+    return True
+
+
+# Verdicts of _PollFailureTracker.record.
+_POLL_KEEP = "keep"  # keep polling; the cluster may still be there
+_POLL_GONE = "gone"  # the cluster is gone: FAILED, and the RetryHandler decides
+# The ceiling was reached and the LSF job behind the cluster could not be
+# killed: FAILED with no retry, which would otherwise hold two allocations.
+_POLL_GONE_NO_RETRY = "gone_no_retry"
+
+
+class _PollFailureTracker:
+    """Decides, poll by poll, when failing job-status polls mean the cluster is
+    gone.
+
+    A run of failures is final once it has lasted ``grace`` seconds (see
+    _DEFAULT_POLL_FAILURE_GRACE_SECONDS) and at least _MIN_POLL_FAILURES polls.
+    Off the _SSH_HPC_CLOUDS a "does not exist" poll is final at once; on them it
+    is not, because SkyPilot's record of a cluster can vanish while the job
+    behind it keeps running.
+
+    For an LSF cluster the grace is followed by a direct ``bjobs`` check every
+    _LSF_PROBE_INTERVAL_SECONDS: only a definite "no such job" is final before
+    ``ceiling``. At the ceiling the job is ``bkill``-ed, and if that fails too
+    the verdict is _POLL_GONE_NO_RETRY.
+    """
+
+    def __init__(
+        self,
+        cluster_name: str,
+        grace: float,
+        ceiling: float,
+        ssh_hpc: bool,
+        lsf_cluster: Optional[str],
+        lsf_job_name: Optional[str] = None,
+    ) -> None:
+        self.cluster_name = cluster_name
+        self.grace = grace
+        self.ceiling = max(grace, ceiling)
+        self.ssh_hpc = ssh_hpc
+        self.lsf_cluster = lsf_cluster
+        # The name SkyPilot submitted the LSF job under, as recorded at launch;
+        # recomputed (on first use) only when the launch did not record one.
+        self._lsf_job_name = lsf_job_name
+        self.count = 0
+        self.failing_for = 0.0
+        self._first_at: Optional[float] = None
+        self._last_probe_at: Optional[float] = None
+
+    @property
+    def lsf_job_name(self) -> str:
+        """The LSF job name ``bjobs`` / ``bkill`` look up."""
+        if not self._lsf_job_name:
+            self._lsf_job_name = _lsf_job_name(self.cluster_name)
+        return self._lsf_job_name
+
+    def reset(self) -> None:
+        """A poll succeeded: the next failure starts a new run."""
+        self.count = 0
+        self.failing_for = 0.0
+        self._first_at = None
+        self._last_probe_at = None
+
+    async def record(self, error: Exception) -> str:
+        """Record one failed poll and return the verdict (``_POLL_*``)."""
+        self.count += 1
+        now = _poll_failure_clock()
+        if self._first_at is None:
+            self._first_at = now
+        self.failing_for = now - self._first_at
+        if not self.ssh_hpc and "does not exist" in str(error):
+            return _POLL_GONE
+        if self.count < _MIN_POLL_FAILURES or self.failing_for < self.grace:
+            return _POLL_KEEP
+        if not self.lsf_cluster:
+            return _POLL_GONE
+        if self.failing_for >= self.ceiling:
+            return await self._give_up_on_lsf_job(self.lsf_cluster)
+        if (
+            self._last_probe_at is not None
+            and now - self._last_probe_at < _LSF_PROBE_INTERVAL_SECONDS
+        ):
+            return _POLL_KEEP
+        self._last_probe_at = now
+        try:
+            alive = await _run_lsf_call(
+                _lsf_job_alive, self.lsf_cluster, self.lsf_job_name
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "bjobs on %s about cluster %s took over %ds; treating as unknown.",
+                self.lsf_cluster,
+                self.cluster_name,
+                _LSF_COMMAND_TIMEOUT_SECONDS,
+            )
+            alive = None
+        logger.warning(
+            "Cluster %s unreachable for %.0fs (%d polls); LSF says the job is %s.",
+            self.cluster_name,
+            self.failing_for,
+            self.count,
+            {True: "alive", False: "gone", None: "unknown"}[alive],
+        )
+        return _POLL_GONE if alive is False else _POLL_KEEP
+
+    async def _give_up_on_lsf_job(self, lsf_cluster: str) -> str:
+        """The ceiling is reached: kill the LSF job so a retry does not run
+        beside it."""
+        try:
+            killed = await _run_lsf_call(
+                _lsf_cancel_job, lsf_cluster, self.lsf_job_name
+            )
+        except asyncio.TimeoutError:
+            killed = False
+        logger.warning(
+            "Cluster %s unreachable for %.0fs, past the %.0fs ceiling; %s.",
+            self.cluster_name,
+            self.failing_for,
+            self.ceiling,
+            (
+                "bkill-ed its LSF job"
+                if killed
+                else "could not bkill its LSF job, so it will not be retried"
+            ),
+        )
+        return _POLL_GONE if killed else _POLL_GONE_NO_RETRY
 
 
 # Dedicated thread pool for the blocking SkyPilot provisioning submits that a
@@ -507,6 +763,15 @@ _SSH_HPC_CLOUDS = ("slurm", "lsf")
 _CLOUDS_NEEDING_MANUAL_TEARDOWN = ("slurm", "lsf")
 
 
+# How long, and how often, to wait for the cleanup VM's reap job to finish.
+# sky.launch's stream_and_get returns (job_id, handle) once the job is
+# submitted, NOT when it completes, so the reap is still running when we start
+# polling. The timeout is the default; a provider may extend it via
+# cleanup_timeout_s() (EFS access-point mode builds efs-utils first).
+_CLEANUP_STATUS_POLL_INTERVAL_S = 5.0
+_CLEANUP_STATUS_TIMEOUT_S = 300.0
+
+
 def _cpus_floor(cloud: str, n: int) -> Union[int, str]:
     """Return a SkyPilot ``cpus`` floor of ``n`` vCPUs in the form ``cloud`` accepts.
 
@@ -657,6 +922,20 @@ def _coerce_float(value, default: float) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _coerce_seconds(value, default: float, name: str) -> float:
+    """A duration from a monitor config: ``default`` when unset, and when not a
+    finite, non-negative number (``nan`` would make every ``>=`` test False, so
+    the monitor would never give up)."""
+    if value is None:
+        return default
+    # A bool is an int to float(), so `true` would silently mean 1 s.
+    seconds = math.nan if isinstance(value, bool) else _coerce_float(value, math.nan)
+    if not math.isfinite(seconds) or seconds < 0:
+        logger.warning("Invalid %s %r; falling back to %s", name, value, default)
+        return default
+    return seconds
 
 
 def _parse_log_retrieval(
@@ -1116,35 +1395,79 @@ def _reject_home_prefixed(path: str, role: str) -> None:
         )
 
 
+def _reject_host_mount_source(source: str) -> None:
+    """Refuse a ``file_mounts`` source naming a gbserver-host path, unless STANDALONE.
+
+    SkyPilot rsyncs local ``file_mounts`` sources from the gbserver host to the
+    cluster, and the mapping can come from a user's git-hosted step.yaml, the
+    build.yaml step ``config:`` (merged on top), or a git-hosted environment. On
+    a shared server an absolute or ``file://`` source would therefore copy
+    server files (``/home/gbserver/.kube``, ``~/.sky``, the database) to compute
+    the user controls. A STANDALONE server is the user's own machine.
+
+    :param source: an absolute path or ``file://`` URI from a ``file_mounts`` entry.
+    :raises ValueError: if the server is not STANDALONE.
+    """
+    if not is_standalone():
+        raise ValueError(
+            f"file_mounts source {source!r} names a path on the gbserver host; "
+            "only paths inside the step directory (or remote URIs such as "
+            "s3://) are allowed unless the server is standalone"
+        )
+
+
+def _require_inside_step_dir(source: str, base: Path) -> None:
+    """Outside STANDALONE, require ``base/source`` to stay in ``base`` after symlinks.
+
+    A step from a user's git repo can contain a symlink (``k -> /home/gbserver``)
+    that a plain ``..`` check misses but rsync would follow.
+
+    :param source: the relative source from a ``file_mounts`` entry.
+    :param base: the step's asset dir.
+    :raises ValueError: if not STANDALONE and the resolved source leaves ``base``.
+    """
+    if is_standalone():
+        return
+    if not (base / source).resolve().is_relative_to(base.resolve()):
+        raise ValueError(
+            f"file_mounts source {source!r} resolves outside the step directory"
+        )
+
+
 def _resolve_local_mount_source(source: str, asset_dir: Union[Path, str, None]) -> str:
     """Resolve a ``file_mounts`` local source against the step's asset dir.
 
-    Remote URIs (``s3://``, ``gs://``, ``file://``, ``http…``) and absolute paths
-    are returned unchanged. A relative local path is joined onto ``asset_dir`` —
-    the per-run directory holding the rendered ``step.yaml`` and its sibling
-    files — so a path written in ``step.yaml`` is interpreted relative to the
-    ``step.yaml``'s own location (matching how bash/k8s treat step-relative
-    assets).
+    Remote URIs (``s3://``, ``gs://``, ``http…``) are returned unchanged. On a
+    STANDALONE server so are absolute paths and ``file://`` URIs; on any other
+    server those name gbserver-host files and are rejected (see
+    :func:`_reject_host_mount_source`). A relative local path is joined onto
+    ``asset_dir`` — the per-run directory holding the rendered ``step.yaml`` and
+    its sibling files — so a path written in ``step.yaml`` is interpreted
+    relative to the ``step.yaml``'s own location (matching how bash/k8s treat
+    step-relative assets).
 
     A ``~``/``~/``-prefixed source is rejected: this launcher resolves relative
     sources against the step dir and never expands ``~`` for sources, so it would
     otherwise become a literal ``<asset_dir>/~/…`` path rather than a home dir.
     A relative source that uses ``..`` to climb out of the step dir (e.g.
-    ``../other``) is also rejected, so sources stay confined to the step's own
-    assets. Use an absolute path or a step-relative one instead.
+    ``../other``) is also rejected, and outside STANDALONE so is one that leaves
+    it through a symlink, so sources stay confined to the step's own assets.
 
     :param source: the local/remote source string from a ``file_mounts`` entry.
     :param asset_dir: ``targetsteprun_asset_dir`` (a ``Path`` or ``file://``
         string), or ``None`` when unavailable (e.g. a retry with no stashed dir).
-    :returns: the resolved source string (unchanged for URIs and absolute paths).
+    :returns: the resolved source string (unchanged for URIs and, on a
+        standalone server, absolute paths).
     :raises ValueError: if ``source`` is ``~``/``~/``-prefixed or escapes the
-        step dir via ``..``.
+        step dir; or, outside STANDALONE, if it is absolute, ``file://``, or
+        relative with no asset dir to confine it to.
     """
     parsed = urllib.parse.urlparse(source)
-    if parsed.scheme:  # remote URI (s3/gs/file/http/…) — leave as-is
+    if parsed.scheme == FILE_SCHEME or (not parsed.scheme and os.path.isabs(source)):
+        _reject_host_mount_source(source)
+        return source  # standalone: absolute host path is the author's choice
+    if parsed.scheme:  # remote URI (s3/gs/http/…) — leave as-is
         return source
-    if os.path.isabs(source):
-        return source  # absolute host path — author's explicit choice
     _reject_home_prefixed(source, "source")
     if _escapes_parent(source):
         raise ValueError(
@@ -1153,6 +1476,11 @@ def _resolve_local_mount_source(source: str, asset_dir: Union[Path, str, None]) 
             f"source"
         )
     if asset_dir is None:
+        if not is_standalone():
+            raise ValueError(
+                f"file_mounts source {source!r} is relative but there is no step "
+                "directory to resolve it against"
+            )
         logger.warning(
             "Relative file_mount source %r but no asset dir available; "
             "leaving it unresolved",
@@ -1161,6 +1489,7 @@ def _resolve_local_mount_source(source: str, asset_dir: Union[Path, str, None]) 
         return source
     # Tolerate a file:// URI form for asset_dir, matching the bash launcher.
     base = Path(urllib.parse.urlparse(str(asset_dir)).path)
+    _require_inside_step_dir(source, base)
     return str(base / source)
 
 
@@ -1281,22 +1610,33 @@ def _compose_step_prologue(providers, resolved, workdir_mount, build_workdir):
     for p in providers:
         prologue += p.mount_prologue(dns_override=(resolved or {}).get(p.mount_point))
     if build_workdir and workdir_mount is not None:
-        mount_root = shlex.quote(workdir_mount.mount_point)
-        prologue += (
-            'mkdir -p "$GB_LOCAL_SCRATCH"\n'
-            # Create the per-run tree world-writable ATOMICALLY (umask 000 in a
-            # subshell, so mkdir -p makes every new level 0777 with no 0755 gap) —
-            # a concurrent different-uid step in the same build can then create its
-            # own per-run dir immediately. The guarded chmod walk below adds the
-            # sticky bit (1777) and fixes any pre-existing level.
-            '(umask 000 && mkdir -p "$GB_BUILD_WORKDIR")\n'
-            '__gb_d="$GB_BUILD_WORKDIR"\n'
-            f'while [ "$__gb_d" != {mount_root} ] && [ "$__gb_d" != "/" ]; do\n'
-            '  chmod 1777 "$__gb_d" 2>/dev/null || true\n'
-            '  __gb_d="$(dirname "$__gb_d")"\n'
-            "done\n"
-            'cd "$GB_BUILD_WORKDIR"\n'
-        )
+        if workdir_mount.efs is not None and workdir_mount.efs.access_point_id:
+            # Access-point mount: the AP pins a fixed PosixUser (uid/gid) and owns
+            # the (operator-provisioned) RootDirectory, so every step runs as the
+            # same uid and a plain mkdir -p suffices — no 1777 bootstrap / chmod
+            # walk, and no world-writable window.
+            prologue += (
+                'mkdir -p "$GB_LOCAL_SCRATCH"\n'
+                'mkdir -p "$GB_BUILD_WORKDIR"\n'
+                'cd "$GB_BUILD_WORKDIR"\n'
+            )
+        else:
+            mount_root = shlex.quote(workdir_mount.mount_point)
+            prologue += (
+                'mkdir -p "$GB_LOCAL_SCRATCH"\n'
+                # Create the per-run tree world-writable ATOMICALLY (umask 000 in a
+                # subshell, so mkdir -p makes every new level 0777 with no 0755 gap) —
+                # a concurrent different-uid step in the same build can then create its
+                # own per-run dir immediately. The guarded chmod walk below adds the
+                # sticky bit (1777) and fixes any pre-existing level.
+                '(umask 000 && mkdir -p "$GB_BUILD_WORKDIR")\n'
+                '__gb_d="$GB_BUILD_WORKDIR"\n'
+                f'while [ "$__gb_d" != {mount_root} ] && [ "$__gb_d" != "/" ]; do\n'
+                '  chmod 1777 "$__gb_d" 2>/dev/null || true\n'
+                '  __gb_d="$(dirname "$__gb_d")"\n'
+                "done\n"
+                'cd "$GB_BUILD_WORKDIR"\n'
+            )
     return prologue
 
 
@@ -1332,6 +1672,8 @@ def _build_skypilot_mounts(
                 "mode": sky.StorageMode[mount_val.get("mode", "MOUNT").upper()],
             }
             parsed = urllib.parse.urlparse(source)
+            if parsed.scheme == FILE_SCHEME:  # a host path, not a bucket
+                _reject_host_mount_source(source)
             if parsed.scheme:  # bucket URI: extract the bucket-only source
                 sub_path = parsed.path.lstrip("/")
                 if sub_path:
@@ -1538,6 +1880,10 @@ class Skypilot(Environment):
         # launch_id -> LSF cluster name (the ~/.lsf/config host), for lsf launches
         # only: what the poll loop asks `bjobs` before tearing a cluster down.
         self._lsf_clusters: Dict[str, str] = {}
+        # launch_id -> the LSF job name SkyPilot submitted (the launch handle's
+        # cluster_name_on_cloud), so `bjobs` / `bkill` use the real name rather
+        # than one recomputed in this process.
+        self._lsf_job_names: Dict[str, str] = {}
         # launch_ids on an _SSH_HPC_CLOUDS cloud: the poll loop gives these the
         # poll-failure grace by default and does not trust "does not exist".
         self._ssh_hpc_launches: Set[str] = set()
@@ -1599,8 +1945,12 @@ class Skypilot(Environment):
         config (:func:`_reload_skypilot_client_config`), which is what makes an
         edited environment.yaml take effect on the next build without a
         gbserver restart. An Environment instance is cached per build thread,
-        so this runs once per build: a retry WITHIN a build keeps the config the
-        build started with.
+        so this runs once per build. But the loaded config is process-global,
+        not per build: if build B starts while build A is running, B's reload
+        replaces A's config too, so A's later requests (a retry relaunch, say)
+        carry B's environment's ``cloud_config``. That only differs when the two
+        builds use environments with different ``cloud_config`` -- or the same
+        environment.yaml edited between them.
 
         The SSH config is deliberately NOT materialized here: it is merged
         per-launch by :meth:`_prepare_ssh_for_launch`, which also handles the
@@ -2259,7 +2609,28 @@ class Skypilot(Environment):
                 idle_minutes_to_autostop=0,
                 down=True,
             )
-            await asyncio.to_thread(sky.stream_and_get, request_id)
+            launch_result = await asyncio.to_thread(sky.stream_and_get, request_id)
+            # stream_and_get returns (job_id, handle) once the reap job is
+            # SUBMITTED, not when it finishes, and never raises on a non-zero
+            # reap exit -- that only shows as a non-SUCCEEDED job status. Wait for
+            # the job to reach a terminal state so a reap that mounted but failed
+            # (a failed rm, or mount.efs missing in AP mode) is surfaced below as
+            # an ORPHANED tree instead of dropped silently.
+            job_id = launch_result[0] if isinstance(launch_result, tuple) else None
+            if job_id is not None:
+                budget = provider.cleanup_timeout_s() if provider is not None else None
+                final = await self._await_cleanup_job_status(
+                    cluster_name,
+                    job_id,
+                    workdir,
+                    setup_id,
+                    budget if budget is not None else _CLEANUP_STATUS_TIMEOUT_S,
+                )
+                if final is not None and final != sky.JobStatus.SUCCEEDED:
+                    raise RuntimeError(
+                        f"cleanup job {job_id} ended {final.value} (reap script "
+                        "exited non-zero); per-run tree may be only partly removed"
+                    )
         except Exception as e:  # don't fail a finished build for cleanup
             # Make an orphaned per-run tree visible so it can be reaped (see the
             # teardown notes in docs/environments/skypilot-aws.md). For OSError,
@@ -2288,6 +2659,58 @@ class Skypilot(Environment):
             cloud_group = (str(self._get_cloud()).split("/", 1)[0] or "").lower()
             if cloud_group in _CLOUDS_NEEDING_MANUAL_TEARDOWN:
                 await self._teardown(cluster_name)
+
+    async def _await_cleanup_job_status(
+        self: Self,
+        cluster_name: str,
+        job_id: int,
+        workdir: str,
+        setup_id: str,
+        timeout_s: float,
+    ) -> Optional["sky.JobStatus"]:
+        """Poll the cleanup VM's reap job until it reaches a terminal state.
+
+        Returns the terminal ``sky.JobStatus`` or ``None`` when the outcome
+        cannot be confirmed -- the ``down=True`` autodown can remove the cluster
+        before or during polling, and the reap can outlast ``timeout_s``.
+        ``None`` is not a failure: only a confirmed non-SUCCEEDED terminal status
+        orphans the tree. A timeout is still logged as a WARNING naming the
+        tree, since the reap may never finish.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                status_req = await asyncio.to_thread(
+                    lambda: sky.job_status(cluster_name, job_ids=[job_id])
+                )
+                statuses = await asyncio.to_thread(sky.get, status_req)
+            except Exception as status_err:
+                logger.info(
+                    "teardown_skypilot: cleanup job %s status unconfirmable on "
+                    "%s (likely already autodowned): %s",
+                    job_id,
+                    cluster_name,
+                    status_err,
+                )
+                return None
+            status = statuses.get(job_id) if statuses else None
+            if status is None:
+                return None
+            if status.is_terminal():
+                return status  # SUCCEEDED or a FAILED*/CANCELLED
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "teardown_skypilot: cleanup job %s still %s after %ss; reap "
+                    "unconfirmed, the per-run tree at %s may be orphaned "
+                    "(setup_id=%s). This does NOT affect the build outcome.",
+                    job_id,
+                    status.value,
+                    timeout_s,
+                    workdir,
+                    setup_id,
+                )
+                return None
+            await asyncio.sleep(_CLEANUP_STATUS_POLL_INTERVAL_S)
 
     async def _deprovision_ephemeral(
         self: Self, provisioned: list, run_meta: Dict, setup_id: str
@@ -2698,7 +3121,7 @@ class Skypilot(Environment):
             # Build cluster config overrides (docker run_options, etc.)
             # SkyPilot's top-level `config:` section maps to
             # _cluster_config_overrides on sky.Resources.
-            cluster_config_overrides = {}
+            cluster_config_overrides: dict[str, Any] = {}
             # `or {}` per layer so a bare (present-but-null) `docker:` /
             # `launcher_config:` YAML key resolves to an empty map rather than
             # crashing the merge with a None operand.
@@ -2970,9 +3393,11 @@ class Skypilot(Environment):
                 self._job_ids[launch_id] = job_id
             if cloud_group in _SSH_HPC_CLOUDS:
                 self._ssh_hpc_launches.add(launch_id)
-            infra_parts = (infra or "").split("/")
-            if cloud_group == "lsf" and len(infra_parts) > 1 and infra_parts[1]:
-                self._lsf_clusters[launch_id] = infra_parts[1]
+            if cloud_group == "lsf" and target_alias:
+                self._lsf_clusters[launch_id] = target_alias
+                on_cloud = getattr(_handle, "cluster_name_on_cloud", None)
+                if isinstance(on_cloud, str) and on_cloud:
+                    self._lsf_job_names[launch_id] = on_cloud
 
             logger.info(
                 "SkyPilot cluster %s launched: job_id=%s launch_id=%s",
@@ -3443,23 +3868,23 @@ class Skypilot(Environment):
             kwargs, poll_interval
         )
         last_status = None
-        consecutive_poll_failures = 0
-        # monotonic time of the first failure in the current run of failures
-        first_poll_failure_at: Optional[float] = None
-        last_lsf_probe_at: Optional[float] = None
         ssh_hpc = launch_id in self._ssh_hpc_launches
-        failure_grace = _coerce_float(
-            kwargs.get("poll_failure_grace_seconds"),
-            _DEFAULT_POLL_FAILURE_GRACE_SECONDS if ssh_hpc else 0.0,
-        )
-        failure_ceiling = max(
-            failure_grace,
-            _coerce_float(
+        poll_failures = _PollFailureTracker(
+            cluster_name,
+            grace=_coerce_seconds(
+                kwargs.get("poll_failure_grace_seconds"),
+                _DEFAULT_POLL_FAILURE_GRACE_SECONDS if ssh_hpc else 0.0,
+                "poll_failure_grace_seconds",
+            ),
+            ceiling=_coerce_seconds(
                 kwargs.get("poll_failure_max_seconds"),
                 _DEFAULT_POLL_FAILURE_MAX_SECONDS,
+                "poll_failure_max_seconds",
             ),
+            ssh_hpc=ssh_hpc,
+            lsf_cluster=self._lsf_clusters.get(launch_id),
+            lsf_job_name=self._lsf_job_names.get(launch_id),
         )
-        lsf_cluster = self._lsf_clusters.get(launch_id)
 
         # Live log streaming state (only used in ``stream`` mode)
         log_stream_task: Optional[asyncio.Task] = None
@@ -3474,6 +3899,7 @@ class Skypilot(Environment):
         while not stop_event.is_set():
             status = None
             poll_failed = False
+            no_retry = False
             try:
                 request_id = await asyncio.to_thread(
                     lambda: sky.job_status(
@@ -3483,9 +3909,7 @@ class Skypilot(Environment):
                 )
                 statuses = await asyncio.to_thread(sky.get, request_id)
                 status = statuses.get(job_id) if statuses else None
-                consecutive_poll_failures = 0
-                first_poll_failure_at = None
-                last_lsf_probe_at = None
+                poll_failures.reset()
             except Exception as e:
                 logger.error(
                     "Error polling SkyPilot job %s on %s: %s",
@@ -3494,59 +3918,20 @@ class Skypilot(Environment):
                     e,
                 )
                 poll_failed = True
-                consecutive_poll_failures += 1
-                now = time.monotonic()
-                if first_poll_failure_at is None:
-                    first_poll_failure_at = now
-                failing_for = now - first_poll_failure_at
-                # On an SSH HPC cloud "does not exist" is NOT conclusive on its
-                # own: SkyPilot's record of a cluster can vanish while the job
-                # behind it keeps running, and one such poll used to tear a
-                # healthy run down. Elsewhere it still means preempted.
-                gone = (
-                    consecutive_poll_failures >= _MIN_POLL_FAILURES
-                    and failing_for >= failure_grace
-                ) or (not ssh_hpc and "does not exist" in str(e))
-                if gone and lsf_cluster and failing_for < failure_ceiling:
-                    # The grace is over; ask LSF itself before tearing anything
-                    # down. Only a definite "no such job" is final early.
-                    if (
-                        last_lsf_probe_at is None
-                        or now - last_lsf_probe_at >= _LSF_PROBE_INTERVAL_SECONDS
-                    ):
-                        last_lsf_probe_at = now
-                        alive = await asyncio.to_thread(
-                            _lsf_job_alive, lsf_cluster, cluster_name
-                        )
-                        lsf_verdict = {
-                            True: "alive",
-                            False: "gone",
-                            None: "unknown",
-                        }[alive]
-                        logger.warning(
-                            "SkyPilot job %s on %s unreachable for %.0fs "
-                            "(%d polls); LSF says the job is %s.",
-                            job_id,
-                            cluster_name,
-                            failing_for,
-                            consecutive_poll_failures,
-                            lsf_verdict,
-                        )
-                        gone = alive is False
-                    else:
-                        gone = False
-                if gone:
+                verdict = await poll_failures.record(e)
+                if verdict in (_POLL_GONE, _POLL_GONE_NO_RETRY):
                     logger.warning(
                         "Cluster %s is gone (preempted or terminated) after %d "
                         "consecutive poll failures over %.0fs. Treating as FAILED "
                         "for launch_id %s.",
                         cluster_name,
-                        consecutive_poll_failures,
-                        failing_for,
+                        poll_failures.count,
+                        poll_failures.failing_for,
                         launch_id,
                     )
                     status = sky.JobStatus.FAILED
                     poll_failed = False
+                    no_retry = verdict == _POLL_GONE_NO_RETRY
 
             # launch_skypilot_teardown downs this SERVICE's cluster on purpose,
             # so a poll seeing it "gone" (FAILED above) is success, not a crash.
@@ -3567,6 +3952,41 @@ class Skypilot(Environment):
                     launch_id,
                 )
                 return
+            if no_retry:
+                # Raised even when a RetryHandler is deferring: it is never
+                # handed a FAILED event, so it cannot start a retry that would
+                # hold a second allocation beside the job LSF would not kill.
+                msg = (
+                    f"Cluster {cluster_name} unreachable for "
+                    f"{poll_failures.failing_for:.0f}s, past the "
+                    f"{poll_failures.ceiling:.0f}s ceiling, and its LSF job could "
+                    f"not be bkill-ed; failing without a retry. Check it with "
+                    f"`bjobs` and bkill it by hand (launch_id={launch_id})."
+                )
+                # No WORKLOAD_STATUS FAILED event: that is what a RetryHandler
+                # acts on. The raise below is what marks the step FAILED.
+                if log_stream_task is not None and not log_stream_task.done():
+                    log_stream_stop.set()
+                    log_stream_task.cancel()
+                    try:
+                        await log_stream_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if event_q and entityrun_metadata:
+                    from gbserver.types.buildevent import (
+                        BuildEvent,
+                        BuildEventMessagePayload,
+                        BuildEventType,
+                    )
+
+                    await event_q.put(
+                        BuildEvent(
+                            run_metadata=entityrun_metadata,
+                            type=BuildEventType.MESSAGE_EVENT,
+                            payload=BuildEventMessagePayload(msg=msg),
+                        )
+                    )
+                raise WorkloadFailedException(msg)
 
             # Skip change-detection on poll failures so a transient error
             # doesn't emit a spurious RUNNING -> None -> RUNNING flap event.
@@ -3615,6 +4035,8 @@ class Skypilot(Environment):
             if log_retrieval_active and is_running and log_mode == LOG_RETRIEVAL_STREAM:
                 # Real-time follow stream: start once on RUNNING, then supervise.
                 if log_stream_task is None:
+                    # log_retrieval_active guarantees these are set.
+                    assert job_id is not None and event_q is not None
                     log_stream_task, logfile_monitor = self._start_log_stream_task(
                         cluster_name=cluster_name,
                         job_id=job_id,
@@ -3647,6 +4069,8 @@ class Skypilot(Environment):
                 if in_window and due:
                     last_pull_at = now
                     resume = self._log_lines_parsed.get(launch_id, 0)
+                    # log_retrieval_active guarantees these are set.
+                    assert job_id is not None and event_q is not None
                     new_last = await self._download_and_parse_logs(
                         cluster_name=cluster_name,
                         job_id=job_id,
@@ -3678,6 +4102,8 @@ class Skypilot(Environment):
                         exc,
                     )
                     log_stream_stop = asyncio.Event()
+                    # A live stream task only exists when these are set.
+                    assert job_id is not None and event_q is not None
                     log_stream_task, logfile_monitor = self._start_log_stream_task(
                         cluster_name=cluster_name,
                         job_id=job_id,
@@ -3904,11 +4330,11 @@ class Skypilot(Environment):
             # Save a copy to /tmp for easy debugging access
             tmp_log_dir = f"/tmp/sky-logs/{cluster_name}/job-{job_id}"
             os.makedirs(tmp_log_dir, exist_ok=True)
-            for f in glob.glob(f"{log_dir}/*"):
+            for src_path in glob.glob(f"{log_dir}/*"):
                 try:
                     import shutil
 
-                    shutil.copy2(f, tmp_log_dir)
+                    shutil.copy2(src_path, tmp_log_dir)
                 except OSError:
                     pass
             logger.info(
@@ -4015,6 +4441,7 @@ class Skypilot(Environment):
         finally:
             self._cluster_names.pop(launch_id, None)
             self._lsf_clusters.pop(launch_id, None)
+            self._lsf_job_names.pop(launch_id, None)
             self._ssh_hpc_launches.discard(launch_id)
             self._job_ids.pop(launch_id, None)
             self._launch_kwargs.pop(launch_id, None)

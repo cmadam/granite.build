@@ -40,6 +40,19 @@ class TestStepSkypilotConfig:
         assert config.image_id == "docker:nvcr.io/nvidia/pytorch:24.01-py3"
 
 
+@pytest.fixture
+def skypilot_standalone():
+    """Run file_mounts resolution as a STANDALONE server (the suite runs as DEV).
+
+    On a standalone server the user owns the host, so absolute/``file://``
+    sources are passed through; elsewhere they are refused (see
+    TestHostedMountSources).
+    """
+    with patch("gbserver.environment.skypilot.is_standalone", return_value=True):
+        yield
+
+
+@pytest.mark.usefixtures("skypilot_standalone")
 class TestResolveLocalMountSource:
     """_resolve_local_mount_source: relative sources rebase onto the asset dir."""
 
@@ -102,6 +115,7 @@ class TestResolveLocalMountSource:
         assert _resolve_local_mount_source("d", "file:///work/run1") == "/work/run1/d"
 
 
+@pytest.mark.usefixtures("skypilot_standalone")
 class TestBuildSkypilotMounts:
     """_build_skypilot_mounts: routes strings vs dicts and resolves sources."""
 
@@ -150,6 +164,71 @@ class TestBuildSkypilotMounts:
                 {"payload": "payload"}, "/work/run1", "/proj/gbtest/builds/b1"
             )
         assert file_mounts == {"/proj/gbtest/builds/b1/payload": "/work/run1/payload"}
+
+
+class TestHostedMountSources:
+    """Outside STANDALONE, a file_mounts source may only name files in the step dir.
+
+    file_mounts can come from step.yaml (possibly a user's git repo), the
+    build.yaml step ``config:`` (merged on top), or a git-hosted environment, and
+    SkyPilot rsyncs local sources from the gbserver host to the cluster. So an
+    absolute or ``file://`` source, or a step-dir symlink pointing out of it,
+    would ship server files (e.g. ``/home/gbserver/.kube``) to compute.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _hosted(self):
+        with patch("gbserver.environment.skypilot.is_standalone", return_value=False):
+            yield
+
+    @pytest.mark.parametrize(
+        "source",
+        ["/home/gbserver/.kube", "file:///home/gbserver/.kube", "file://host/etc"],
+    )
+    def test_host_path_sources_rejected(self, source, tmp_path):
+        from gbserver.environment.skypilot import _resolve_local_mount_source
+
+        with pytest.raises(ValueError, match="standalone"):
+            _resolve_local_mount_source(source, tmp_path)
+
+    def test_relative_source_inside_step_dir_allowed(self, tmp_path):
+        from gbserver.environment.skypilot import _resolve_local_mount_source
+
+        (tmp_path / "scripts").mkdir()
+        assert _resolve_local_mount_source("scripts", tmp_path) == str(
+            tmp_path / "scripts"
+        )
+
+    def test_symlink_out_of_step_dir_rejected(self, tmp_path):
+        from gbserver.environment.skypilot import _resolve_local_mount_source
+
+        step_dir, outside = tmp_path / "step", tmp_path / "outside"
+        step_dir.mkdir()
+        outside.mkdir()
+        (step_dir / "k").symlink_to(outside)
+        with pytest.raises(ValueError, match="outside the step directory"):
+            _resolve_local_mount_source("k", step_dir)
+
+    def test_relative_source_without_step_dir_rejected(self):
+        from gbserver.environment.skypilot import _resolve_local_mount_source
+
+        with pytest.raises(ValueError, match="no step directory"):
+            _resolve_local_mount_source("scripts", None)
+
+    def test_remote_uri_sources_allowed(self, tmp_path):
+        from gbserver.environment.skypilot import _resolve_local_mount_source
+
+        assert _resolve_local_mount_source("s3://b/k", tmp_path) == "s3://b/k"
+
+    @pytest.mark.parametrize(
+        "mount", ["/home/gbserver/.kube", {"source": "file:///home/gbserver/.kube"}]
+    )
+    def test_build_mounts_rejects_host_sources(self, mount, tmp_path):
+        from gbserver.environment.skypilot import _build_skypilot_mounts
+
+        with patch("gbserver.environment.skypilot.sky", MagicMock()):
+            with pytest.raises(ValueError, match="standalone"):
+                _build_skypilot_mounts({"/tmp/k": mount}, tmp_path)
 
 
 class TestRemapRelativeDest:
@@ -490,6 +569,44 @@ class TestLaunchSkypilot:
         assert skypilot_env._get_launch_ready_event(launch_id).is_set()
         mock_sky.launch.assert_called_once()
         mock_sky.stream_and_get.assert_called_once_with("req-123")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "infra, ssh_hpc, lsf_cluster",
+        [
+            ("lsf/bluevela/normal", True, "bluevela"),
+            ("slurm/mycluster/gpu", True, None),
+            ("k8s", False, None),
+            ("aws", False, None),
+        ],
+    )
+    async def test_launch_registers_the_poll_failure_grace(
+        self, skypilot_env, infra, ssh_hpc, lsf_cluster
+    ):
+        """What switches the poll loop's grace and `bjobs` check on in
+        production: an SSH HPC launch registers for the grace, and an LSF one
+        also records the ~/.lsf/config host to ask."""
+        mock_sky = MagicMock()
+        mock_sky.launch = MagicMock(return_value="req-123")
+        # The handle carries the name SkyPilot submitted the LSF job under.
+        handle = MagicMock(cluster_name_on_cloud="gb-test-launch-hpc-0a1b2c3d")
+        mock_sky.stream_and_get = MagicMock(return_value=(42, handle))
+        launch_id = "test-launch-hpc"
+        with (
+            patch("gbserver.environment.skypilot.sky", mock_sky),
+            patch("gbserver.environment.skypilot.HAS_SKYPILOT", True),
+        ):
+            skypilot_env._get_launch_ready_event(launch_id)
+            await skypilot_env.launch_skypilot(
+                launch_id=launch_id,
+                launcher_config={"run": "echo hi", "resources": {"infra": infra}},
+                config={},
+            )
+        assert (launch_id in skypilot_env._ssh_hpc_launches) is ssh_hpc
+        assert skypilot_env._lsf_clusters.get(launch_id) == lsf_cluster
+        assert skypilot_env._lsf_job_names.get(launch_id) == (
+            "gb-test-launch-hpc-0a1b2c3d" if lsf_cluster else None
+        )
 
     @pytest.mark.asyncio
     async def test_launch_embeds_target_and_build_in_cluster_name(self, skypilot_env):
@@ -2031,6 +2148,99 @@ class TestInlineConfigMaterialization:
                 mp.undo()
                 skypilot_config.reload_config()
 
+    def test_reload_never_exposes_an_empty_config(self, tmp_path):
+        """SkyPilot's own client reload empties the loaded config before
+        re-reading the files; a concurrent build's request in that window would
+        send no override at all. Every read during the reload must still see
+        the old config."""
+        pytest.importorskip("sky")
+        from sky import skypilot_config
+
+        from gbserver.environment.skypilot import _reload_skypilot_client_config
+
+        cfg = tmp_path / "config.yaml"
+        key = ("lsf", "cluster_configs", "bluevela", "bsub_options", "R")
+
+        def write(select):
+            cfg.write_text(
+                "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+                f'        R: "{select}"\n'
+            )
+
+        seen_mid_reload = []
+        real_get = skypilot_config._get_config_from_path
+
+        def spying_get(path):
+            seen_mid_reload.append(skypilot_config.to_dict().get_nested(key, None))
+            return real_get(path)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("SKYPILOT_GLOBAL_CONFIG", str(cfg))
+            mp.delenv("SKYPILOT_CONFIG", raising=False)
+            mp.delenv("IS_SKYPILOT_SERVER", raising=False)
+            mp.chdir(tmp_path)
+            try:
+                write("old")
+                _reload_skypilot_client_config()
+                write("new")
+                mp.setattr(skypilot_config, "_get_config_from_path", spying_get)
+                _reload_skypilot_client_config()
+                assert seen_mid_reload and set(seen_mid_reload) == {"old"}
+                assert skypilot_config.to_dict().get_nested(key, None) == "new"
+            finally:
+                mp.undo()
+                skypilot_config.reload_config()
+
+    def test_reload_matches_skypilots_own_reload(self, tmp_path):
+        """Drift guard: the replica must load what SkyPilot's own client reload
+        loads from the same files -- user and project layers, overlay order,
+        recorded paths. The SkyPilot pin is a moving tag."""
+        pytest.importorskip("sky")
+        from sky import skypilot_config
+
+        from gbserver.environment.skypilot import _reload_skypilot_client_config
+
+        user = tmp_path / "config.yaml"
+        user.write_text(
+            "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+            '        R: "user"\n        q: "normal"\n'
+            "jobs:\n  controller:\n    resources:\n      cpus: 2\n"
+        )
+        # The project file overrides one nested key and adds another.
+        (tmp_path / ".sky.yaml").write_text(
+            "lsf:\n  cluster_configs:\n    bluevela:\n      bsub_options:\n"
+            '        R: "project"\n'
+            "kubernetes:\n  pod_config:\n    metadata:\n      labels:\n"
+            "        team: gb\n"
+        )
+
+        def loaded():
+            return (
+                skypilot_config.to_dict(),
+                skypilot_config.loaded_config_path(),
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setenv("SKYPILOT_GLOBAL_CONFIG", str(user))
+            mp.delenv("SKYPILOT_CONFIG", raising=False)
+            mp.delenv("IS_SKYPILOT_SERVER", raising=False)
+            mp.chdir(tmp_path)
+            try:
+                skypilot_config.reload_config()
+                theirs = loaded()
+                _reload_skypilot_client_config()
+                ours = loaded()
+            finally:
+                mp.undo()
+                skypilot_config.reload_config()
+        assert ours == theirs
+        assert (
+            theirs[0].get_nested(
+                ("lsf", "cluster_configs", "bluevela", "bsub_options", "R"), None
+            )
+            == "project"
+        ), "the project layer did not load; the test proves nothing"
+
     @pytest.mark.asyncio
     async def test_ssh_materialized_per_launch(self):
         env = self._env(
@@ -2431,6 +2641,8 @@ class _FakeProvider:
 class _WorkdirMount:
     def __init__(self, mp):
         self.mount_point = mp
+        # Mirrors SharedFilesystemConfig.efs; None => non-access-point mount.
+        self.efs = None
 
 
 def test_prologue_orders_mount_before_cd_and_chmods_1777():
@@ -2776,3 +2988,49 @@ def test_no_gbserver_pinned_container_run_options():
     constant were removed; assert they no longer exist."""
     assert not hasattr(skymod, "_with_container_mount_options")
     assert not hasattr(skymod, "_CONTAINER_SHARED_FS_RUN_OPTIONS")
+
+
+def test_prologue_access_point_skips_chmod_walk():
+    import subprocess
+
+    from gbserver.environment.shared_fs.config import SharedFilesystemConfig
+
+    wm = SharedFilesystemConfig.model_validate(
+        {
+            "provider": "efs",
+            "mount_point": "/mnt/gb-shared",
+            "efs": {
+                "file_system_id": "fs-1",
+                "region": "us-east-1",
+                "access_point_id": "fsap-1",
+            },
+        }
+    )
+    sh = skymod._compose_step_prologue(
+        [_FakeProvider()], {}, wm, "/mnt/gb-shared/gbroot/builds/b/runs/r"
+    )
+    assert sh.startswith("set -eu")
+    assert 'mkdir -p "$GB_BUILD_WORKDIR"' in sh
+    assert 'cd "$GB_BUILD_WORKDIR"' in sh
+    # The AP pins a fixed uid/gid, so no world-writable bootstrap.
+    assert "chmod 1777" not in sh
+    assert "umask 000" not in sh
+    proc = subprocess.run(["bash", "-n"], input=sh, text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_prologue_non_access_point_keeps_chmod_walk():
+    from gbserver.environment.shared_fs.config import SharedFilesystemConfig
+
+    wm = SharedFilesystemConfig.model_validate(
+        {
+            "provider": "efs",
+            "mount_point": "/mnt/gb-shared",
+            "efs": {"file_system_id": "fs-1", "region": "us-east-1"},
+        }
+    )
+    sh = skymod._compose_step_prologue(
+        [_FakeProvider()], {}, wm, "/mnt/gb-shared/gbroot/builds/b/runs/r"
+    )
+    assert "chmod 1777" in sh
+    assert "umask 000" in sh
