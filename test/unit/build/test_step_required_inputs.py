@@ -120,3 +120,53 @@ def test_a_missing_required_input_fails_validation(tmp_path, monkeypatch, step):
             _build(sub, monkeypatch, step, env, inputs)
         cause = str(raised.value.__cause__)
         assert f"Required input `{missing}`" in cause and "is missing" in cause, cause
+
+
+def _gold_with_vllm(tmp_path, monkeypatch, vllm_input: dict):
+    """distill/gold with its required inputs as uris and its optional `vllm` input as
+    given, beside a producer target whose output a binding can name."""
+    from gbserver.build.build import Build
+    from gbserver.build.space import Space
+
+    monkeypatch.setenv("GB_HOME_DIR", str(tmp_path / "gb_home"))
+    build_dir = tmp_path / "build"
+    build_dir.mkdir()
+    gold = {
+        "environment_uri": _LSF_ENV,
+        "inputs": {**_bound("distill/gold", _LSF_ENV), "vllm": vllm_input},
+        "steps": [{"step_uri": "space://steps/distill/gold"}],
+    }
+    server = {
+        "environment_uri": _LSF_ENV,
+        "inputs": _bound("distill/vllm-server", _LSF_ENV),
+        "outputs": {"vllm_url": {"uri": "mem://vllm-url"}},
+        "steps": [{"step_uri": "space://steps/distill/vllm-server"}],
+    }
+    (build_dir / "build.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "granite.build": {
+                    "name": "t",
+                    "targets": {"server": server, "gold": gold},
+                }
+            }
+        )
+    )
+    return Build(
+        build_dir=build_dir,
+        space=Space(uri=f"file://{LOCAL_SPACE}", username="t"),
+        username="t",
+    )
+
+
+def test_a_binding_only_input_accepts_a_binding(tmp_path, monkeypatch):
+    """gold's `vllm` input accepts [binding] only. A bound input's uri is None, not "",
+    and the check once read None != "" as "a uri was given", refusing every binding."""
+    _gold_with_vllm(tmp_path, monkeypatch, {"binding": "server.vllm_url"})
+
+
+def test_a_binding_only_input_still_refuses_a_uri(tmp_path, monkeypatch):
+    with pytest.raises(ValueError) as raised:
+        _gold_with_vllm(tmp_path, monkeypatch, {"uri": "mem://x", "type": "fileset"})
+    cause = str(raised.value.__cause__)
+    assert "Optional input `vllm`" in cause and "does not accept uri" in cause, cause
