@@ -1513,14 +1513,16 @@ class TestSkypilotMonitorLogParsing:
         with log_file.open("a") as f:
             f.write(" Generated Data: /tmp/outputs/ck1000.jsonl\nJob complete.")
         assert await _pull(1) == 2
-        assert len(_artifact_events()) == 1
+        [event] = _artifact_events()
+        assert event.payload.binding["path"] == "/tmp/outputs/ck1000.jsonl"
 
         # At terminal status the log is complete: its last line is parsed even
         # without a newline.
         with log_file.open("a") as f:
             f.write(" Generated Data: /tmp/outputs/final.jsonl")
         assert await _pull(2, final=True) == 3
-        assert len(_artifact_events()) == 1
+        [event] = _artifact_events()
+        assert event.payload.binding["path"] == "/tmp/outputs/final.jsonl"
 
     @pytest.mark.asyncio
     async def test_no_event_configs_skips_log_parsing(
