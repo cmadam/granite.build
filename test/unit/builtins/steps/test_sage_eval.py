@@ -1,23 +1,25 @@
-"""Unit tests for the sage-eval steps' vLLM ipc socket directory.
+"""Unit tests for the scratch TMPDIR of the steps that key it by SKYPILOT_TASK_ID.
 
-Each sage-eval step points TMPDIR at a per-task scratch directory named after
-SKYPILOT_TASK_ID. vLLM's V1 engine binds its ZMQ ipc sockets under
-tempfile.gettempdir(), so they land in that directory too, and a unix socket path
-may be at most 107 characters (sizeof(sockaddr_un.sun_path) - 1).
+The sage-eval steps point TMPDIR at a per-task scratch directory. Programs bind
+unix sockets under tempfile.gettempdir(), i.e. that directory: vLLM's V1 engine
+its ZMQ ipc sockets, and Python < 3.13 multiprocessing its pymp-* listeners. A
+unix socket path may be at most 107 characters (sizeof(sockaddr_un.sun_path) - 1).
 
-The task id embeds the cluster name, so the socket path is far over that limit.
-On BlueVela the dense granite-4.1-3b model failed SALAD-Bench this way at engine
-start:
+The task id embeds the cluster name. When the directory was named after the id
+itself, the socket path ran to about 150 characters, and on BlueVela the dense
+granite-4.1-3b model failed SALAD-Bench at engine start:
 
     zmq.error.ZMQError: ipc path "/opt/nvme/granitebuild/tmp-sky-2026-10-11-03-40-54-
     185155_gb-distill-350m-model-s-eval-salad-bench-m1-72e9eaa5-641_1/420bb520-...
     " is longer than 107 characters
 
-Hence VLLM_RPC_BASE_PATH, which vLLM reads instead of tempfile.gettempdir() for
-those sockets only.
+These tests run each step's TMPDIR setup in bash, both the NVMe branch and the
+/tmp fallback, and check that the longest socket path fits.
 """
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,23 +27,30 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ENVIRONMENTS = REPO_ROOT / "configurations/assets/environments"
-SAGE_EVAL_STEPS = [
-    ENVIRONMENTS / "skypilot/lsf/ibm-bluevela/steps/sage-eval/step.yaml",
-    ENVIRONMENTS / "skypilot/aws/steps/sage-eval/step.yaml",
-    ENVIRONMENTS / "skypilot/aws/steps/sage-eval-code-grouped/step.yaml",
-]
 
-# The task id of the failing BlueVela run above, and vLLM's socket name (a uuid4).
+# The task id of the failing BlueVela run above.
 TASK_ID = (
     "sky-2026-10-11-03-40-54-185155_"
     "gb-distill-350m-model-s-eval-salad-bench-m1-72e9eaa5-641_1"
 )
-SOCKET_NAME = "420bb520-b3a8-41b9-b2f3-cf3dd3b25e7c"
+# The longest login name useradd accepts.
+LONGEST_USER = "u" * 32
 SUN_PATH_MAX = 107
+# The longest name bound under TMPDIR: a vLLM ipc socket is a uuid4, and a
+# multiprocessing listener is pymp-XXXXXXXX/listener-XXXXXXXX (31 characters).
+LONGEST_SOCKET_NAME = "420bb520-b3a8-41b9-b2f3-cf3dd3b25e7c"
+NVME_TEST = '[ -d "/opt/nvme" ]'
 
 
 def _scripts(node):
-    """Every string in the step's YAML that sets TMPDIR: its run script(s)."""
+    """Yield every string in a parsed step.yaml that sets TMPDIR.
+
+    Args:
+        node: A parsed YAML node (dict, list or scalar).
+
+    Yields:
+        Each string value, at any depth, containing ``export TMPDIR=``.
+    """
     if isinstance(node, dict):
         for value in node.values():
             yield from _scripts(value)
@@ -52,36 +61,114 @@ def _scripts(node):
         yield node
 
 
+def _task_scoped_steps():
+    """Return every step.yaml whose run script keys TMPDIR by SKYPILOT_TASK_ID."""
+    return sorted(
+        path
+        for path in ENVIRONMENTS.rglob("step.yaml")
+        if "export TMPDIR=" in (text := path.read_text(encoding="utf-8"))
+        and "SKYPILOT_TASK_ID" in text
+    )
+
+
+STEPS = _task_scoped_steps()
+
+
 def _run_script(path):
+    """Return the one run script in ``path`` that sets TMPDIR.
+
+    Args:
+        path: A step.yaml file.
+
+    Returns:
+        The script text.
+    """
     scripts = list(_scripts(yaml.safe_load(path.read_text(encoding="utf-8"))))
     assert len(scripts) == 1, f"{path}: expected one script setting TMPDIR"
     return scripts[0]
 
 
-def _tmpdirs(script):
-    """Each value the script may give TMPDIR, with the task id substituted."""
-    values = re.findall(r'export TMPDIR="([^"]+)"', script)
-    return [
-        v.replace("${USER:-$(id -un)}", "granitebuild").replace(
-            "${SKYPILOT_TASK_ID:-$$}", TASK_ID
-        )
-        for v in values
-    ]
+def _tmpdir_setup(script):
+    """Cut the TMPDIR setup out of a run script.
+
+    The setup runs from the first line that reads SKYPILOT_TASK_ID or tests for
+    NVMe to the ``fi`` that closes the last ``export TMPDIR=`` branch. The NVMe
+    test is replaced by ``[ "$NVME" = 1 ]`` so the caller can pick the branch.
+
+    Args:
+        script: A run script from :func:`_run_script`.
+
+    Returns:
+        The setup, as a bash snippet.
+    """
+    lines = script.splitlines()
+    start = next(
+        i
+        for i, line in enumerate(lines)
+        if "SKYPILOT_TASK_ID" in line or NVME_TEST in line
+    )
+    last_export = max(i for i, line in enumerate(lines) if "export TMPDIR=" in line)
+    end = next(i for i in range(last_export, len(lines)) if lines[i].strip() == "fi")
+    setup = "\n".join(lines[start : end + 1])
+    assert setup.count(NVME_TEST) == 1, f"expected one {NVME_TEST} in:\n{setup}"
+    return setup.replace(NVME_TEST, '[ "$NVME" = 1 ]')
 
 
-@pytest.mark.parametrize("path", SAGE_EVAL_STEPS, ids=lambda p: p.parent.name)
-def test_the_tmpdir_is_too_long_for_a_socket(path):
-    """Every TMPDIR branch overflows sun_path, the NVMe one and the /tmp fallback
-    alike. If this ever stops holding, VLLM_RPC_BASE_PATH is no longer needed."""
-    for tmpdir in _tmpdirs(_run_script(path)):
-        assert len(f"{tmpdir}/{SOCKET_NAME}") > SUN_PATH_MAX, tmpdir
+def _tmpdir(path, nvme, task_id):
+    """Run a step's TMPDIR setup in bash and return the TMPDIR it sets.
+
+    Args:
+        path: A step.yaml file.
+        nvme: Take the NVMe branch if True, the /tmp fallback if False.
+        task_id: The SKYPILOT_TASK_ID to export, or None to leave it unset.
+
+    Returns:
+        The value of TMPDIR after the setup.
+    """
+    env = {
+        "PATH": os.environ["PATH"],
+        "USER": LONGEST_USER,
+        "NVME": "1" if nvme else "0",
+    }
+    if task_id is not None:
+        env["SKYPILOT_TASK_ID"] = task_id
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set -eu\n{_tmpdir_setup(_run_script(path))}\nprintf %s "$TMPDIR"',
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout, f"{path}: the setup left TMPDIR empty"
+    return result.stdout
 
 
-@pytest.mark.parametrize("path", SAGE_EVAL_STEPS, ids=lambda p: p.parent.name)
-def test_vllm_binds_its_sockets_under_a_short_directory(path):
-    script = _run_script(path)
-    match = re.search(r'export VLLM_RPC_BASE_PATH="([^"]+)"', script)
-    assert match, f"{path}: VLLM_RPC_BASE_PATH is not set"
-    assert len(f"{match.group(1)}/{SOCKET_NAME}") <= SUN_PATH_MAX
-    # Set after TMPDIR, so nothing in between can point it back under TMPDIR.
-    assert match.start() > script.rindex("export TMPDIR=")
+def test_the_steps_are_discovered():
+    """The glob finds the steps, so the parametrized tests below cannot pass empty."""
+    assert {p.parent.name for p in STEPS} >= {"sage-eval", "sage-eval-code-grouped"}
+    assert len(STEPS) >= 3
+
+
+@pytest.mark.parametrize("nvme", [True, False], ids=["nvme", "tmp"])
+@pytest.mark.parametrize("task_id", [TASK_ID, None], ids=["task-id", "no-task-id"])
+@pytest.mark.parametrize(
+    "path", STEPS, ids=lambda p: str(p.parent.relative_to(ENVIRONMENTS))
+)
+def test_a_socket_under_tmpdir_fits_in_sun_path(path, nvme, task_id):
+    """The longest socket path under TMPDIR fits, in every branch."""
+    tmpdir = _tmpdir(path, nvme, task_id)
+    assert len(f"{tmpdir}/{LONGEST_SOCKET_NAME}") <= SUN_PATH_MAX, tmpdir
+
+
+@pytest.mark.parametrize("nvme", [True, False], ids=["nvme", "tmp"])
+@pytest.mark.parametrize(
+    "path", STEPS, ids=lambda p: str(p.parent.relative_to(ENVIRONMENTS))
+)
+def test_each_task_gets_its_own_tmpdir(path, nvme):
+    """Two tasks on one node never share a scratch directory, or its sockets."""
+    other = TASK_ID.replace("641_1", "641_2")
+    assert _tmpdir(path, nvme, TASK_ID) != _tmpdir(path, nvme, other)
