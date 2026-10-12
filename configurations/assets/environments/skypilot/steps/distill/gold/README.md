@@ -482,6 +482,10 @@ never modified.
   1000 steps would save every 1000 whatever its own `save_steps`. Rank 0 rewrites both in the
   resumed checkpoint's `trainer_state.json` and logs each change. That one file is replaced
   rather than edited, so it is no longer a hardlink and the source keeps its own.
+- **The resumed checkpoint is the highest in this run's checkpoint directory,** as HF picks
+  it, not necessarily the source's highest. The world-size check, the rewrite and the
+  `resumed_from` lineage all apply to that one, and an incomplete one is refused rather
+  than left for every rank to fail on.
 - **No complete checkpoint is an error,** not a fresh start: starting from step 0 would
   silently spend the whole schedule again.
 - **With `emit_checkpoint_artifacts` on,** every seeded checkpoint is emitted as

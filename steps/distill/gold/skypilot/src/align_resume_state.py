@@ -9,16 +9,13 @@ step's output says so. Build 4c758672 (A1) resumed a 250-step ladder from c2000'
 1000-step grid and never wrote its 2250, 2500 or 3500 rungs.
 
 The step's resume block runs this on rank 0, after seeding and before the trainer
-starts. It rewrites the checkpoint the trainer will actually resume from: the
-highest ``checkpoint-<N>`` directory in the run's checkpoint dir, by the rule
-``transformers.trainer_utils.get_last_checkpoint`` applies (the trainer calls
-``train(resume_from_checkpoint=True)``). That need not be the highest one seeded
-from the source, when the dir already held checkpoints.
+starts, on the checkpoint the trainer will resume from (the block picks it, by
+``get_last_checkpoint``'s rule, and checks it is complete).
 
-Values follow ``TrainerState.compute_steps``: a fraction below 1 is a share of this
-run's ``max_steps``, or of the checkpoint's when ``max_steps`` is not positive (an
-epoch-bounded run, whose schedule a resume must match anyway). ``eval_steps`` is left
-alone: the step never enables evaluation.
+Both values must be positive integers. ``render_gold_config.py`` parses them with
+``type=int``, so a fraction (which HF would resolve against ``max_steps``) never
+reaches the trainer, and is refused here rather than resolved. ``eval_steps`` is
+left alone: the step never enables evaluation.
 
 The file is replaced, never edited in place: it is a hardlink into the source run's
 checkpoint, which must keep its own grid. ``cp -a`` copies the source directory's
@@ -28,92 +25,99 @@ for the replace and its mode restored after.
 
 import argparse
 import json
-import math
 import os
-import re
 import stat
 import sys
+from typing import NoReturn
 
 PREFIX = "distill-gold: resume:"
-# transformers.trainer_utils._re_checkpoint
-_CHECKPOINT = re.compile(r"^checkpoint\-(\d+)$")
 
 
-def fatal(message):
+def fatal(message: str) -> NoReturn:
+    """Exit 1 with a FATAL line on stderr, the step's convention for a refusal."""
     sys.exit(f"distill-gold: FATAL: {message}")
 
 
-def step_count(name, raw):
-    """A positive, finite number, as the trainer's argument parser would take it."""
+def step_count(name: str, raw: str) -> int:
+    """raw as a positive integer, as render_gold_config.py's --<name> would take it.
+
+    Exits through fatal() for anything else, naming the key and the value.
+    """
     try:
-        value = float(raw)
+        value = int(raw)
     except ValueError:
-        fatal(f"{name} must be a number, got {raw!r}")
-    if not math.isfinite(value) or value <= 0:
-        fatal(f"{name} must be a positive, finite number, got {raw!r}")
+        fatal(f"{name} must be a positive integer, got {raw!r}")
+    if value <= 0:
+        fatal(f"{name} must be a positive integer, got {raw!r}")
     return value
 
 
-def resumed_checkpoint(checkpoint_dir):
-    """The checkpoint get_last_checkpoint picks: the highest-numbered directory."""
-    steps = {}
-    for name in os.listdir(checkpoint_dir):
-        match = _CHECKPOINT.search(name)
-        if match and os.path.isdir(os.path.join(checkpoint_dir, name)):
-            steps[int(match.group(1))] = name
-    if not steps:
-        fatal(f"no checkpoint-* directory under {checkpoint_dir} to resume from")
-    return os.path.join(checkpoint_dir, steps[max(steps)])
-
-
-def replace_json(path, state):
-    """Write state to path through a new inode, so a hardlinked original is untouched."""
-    directory = os.path.dirname(path)
-    mode = stat.S_IMODE(os.stat(directory).st_mode)
+def load_state(path: str) -> dict:
+    """The parsed trainer_state.json at path; exits through fatal() if unreadable."""
     try:
-        if not mode & stat.S_IWUSR:
+        with open(path) as f:
+            state = json.load(f)
+    except (OSError, ValueError) as e:
+        fatal(f"cannot read {path}: {e}")
+    if not isinstance(state, dict):
+        fatal(f"{path} is not a JSON object")
+    return state
+
+
+def replace_json(path: str, state: dict) -> None:
+    """Write state to path through a new inode, so a hardlinked original is untouched.
+
+    A read-only parent directory is made writable for the replace and its mode
+    restored after. Exits through fatal() on any failure, naming the first error
+    and leaving no .tmp file behind.
+    """
+    directory = os.path.dirname(path)
+    tmp = path + ".tmp"
+    mode = stat.S_IMODE(os.stat(directory).st_mode)
+    read_only = not mode & stat.S_IWUSR
+    error = None
+    try:
+        if read_only:
             os.chmod(directory, mode | stat.S_IWUSR)
-        try:
-            with open(path + ".tmp", "w") as f:
-                json.dump(state, f, indent=2, sort_keys=True)
-            os.replace(path + ".tmp", path)
-        finally:
-            if not mode & stat.S_IWUSR:
-                os.chmod(directory, mode)
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp, path)
     except OSError as e:
-        fatal(f"cannot rewrite {path}: {e}")
+        error = e
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    if read_only:
+        try:
+            os.chmod(directory, mode)
+        except OSError as e:
+            error = error or e
+    if error:
+        fatal(f"cannot rewrite {path}: {error}")
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
+    """Parse the flags, rewrite what differs, and log each change."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--save-steps", required=True)
     parser.add_argument("--logging-steps", required=True)
-    parser.add_argument("--max-steps", required=True)
     args = parser.parse_args(argv)
 
     requested = {
         "save_steps": step_count("save_steps", args.save_steps),
         "logging_steps": step_count("logging_steps", args.logging_steps),
     }
-    try:
-        run_max_steps = int(float(args.max_steps))
-    except (ValueError, OverflowError):
-        fatal(f"max_steps must be an integer, got {args.max_steps!r}")
-
-    checkpoint = resumed_checkpoint(args.checkpoint_dir)
-    path = os.path.join(checkpoint, "trainer_state.json")
-    with open(path) as f:
-        state = json.load(f)
-    total_steps = run_max_steps if run_max_steps > 0 else state["max_steps"]
+    path = os.path.join(args.checkpoint, "trainer_state.json")
+    state = load_state(path)
 
     changed = []
-    for key, value in requested.items():
-        steps = math.ceil(total_steps * value) if value < 1 else int(value)
+    for key, steps in requested.items():
         if state.get(key) != steps:
             changed.append(f"{key} {state.get(key)} -> {steps}")
             state[key] = steps
-    name = os.path.basename(checkpoint)
+    name = os.path.basename(os.path.normpath(args.checkpoint))
     if changed:
         replace_json(path, state)
         print(f"{PREFIX} {name}/trainer_state.json " + ", ".join(changed))

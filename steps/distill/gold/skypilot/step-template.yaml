@@ -660,7 +660,6 @@ environment_configs:
               fi
               mkdir -p "$CKPT_DIR"
               RESUME_COUNT=0
-              RESUME_LAST=""
               for ckpt in "$RESUME_SRC"/checkpoint-*; do
                 [ -d "$ckpt" ] || continue
                 complete=1
@@ -678,11 +677,6 @@ environment_configs:
                   echo "distill-gold: resume: seeded $(basename "$ckpt") from $RESUME_SRC"
                 fi
                 RESUME_COUNT=$(( RESUME_COUNT + 1 ))
-                # Numeric, not lexical: checkpoint-500 sorts after checkpoint-1500.
-                step="${ckpt##*/checkpoint-}"
-                if [ -z "$RESUME_LAST" ] || [ "$step" -gt "$RESUME_LAST" ]; then
-                  RESUME_LAST="$step"
-                fi
               done
               if [ "$RESUME_COUNT" -eq 0 ]; then
                 echo "distill-gold: FATAL: no complete checkpoint-* under '$RESUME_SRC'." >&2
@@ -690,10 +684,37 @@ environment_configs:
                 echo "  silently spend the whole schedule again." >&2
                 exit 1
               fi
+              # Every check below is on the checkpoint the trainer resumes from, which
+              # is not necessarily the source's highest: gold.py calls
+              # train(resume_from_checkpoint=True), and HF's get_last_checkpoint takes
+              # the highest-numbered checkpoint-<N> DIRECTORY in CKPT_DIR, complete or
+              # not -- a dir that already held checkpoints can outrank what was seeded.
+              # Numeric, not lexical: checkpoint-500 sorts after checkpoint-1500.
+              RESUME_CKPT=""
+              for ckpt in "$CKPT_DIR"/checkpoint-*; do
+                [ -d "$ckpt" ] || continue
+                step="${ckpt##*/checkpoint-}"
+                case "$step" in ''|*[!0-9]*) continue ;; esac
+                if [ -z "$RESUME_CKPT" ] || [ "$step" -gt "${RESUME_CKPT##*/checkpoint-}" ]; then
+                  RESUME_CKPT="$ckpt"
+                fi
+              done
+              RESUME_NAME="${RESUME_CKPT##*/}"
+              # HF would load it anyway and fail on the missing file, on every rank,
+              # after allocation. Refused here instead, and never deleted: it may be
+              # the only copy of a step some other attempt reached.
+              for sentinel in $RESUME_SENTINELS; do
+                if [ ! -f "$RESUME_CKPT/$sentinel" ]; then
+                  echo "distill-gold: FATAL: the trainer would resume from $RESUME_CKPT," >&2
+                  echo "  the highest checkpoint in $CKPT_DIR, but it has no $sentinel." >&2
+                  echo "  Move it aside, or resume into a fresh run." >&2
+                  exit 1
+                fi
+              done
               # A ZeRO-3 checkpoint holds one optimizer shard per rank and DeepSpeed
               # cannot load it at another world size. Checked here, on a CPU-cheap
               # count, rather than discovered by every rank after allocation.
-              RESUME_SHARDS="$(find "$CKPT_DIR/checkpoint-$RESUME_LAST" -mindepth 2 -maxdepth 2 \
+              RESUME_SHARDS="$(find "$RESUME_CKPT" -mindepth 2 -maxdepth 2 \
                 -path '*/global_step*/*' -name '*optim_states.pt' 2>/dev/null | wc -l)"
               # An EXTERNAL server (the `vllm` input bound) is another target's allocation:
               # every node here trains, whatever vllm_num_servers says. Only the
@@ -704,7 +725,7 @@ environment_configs:
               RESUME_WORLD=$(( (NODES - VLLM_SERVERS) * GPUS ))
               {% endif %}
               if [ "$RESUME_SHARDS" -gt 0 ] && [ "$RESUME_SHARDS" -ne "$RESUME_WORLD" ]; then
-                echo "distill-gold: FATAL: checkpoint-$RESUME_LAST holds $RESUME_SHARDS ZeRO optimizer shards" >&2
+                echo "distill-gold: FATAL: $RESUME_NAME holds $RESUME_SHARDS ZeRO optimizer shards" >&2
                 echo "  but this run trains on $RESUME_WORLD ranks. Resume with the source's topology." >&2
                 exit 1
               fi
@@ -713,15 +734,17 @@ environment_configs:
               # replaced with a warning nobody sees, and every rung of this run's
               # ladder that is not also on the source's grid is never written (build
               # 4c758672, A1: a 250-step ladder on c2000's 1000). Rewrite both in the
-              # checkpoint the trainer resumes from; see the script for the rules.
-              # Single-quoted so an unsubstituted value reaches its FATAL message
-              # instead of tripping `set -u`.
-              "$PYBIN" ./src/align_resume_state.py --checkpoint-dir "$CKPT_DIR" \
+              # checkpoint the trainer resumes from. Single-quoted so an unsubstituted
+              # value reaches its FATAL message instead of tripping `set -u`.
+              "$PYBIN" ./src/align_resume_state.py --checkpoint "$RESUME_CKPT" \
                 --save-steps '{{ config.gold_config.save_steps }}' \
-                --logging-steps '{{ config.gold_config.logging_steps }}' \
-                --max-steps '{{ config.gold_config.max_steps }}'
-              echo "distill-gold: resume: $RESUME_COUNT checkpoint(s) seeded; the trainer resumes from checkpoint-$RESUME_LAST"
-              echo "GB_STEP_METADATA_KEY:resumed_from GB_STEP_METADATA_VALUE:$RESUME_SRC/checkpoint-$RESUME_LAST"
+                --logging-steps '{{ config.gold_config.logging_steps }}'
+              echo "distill-gold: resume: $RESUME_COUNT checkpoint(s) seeded; the trainer resumes from $RESUME_NAME"
+              # Lineage names where that checkpoint came from: the source, unless it
+              # was already in this run's dir and the source has no such checkpoint.
+              RESUME_FROM="$RESUME_SRC/$RESUME_NAME"
+              [ -d "$RESUME_FROM" ] || RESUME_FROM="$RESUME_CKPT"
+              echo "GB_STEP_METADATA_KEY:resumed_from GB_STEP_METADATA_VALUE:$RESUME_FROM"
               touch "$RESUME_SEEDED"
             else
               # The checkpoint dir is on the shared filesystem, so rank 0's marker is

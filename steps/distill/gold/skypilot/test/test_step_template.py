@@ -779,7 +779,7 @@ class TestResumeFromCheckpointDir:
         for name in ["model.safetensors", "tokenizer.json"]:
             (ckpt / name).write_text(name)
         if complete:
-            state = dict(global_step=step, max_steps=8150, save_steps=save_steps)
+            state = dict(global_step=step, save_steps=save_steps)
             (ckpt / "trainer_state.json").write_text(
                 json.dumps(dict(state, logging_steps=logging_steps))
             )
@@ -907,20 +907,57 @@ class TestResumeFromCheckpointDir:
         older = json.loads((dst / "checkpoint-1000/trainer_state.json").read_text())
         assert older["save_steps"] == 1000
 
-    @pytest.mark.parametrize("max_steps, expected", [(0, 815), (12000, 1200)])
-    def test_a_fractional_step_count_is_a_share_of_max_steps(
-        self, tmp_path, max_steps, expected
-    ):
-        """As HF computes it: of this run's max_steps, or of the source's 8150
-        when the run is epoch-bounded (max_steps 0)."""
+    def test_a_checkpoint_already_in_the_run_dir_is_the_one_checked(self, tmp_path):
+        """HF resumes from the highest checkpoint-<N> in the run's dir, which a
+        reused dir can hold above everything seeded. The world-size check, the
+        rewrite and the lineage are all about that one, not the source's highest:
+        here it was written by 8 ranks, so the 16-rank resume is refused."""
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
-        result, dst = self._run(
-            tmp_path, src, save_steps=0.1, logging_steps=5, max_steps=max_steps
-        )
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        self._checkpoint(dst, 10000, shards=8)
+
+        result, _ = self._run(tmp_path, src)
+
+        assert result.returncode == 1
+        assert "checkpoint-10000 holds 8 ZeRO optimizer shards" in result.stderr
+        assert not (dst / ".resume-seeded").exists()
+
+    def test_lineage_names_a_checkpoint_that_was_not_seeded(self, tmp_path):
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        self._checkpoint(dst, 10000, save_steps=1000)
+
+        result, _ = self._run(tmp_path, src, save_steps=250)
+
         assert result.returncode == 0, result.stderr
-        state = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
-        assert state["save_steps"] == expected
+        assert "resumes from checkpoint-10000" in result.stdout
+        assert (
+            f"GB_STEP_METADATA_VALUE:{dst}/checkpoint-10000" in result.stdout
+        ), result.stdout
+        rewritten = json.loads(
+            (dst / "checkpoint-10000/trainer_state.json").read_text()
+        )
+        assert rewritten["save_steps"] == 250
+        seeded = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
+        assert seeded["save_steps"] == 500
+
+    def test_an_incomplete_highest_checkpoint_is_refused(self, tmp_path):
+        """HF would load it and fail on every rank after allocation; refused, and
+        left in place, before the trainer starts."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        self._checkpoint(dst, 2500, complete=False)
+
+        result, _ = self._run(tmp_path, src)
+
+        assert result.returncode == 1
+        assert "the trainer would resume from" in result.stderr
+        assert "has no trainer_state.json" in result.stderr
+        assert (dst / "checkpoint-2500").is_dir()
+        assert not (dst / ".resume-seeded").exists()
 
     def test_a_read_only_source_still_resumes(self, tmp_path):
         """cp -a copies the source directory's mode, so an archived (555) source
@@ -952,8 +989,9 @@ class TestResumeFromCheckpointDir:
         self._checkpoint(src, 2000)
         result, dst = self._run(tmp_path, src, save_steps="${GOLD_SAVE_STEPS}")
         assert result.returncode == 1
-        assert "FATAL: save_steps must be a number, got '${GOLD_SAVE_STEPS}'" in (
-            result.stderr
+        assert (
+            "FATAL: save_steps must be a positive integer, got '${GOLD_SAVE_STEPS}'"
+            in (result.stderr)
         )
         assert not (dst / ".resume-seeded").exists()
 
