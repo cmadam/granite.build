@@ -550,7 +550,7 @@ class Build(BuildEntity):
                     errors.add(expected_input.validation, prefix=err_prefix1 + " ")
                     actual_input = target_inputs[req_input]
                     # Truthiness, not `!= ""`: an unset uri is None, and None != "" would
-                    # file every bound input as a uri -- refusing a binding-only input.
+                    # flag every bound input as a uri -- refusing a binding-only input.
                     if actual_input.uri:
                         if StepInputsAcceptEnum.URI not in expected_input.accept:
                             errors.add(f"{err_prefix1} does not accept uri")
