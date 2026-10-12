@@ -771,12 +771,14 @@ class TestResumeFromCheckpointDir:
     def _checkpoint(
         cls, root, step, complete=True, shards=None, save_steps=500, logging_steps=5
     ):
+        """A checkpoint-<step> under root with world-size optimizer shards. Complete
+        ones carry a trainer_state.json on the grid save_steps/logging_steps; the
+        defaults are the template's own, so resuming from it rewrites nothing."""
         ckpt = root / f"checkpoint-{step}"
         (ckpt / f"global_step{step}").mkdir(parents=True)
         for name in ["model.safetensors", "tokenizer.json"]:
             (ckpt / name).write_text(name)
         if complete:
-            # The template's own grid by default, so a resume rewrites nothing.
             state = dict(global_step=step, max_steps=8150, save_steps=save_steps)
             (ckpt / "trainer_state.json").write_text(
                 json.dumps(dict(state, logging_steps=logging_steps))
@@ -813,6 +815,8 @@ class TestResumeFromCheckpointDir:
             text=True,
             check=False,
             timeout=60,
+            # The block calls ./src/align_resume_state.py, as on the node.
+            cwd=_STEP.parent,
         )
         return result, dst
 
@@ -918,24 +922,50 @@ class TestResumeFromCheckpointDir:
         state = json.loads((dst / "checkpoint-2000/trainer_state.json").read_text())
         assert state["save_steps"] == expected
 
-    def test_a_non_numeric_step_count_fails_loudly(self, tmp_path):
+    def test_a_read_only_source_still_resumes(self, tmp_path):
+        """cp -a copies the source directory's mode, so an archived (555) source
+        leaves a read-only copy; the rewrite still lands, and the mode stays."""
+        src = tmp_path / "src"
+        ckpt = self._checkpoint(src, 2000, save_steps=1000)
+        ckpt.chmod(0o555)
+        try:
+            result, dst = self._run(tmp_path, src, save_steps=250)
+            assert result.returncode == 0, result.stderr
+            seeded = dst / "checkpoint-2000"
+            assert (
+                json.loads((seeded / "trainer_state.json").read_text())["save_steps"]
+                == 250
+            )
+            assert seeded.stat().st_mode & 0o777 == 0o555
+            assert (dst / ".resume-seeded").exists()
+        finally:
+            ckpt.chmod(0o755)
+            if (tmp_path / "run").exists():
+                for d in (tmp_path / "run").rglob("checkpoint-*"):
+                    d.chmod(0o755)
+
+    def test_an_unsubstituted_step_count_fails_loudly(self, tmp_path):
+        """A build parameter left unsubstituted reaches the script, single-quoted,
+        and is named in a FATAL line, rather than tripping `set -u` on the shell
+        side. Rank 0 never marks the seed done, so the workers fail too."""
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
-        result, dst = self._run(tmp_path, src, save_steps="$${GOLD_SAVE_STEPS}")
+        result, dst = self._run(tmp_path, src, save_steps="${GOLD_SAVE_STEPS}")
         assert result.returncode == 1
-        assert "FATAL: save_steps, logging_steps and max_steps must be numbers" in (
+        assert "FATAL: save_steps must be a number, got '${GOLD_SAVE_STEPS}'" in (
             result.stderr
         )
         assert not (dst / ".resume-seeded").exists()
 
     def test_matching_steps_leave_the_seeded_state_linked(self, tmp_path):
+        """Nothing to change, nothing replaced: the state stays a hardlink."""
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
         result, dst = self._run(tmp_path, src)
         assert result.returncode == 0, result.stderr
         state = "checkpoint-2000/trainer_state.json"
         assert (dst / state).stat().st_ino == (src / state).stat().st_ino
-        assert "trainer_state.json" not in result.stdout
+        assert "already on this run's grid" in result.stdout
 
     def test_a_missing_source_fails_loudly(self, tmp_path):
         result, _ = self._run(tmp_path, tmp_path / "nope")
