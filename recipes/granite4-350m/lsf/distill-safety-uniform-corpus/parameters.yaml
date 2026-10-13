@@ -1,0 +1,66 @@
+# distill-safety-uniform-corpus — build the pinned corpus with safety rows mixed UNIFORMLY
+# through the whole file, the counterpart of distill-safety-frontload-corpus (which puts
+# them only in the rows the first 1,000 steps read). CPU only. BlueVela.
+#
+# THE OUTPUT IS A DROP-IN CORPUS_DIR for distill-onpolicy-switch-study: train.jsonl,
+# eval.jsonl (the base corpus's, unchanged) and a corpus_manifest.json that passes
+# corpus-pin-check and the trainer's row-count check. The safety rows are spread by one
+# shuffle of the whole file, so any sampling strategy keeps the density; set
+# TRAIN_SAMPLING_STRATEGY=sequential anyway, so the run reads the order corpus_rows.jsonl
+# records and its first 1,000 steps match the CHECK_STEPS count in the manifest.
+#
+# Override any value with: gb build start --param KEY=VALUE
+# ─── Where things are ─────────────────────────────────────────────────
+# The corpus every study arm trains on, by default: the one c2000 trained on.
+BASE_CORPUS_DIR: "/proj/granite-build/g4os/distill/distill-350m-stage1/df8512e0-be93-4762-85ad-813d9080d72f/corpus"
+# The tokenizer that DEFINES that corpus -- its manifest's tokenizer_path. The safety rows
+# are filtered with it, so they obey the same max_length budget as every other row.
+BASE_TOKENIZER: "/proj/granite-build/g4os/distill/distill-350m-stage1/df8512e0-be93-4762-85ad-813d9080d72f/align/retagged_student"
+# The pinned corpus carries NO safety label: its rows are {messages, row_id}, and the
+# granite-4.0 SFT source it came from labels rows only general / tools / rag. The labelled
+# rows live in the granite-4.1 SFT set, whose general.jsonl has 12,817 rows with
+# domain "safety" (counted 2026-10-11) -- the same 12,817 the 09-24 report mixed 5x for
+# karve's 30B-teacher run. 41 GB, so the filter pre-screens each line as text first.
+SAFETY_SOURCE: "/proj/granite-build/g4os/datasets/ibm-granite--granite-4.1-sft-datasets-r260414a/general.jsonl"
+SAFETY_DOMAIN: "safety"
+# Absolute, outside any build directory: this is a pinned input other builds read.
+# Name it after its settings so two variants never share a directory.
+OUTPUT_DIR: "/proj/granite-build/g4os/distill/corpora/safety-uniform-d038"
+
+# ─── The mix ──────────────────────────────────────────────────────────
+# The share of the OUTPUT corpus that is safety rows, end to end. 0.038 is the density
+# 09-24 measured as working -- its 12,817 rows mixed 5x came to ~3.8% of that run's corpus
+# and gave SALAD 93.9 / AttaQ 82.1 at no net capability cost -- and the density the
+# front-loaded corpus puts in its window, so the two corpora differ only in WHERE the
+# safety rows sit. The rows are added to the base, not swapped for base rows: on the
+# 782,388-row base that is 30,905 safety rows (813,293 in all), each of the 12,817 used
+# 2-3 times (2.41x). The 09-24 repeat count of 5x would be 64,085 rows, 7.57% here: set
+# 0.0757 for that. Any value above 12,817 / 795,205 = 0.0161 repeats rows.
+SAFETY_FRACTION: 0.038
+# Base and safety rows are shuffled together once, with this seed. 45 is the front-load's.
+SHUFFLE_SEED: 45
+# Reporting only: the manifest and build log count the safety rows in the first
+# CHECK_STEPS steps at EFFECTIVE_BATCH (2 x 3 x 2 x 8 = 96), to set beside the
+# front-loaded corpus's 3,648 of 96,000. Expect ~3,650.
+CHECK_STEPS: 1000
+EFFECTIVE_BATCH: 96
+
+# ─── Prep policy for the safety rows ──────────────────────────────────
+# The base corpus's own policies (its corpus_manifest.json), so a safety row survives on
+# exactly the terms a base row did.
+MAX_LENGTH: 8192
+THINK_POLICY: "keep"
+DOCUMENTS_POLICY: "keep"
+SEED: 42
+
+# ─── Infrastructure ───────────────────────────────────────────────────
+IMAGE_ID: "docker:us.icr.io/cil15-shared-registry/kd-sandbox-distill:0.1.0-uv"
+CLUSTER: "bluevela"
+ENVIRONMENT_URI: "space://environments/skypilot/lsf/ibm-bluevela"
+QUEUE: "normal"
+# The merge holds the 3 GB base train.jsonl in memory while it shuffles.
+CPUS: 8
+MEMORY: 64
+POLL_INTERVAL_SECONDS: 30
+LOG_RETRIEVAL_INTERVAL_SECONDS: 120
+MAX_RETRIES: 1

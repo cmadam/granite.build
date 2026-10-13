@@ -7,12 +7,13 @@ fresh optimizer, a 1,000-step warm-up to a 1e-6 peak, λ linear 0 → 1, jsd at 
 `MIN_COMPLETION_LENGTH` 16, 2,500 steps, screening evals on rungs 1,000–2,000 and the full
 battery on 2,500. `parameters.yaml` gives the reason for each value.
 
-Four recipes serve the study:
+Five recipes serve the study:
 
 | Recipe | Serves |
 |---|---|
 | `distill-onpolicy-switch-study` (this one) | every training arm: A0–A6, B0–B2, C1–C2, D1–D3 |
 | `distill-safety-frontload-corpus` | Track 0 check 6: the corpus A6 and Track B read |
+| `distill-safety-uniform-corpus` | the same safety rows at the same 3.8% density, spread over the whole corpus |
 | `distill-model-screening-eval` | Track 0 checks 2, 3, 4 and 7, and the rest of the battery on an arm's best screening rung |
 
 Two existing recipes are reused: `bcb-server` must be up for any full battery, and
@@ -66,10 +67,12 @@ SFT=/proj/granite-build/g4os/skypilot-test/sft/checkpoints/v0-20260529-20260529_
 TEACHER=/proj/granite-build/g4os/models/granite-4.1-3b-pinned
 L0_CK1000=/proj/granite-build/g4os/distill/distill-350m-ck2500-lmbda0-20261005_0412/dfe3642d-aea5-49f1-8356-0a1cde8521ee/export-1000
 FRONT=/proj/granite-build/g4os/distill/corpora/safety-frontload-x5-w1000
+UNIFORM=/proj/granite-build/g4os/distill/corpora/safety-uniform-d038
 SEED=/proj/data-eng/llmb-read-write/resume-src/c2000-b6b92d72
 SHORT="--param CKPT_LADDER=250,500,1000,1500,2000,2500 --param GOLD_SAVE_STEPS=250"
 A5="--param ADAM_BETA2=0.95 --param WARMUP_RATIO=0.02 $SHORT"
 FRONTP="--param CORPUS_DIR=$FRONT --param TRAIN_SAMPLING_STRATEGY=sequential"
+UNIFORMP="--param CORPUS_DIR=$UNIFORM --param TRAIN_SAMPLING_STRATEGY=sequential"
 arm() { A=$1; shift; N=distill-350m-study-$A-$TS
   gb build start -f $R --space public --param OE_EVAL_BCB_API_URL=$BCB \
     --param RUN_NAME=$N --param EXPERIMENT=$N "$@"; }
@@ -134,6 +137,9 @@ gb build start -f $L/distill-model-screening-eval/build.yaml --parameters-path $
 
 # 6. The front-loaded safety corpus (CPU only; reads the 41 GB 4.1 SFT file once).
 gb build start -f $L/distill-safety-frontload-corpus/build.yaml --space public
+
+# 6b. Its uniform counterpart: the same safety rows at 3.8% of the whole corpus (also CPU only).
+gb build start -f $L/distill-safety-uniform-corpus/build.yaml --space public
 
 # 7. One screening launch on ck2000 alone: its measured cost, and the screening baseline row.
 gb build start -f $L/distill-model-screening-eval/build.yaml --parameters-path $P --space public \
