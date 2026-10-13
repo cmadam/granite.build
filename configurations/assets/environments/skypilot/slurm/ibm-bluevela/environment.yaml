@@ -1,0 +1,105 @@
+name: sky-slurm-bluevela
+type: Skypilot
+subtype: slurm
+config:
+  default_cloud: slurm
+  # SLURM has no cluster autostop; gbserver forces idle_minutes_to_autostop=None
+  # on this cloud regardless, so this is purely documentation.
+  idle_minutes_to_autostop: 0
+  # `cluster` is composed into infra=slurm/<cluster>; `zone` maps to the SLURM
+  # partition (--partition). gpu-mid is the H200 partition on BlueVela. Both are
+  # env-wide defaults — a build/step can override `zone` (e.g. to gpu-high)
+  # without repeating `cluster`, see docs/environments/skypilot-slurm.md#cluster--zone.
+  cluster: bluevela
+  zone: gpu-mid
+  # Env-level shared filesystem root for per-run build workdirs (same path the
+  # LSF bluevela environment uses — both backends reach the same /proj GPFS
+  # mount). gbserver derives ${shared_workdir}/builds/<build_id>/runs/<targetrun_id>/
+  # from this and exports it as GB_BUILD_WORKDIR.
+  shared_workdir: /proj/data-eng/llmb-read-write/builds/
+
+  # Inline SLURM cluster SSH reachability. gbserver materializes this into
+  # ~/.slurm/config at launch so SkyPilot's SLURM provisioner can reach the
+  # cluster. If a ~/.slurm/config already exists on the host with a bluevela
+  # entry, remove it first — gbserver refuses to overwrite foreign entries
+  # (refuse-on-conflict).
+  #
+  # MULTIPLE LOGIN NODES: `HostName` may be a single value OR a list of
+  # interchangeable candidate login hostnames under one `Host` block, as the LSF
+  # bluevela environment does. Only one login node (login1) has been confirmed
+  # reachable for SLURM so far; add more candidates here once confirmed.
+  cluster_ssh_configs:
+    slurm:
+      - Host: bluevela
+        HostName: login1.bluevela.rmf.ibm.com
+        User: granitebuild
+        # granitebuild's SSH identity is a 1Password-managed key, not a
+        # Smallstep cert (confirmed: no `step` CLI and no loaded cert for this
+        # account) — IdentityStepCert would fail fast with
+        # StepCertExpiredError. IdentityAgent (pointing ssh at the 1Password
+        # agent socket) was tried first but does NOT work for this cloud:
+        # SkyPilot's SLURM driver (SlurmClient / sky/adaptors/slurm.py) builds
+        # its own ssh invocation from Python args (ssh_private_key -> `-i`,
+        # IdentitiesOnly -> `-o`) and never passes `-F <config>` to the real
+        # ssh subprocess for control-plane calls (partition/job queries), so
+        # it has no way to pick up an IdentityAgent directive from the
+        # materialized config at all — confirmed via a real failed smoke
+        # build (`scontrol show partitions -o` exit 255) despite the exact
+        # same command succeeding when run manually with `ssh -F`. A real
+        # on-disk private key is the only identity SlurmClient can use.
+        # Path is this machine's; adjust if running gbserver elsewhere.
+        IdentityFile: ~/.ssh/granitebuild
+
+  # Inline SLURM behavioral config. gbserver deep-merges this into the API
+  # server's ~/.sky/config.yaml at launch (see merge_cloud_config).
+  cloud_config:
+    slurm:
+      cluster_configs:
+        bluevela:                                        # must match `cluster:` above
+          # SkyPilot `workdir` set to an ancestor of `shared_workdir`. Unlike the
+          # LSF backend (which identity-mounts all of /proj into the enroot
+          # container), the SLURM backend bind-mounts only home + ccache +
+          # workdir, so a containerized step's $GB_BUILD_WORKDIR only exists
+          # inside the container if it falls under this path. See
+          # docs/environments/skypilot-slurm.md#workdir-containerized-steps.
+          workdir: /proj/data-eng/llmb-read-write/builds
+          tmpdir: /opt/nvme/$USER/skypilot-tmp
+      # Env-wide #SBATCH defaults, forwarded verbatim to sbatch (keys without the
+      # leading --). `account` is granitebuild's own SLURM association
+      # (confirmed via `sacctmgr show associations user=granitebuild`); there is
+      # no `hew` association under this login, since jobs run as granitebuild.
+      # `qos` is the LSF-group-equivalent: unlike LSF (where preemptable vs
+      # default is a *group* swap, bsub_options.G), on this SLURM cluster it's a
+      # *QOS* swap within the same account — grp_granite_dot_build_high
+      # (priority 100, confirmed via `sacctmgr show qos`) is the default/high
+      # tier; grp_granite_dot_build_medium (priority 0, preempted by burst/cpu)
+      # is the lower-priority analog of LSF's grp_preemptable. Override either
+      # per build via config.launcher_config.sbatch_options.
+      sbatch_options:
+        account: grp_granite_dot_build
+        qos: grp_granite_dot_build_high
+        # NODE EXCLUSIONS: the LSF bluevela environment excludes several hosts
+        # known to fail (CUDA init errors, missing /opt/nvme) via bsub's -R
+        # select[]. The SLURM equivalent is `exclude` (comma-separated hostnames,
+        # confirmed to pass through sbatch_options unprotected) — none of those
+        # LSF-side exclusions have been confirmed to apply to this cluster's SLURM
+        # partition (different scheduler, possibly different node pool), so none
+        # are carried over yet. Add here if/when a bad node is identified on
+        # gpu-mid, e.g.:
+        # exclude: "p2-r03-n1,p5-r03-n1"
+assetstores:
+  - store_uri: space://assetstores/hf
+    pull:
+      - mode: default
+        config:
+          cache_path: /tmp/hf_cache
+    push:
+      - mode: default
+        config: {}
+  - store_uri: space://assetstores/s3/
+    pull:
+      - mode: default
+        config: {}
+    push:
+      - mode: default
+        config: {}
