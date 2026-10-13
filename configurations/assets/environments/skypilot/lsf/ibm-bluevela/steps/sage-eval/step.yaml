@@ -146,8 +146,9 @@ environment_configs:
             # base_set-result.json: without it a SALAD eval alone in its output
             # tree (an eval-rerun's RERUN_SAGE_DIR) finds nothing and exits 1 after
             # a complete run (builds f71274d5, 1131fd71). In a full rung tree it
-            # only ever passed by emitting a sibling eval's file.
-            RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -path "*${EXPERIMENT}*" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*-result.json' \) -print -quit)
+            # only ever passed by emitting a sibling eval's file. The path is
+            # anchored at /${EXPERIMENT}/ so ckpt_25 cannot match ckpt_250 (#482).
+            RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -path "*/${EXPERIMENT}/*" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*-result.json' \) -print -quit)
             if [ -z "$RESULT_FILE" ]; then
               RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*-result.json' -o -name '*.csv' \) -newer /tmp/sage-eval.log -print -quit 2>/dev/null || true)
             fi
