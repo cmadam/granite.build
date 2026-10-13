@@ -142,10 +142,15 @@ environment_configs:
             # Run the evaluation script
             bash /workspace/sage/sage/cluster/gb/scripts/${GB_SCRIPT} 2>&1 | tee /tmp/sage-eval.log
 
-            # Emit artifact for gbserver
-            RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -path "*${EXPERIMENT}*" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' \) -print -quit)
+            # Emit artifact for gbserver. '*-result.json' is SALAD-Bench's
+            # base_set-result.json: without it a SALAD eval alone in its output
+            # tree (an eval-rerun's RERUN_SAGE_DIR) finds nothing and exits 1 after
+            # a complete run (builds f71274d5, 1131fd71). In a full rung tree it
+            # only ever passed by emitting a sibling eval's file. The path is
+            # anchored at /${EXPERIMENT}/ so ckpt_25 cannot match ckpt_250 (#482).
+            RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -path "*/${EXPERIMENT}/*" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*-result.json' \) -print -quit)
             if [ -z "$RESULT_FILE" ]; then
-              RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*.csv' \) -newer /tmp/sage-eval.log -print -quit 2>/dev/null || true)
+              RESULT_FILE=$(find "$OUTPUT_BASE_PATH" -type f \( -name 'results*.json' -o -name 'metrics*.json' -o -name 'metrics*.jsonl' -o -name '*-result.json' -o -name '*.csv' \) -newer /tmp/sage-eval.log -print -quit 2>/dev/null || true)
             fi
             if [ -n "$RESULT_FILE" ]; then
               echo "GB_ARTIFACT_ID:sage_eval_results GB_ARTIFACT_PATH:${RESULT_FILE}"
