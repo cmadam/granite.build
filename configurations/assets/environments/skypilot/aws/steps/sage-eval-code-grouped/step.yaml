@@ -97,20 +97,20 @@ environment_configs:
 
             # Redirect tempfile off container tmpfs onto NVMe scratch
             #
-            # Name the scratch dir by a hash of the task id, not the id itself. The
-            # id embeds the cluster name, and the ~150-character path it made was
-            # too long for any unix socket bound under $TMPDIR (107 characters):
-            # vLLM's ZMQ ipc sockets, and multiprocessing's pymp-* listeners on
-            # this image's Python 3.11.
-            TASK_TAG="$(printf '%s' "${SKYPILOT_TASK_ID:-$$}" | sha1sum | cut -c1-12)"
+            # mktemp gives each task its own short, mode-700 directory. Do not name
+            # it after SKYPILOT_TASK_ID: the id embeds the cluster name, and the
+            # ~150-character path it made was too long for any unix socket bound
+            # under $TMPDIR (107 characters): vLLM's ZMQ ipc sockets, and
+            # multiprocessing's pymp-* listeners on this image's Python 3.11.
             if [ -d "/opt/nvme" ]; then
-              export TMPDIR="/opt/nvme/${USER:-$(id -un)}/tmp-${TASK_TAG:-$$}"
+              mkdir -p "/opt/nvme/${USER:-$(id -un)}"
+              TMPDIR="$(mktemp -d "/opt/nvme/${USER:-$(id -un)}/tmp-XXXXXXXX")"
             else
-              export TMPDIR="/tmp/sage-tmp-${TASK_TAG:-$$}"
+              TMPDIR="$(mktemp -d /tmp/sage-tmp-XXXXXXXX)"
             fi
-            mkdir -p -m 700 "$TMPDIR"
+            export TMPDIR
             trap 'rm -rf "$TMPDIR"' EXIT
-            echo "TMPDIR=$TMPDIR (task ${SKYPILOT_TASK_ID:-pid $$})"
+            echo "TMPDIR=$TMPDIR (task ${SKYPILOT_TASK_ID:-unset})"
             export TMP="$TMPDIR"
             export TEMP="$TMPDIR"
 
