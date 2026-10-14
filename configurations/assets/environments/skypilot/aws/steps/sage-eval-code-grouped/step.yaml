@@ -104,9 +104,9 @@ environment_configs:
             # multiprocessing's pymp-* listeners on this image's Python 3.11.
             if [ -d "/opt/nvme" ]; then
               mkdir -p "/opt/nvme/${USER:-$(id -un)}"
-              TMPDIR="$(mktemp -d "/opt/nvme/${USER:-$(id -un)}/tmp-XXXXXXXX")"
+              TMPDIR="$(mktemp -d "/opt/nvme/${USER:-$(id -un)}/tmp-XXXXXXXX")" || exit 1
             else
-              TMPDIR="$(mktemp -d /tmp/sage-tmp-XXXXXXXX)"
+              TMPDIR="$(mktemp -d /tmp/sage-tmp-XXXXXXXX)" || exit 1
             fi
             export TMPDIR
             trap 'rm -rf "$TMPDIR"' EXIT
