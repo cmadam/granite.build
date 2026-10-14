@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from gold_trainer_state import write_trainer_state
 
 _SCRIPT = Path(__file__).resolve().parent.parent / "src" / "align_resume_state.py"
 
@@ -21,8 +22,7 @@ def _checkpoint(root, save_steps=1000, logging_steps=1):
     """root/checkpoint-2000 holding only a trainer_state.json on the given grid."""
     ckpt = root / "checkpoint-2000"
     ckpt.mkdir(parents=True)
-    state = dict(global_step=2000, save_steps=save_steps, logging_steps=logging_steps)
-    (ckpt / "trainer_state.json").write_text(json.dumps(state))
+    write_trainer_state(ckpt, 2000, save_steps, logging_steps)
     return ckpt
 
 
@@ -52,6 +52,7 @@ def _run(ckpt, save_steps="250", logging_steps="1"):
 
 
 def test_it_rewrites_what_differs_and_logs_it(tmp_path):
+    """Both keys take this run's values; nothing else in the state moves."""
     ckpt = _checkpoint(tmp_path)
     result = _run(ckpt, save_steps="250", logging_steps="5")
     assert result.returncode == 0, result.stderr

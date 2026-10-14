@@ -23,6 +23,10 @@ mode, so a read-only source leaves a read-only copy; the directory is made writa
 for the replace and its mode restored after.
 """
 
+# The annotations below are 3.10 syntax; this keeps an older $PYBIN to the FATAL
+# lines instead of a TypeError at import.
+from __future__ import annotations
+
 import argparse
 import json
 import os
