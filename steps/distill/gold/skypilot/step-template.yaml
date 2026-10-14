@@ -657,14 +657,22 @@ environment_configs:
             # must not release anyone; the token is built as the clone handshake's is.
             RESUME_SEEDED="$CKPT_DIR/.resume-seeded"
             RESUME_TOKEN="${GB_SKYPILOT_LAUNCH_ID:-}:${SKYPILOT_INTERNAL_JOB_ID:-}:${LSB_JOBID:-${SLURM_JOB_ID:-}}"
-            # Same completeness test the watcher uses: these bracket HF Trainer's
-            # whole save sequence, so a checkpoint the source run was killed while
-            # writing is skipped rather than resumed from.
-            RESUME_SENTINELS="model.safetensors tokenizer.json trainer_state.json"
+            # The watcher's completeness test: these bracket HF Trainer's whole save
+            # sequence, so a checkpoint the source run was killed while writing is
+            # skipped rather than resumed from. Weights are model.safetensors, or the
+            # index save_pretrained writes after the last shard of sharded ones.
+            RESUME_SENTINELS="tokenizer.json trainer_state.json"
             resume_complete() {
+              [ -f "$1/model.safetensors" ] || [ -f "$1/model.safetensors.index.json" ] \
+                || return 1
               for sentinel in $RESUME_SENTINELS; do
                 [ -f "$1/$sentinel" ] || return 1
               done
+            }
+            # ZeRO optimizer shards in a checkpoint: one per training rank.
+            resume_shards() {
+              find "$1" -mindepth 2 -maxdepth 2 -path '*/global_step*/*' \
+                -name '*optim_states.pt' 2>/dev/null | wc -l
             }
             # get_last_checkpoint's name rule, ^checkpoint-[0-9]+$: HF never loads
             # anything else, so nothing else is seeded, checked or picked.
@@ -685,12 +693,27 @@ environment_configs:
                 echo "distill-gold: FATAL: resume_from_checkpoint_dir '$RESUME_SRC' is not a directory." >&2
                 exit 1
               fi
-              # What a failed attempt was writing when it died. HF would pick it if it
+              # An EXTERNAL server (the `vllm` input bound) is another target's allocation:
+              # every node here trains, whatever vllm_num_servers says. Only the
+              # in-allocation split gives nodes to vLLM -- see "Node roles" below.
+              {% if vllm_server_url %}
+              RESUME_WORLD=$(( NODES * GPUS ))
+              {% else %}
+              RESUME_WORLD=$(( (NODES - VLLM_SERVERS) * GPUS ))
+              {% endif %}
+              # What a failed attempt was writing when it died: rank 0's files missing,
+              # or fewer optimizer shards than ranks (a node died mid DeepSpeed save;
+              # this run's own attempts all share its topology). HF would pick it if it
               # is the highest and fail on every rank; moved aside instead, out of HF's
-              # and the watcher's checkpoint-* pattern, and kept: it is never deleted.
+              # and the watcher's checkpoint-* pattern. Kept for diagnosis: the per-run
+              # workdir, and these with it, is reaped when the target run tears down.
               for ckpt in "$CKPT_DIR"/checkpoint-*; do
                 resume_is_checkpoint "$ckpt" || continue
-                resume_complete "$ckpt" && continue
+                shards="$(resume_shards "$ckpt")"
+                if resume_complete "$ckpt" \
+                  && { [ "$shards" -eq 0 ] || [ "$shards" -ge "$RESUME_WORLD" ]; }; then
+                  continue
+                fi
                 aside="$CKPT_DIR/incomplete-${ckpt##*/}.$(date +%Y%m%dT%H%M%S)"
                 mv "$ckpt" "$aside"
                 echo "distill-gold: resume: moved incomplete ${ckpt##*/} aside to ${aside##*/}"
@@ -739,16 +762,7 @@ environment_configs:
               # A ZeRO-3 checkpoint holds one optimizer shard per rank and DeepSpeed
               # cannot load it at another world size. Checked here, on a CPU-cheap
               # count, rather than discovered by every rank after allocation.
-              RESUME_SHARDS="$(find "$RESUME_CKPT" -mindepth 2 -maxdepth 2 \
-                -path '*/global_step*/*' -name '*optim_states.pt' 2>/dev/null | wc -l)"
-              # An EXTERNAL server (the `vllm` input bound) is another target's allocation:
-              # every node here trains, whatever vllm_num_servers says. Only the
-              # in-allocation split gives nodes to vLLM -- see "Node roles" below.
-              {% if vllm_server_url %}
-              RESUME_WORLD=$(( NODES * GPUS ))
-              {% else %}
-              RESUME_WORLD=$(( (NODES - VLLM_SERVERS) * GPUS ))
-              {% endif %}
+              RESUME_SHARDS="$(resume_shards "$RESUME_CKPT")"
               if [ "$RESUME_SHARDS" -gt 0 ] && [ "$RESUME_SHARDS" -ne "$RESUME_WORLD" ]; then
                 echo "distill-gold: FATAL: $RESUME_NAME holds $RESUME_SHARDS ZeRO optimizer shards" >&2
                 echo "  but this run trains on $RESUME_WORLD ranks. Resume with the source's topology." >&2
@@ -832,9 +846,13 @@ environment_configs:
             EMITTED_DIR="$(mktemp -d)"
             {% if config.resume_from_checkpoint_dir | default("") | string | trim and config.resume_emit_seeded not in _true %}
             # resume_emit_seeded is off: mark every seeded checkpoint as already
-            # emitted. Only seeded ones exist here -- the trainer has not started.
+            # emitted -- seeded, meaning the source holds a complete one of that name.
+            # After a retry_workload relaunch the dir also holds what the failed
+            # attempt wrote, which may never have been emitted (killed between
+            # watcher sweeps); those are left for the watcher.
             for ckpt in "$CKPT_DIR"/${CKPT_GLOB}*; do
               [ -d "$ckpt" ] || continue
+              resume_complete "$RESUME_SRC/$(basename "$ckpt")" || continue
               touch "$EMITTED_DIR/$(basename "$ckpt")"
               echo "distill-gold: resume: not re-emitting seeded $(basename "$ckpt")"
             done

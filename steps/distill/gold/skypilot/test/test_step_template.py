@@ -927,18 +927,19 @@ class TestResumeFromCheckpointDir:
 
     def test_a_checkpoint_already_in_the_run_dir_is_the_one_checked(self, tmp_path):
         """HF resumes from the highest checkpoint-<N> in the run's dir, which a
-        reused dir can hold above everything seeded. The world-size check, the
-        rewrite and the lineage are all about that one, not the source's highest:
-        here it was written by 8 ranks, so the 16-rank resume is refused."""
+        reused dir can hold above everything seeded. The world-size check is
+        about that one, not the source's highest: here it was written by 32 ranks,
+        so the 16-rank resume is refused. (Fewer shards than ranks is a save cut
+        short, moved aside instead; see the missing-shards test.)"""
         src = tmp_path / "src"
         self._checkpoint(src, 2000)
         dst = tmp_path / "run" / "checkpoints" / "gold_node2"
-        self._checkpoint(dst, 10000, shards=8)
+        self._checkpoint(dst, 10000, shards=32)
 
         result, _ = self._run(tmp_path, src)
 
         assert result.returncode == 1
-        assert "checkpoint-10000 holds 8 ZeRO optimizer shards" in result.stderr
+        assert "checkpoint-10000 holds 32 ZeRO optimizer shards" in result.stderr
         assert self._seeded(dst) == f"failed:{_TOKEN}"
 
     def test_lineage_is_the_seed_when_an_earlier_attempt_got_further(self, tmp_path):
@@ -997,6 +998,42 @@ class TestResumeFromCheckpointDir:
         (aside,) = dst.glob("incomplete-checkpoint-2500.*")
         assert (aside / "model.safetensors").exists()
         assert self._seeded(dst) == _TOKEN
+
+    def test_a_checkpoint_missing_optimizer_shards_is_moved_aside(self, tmp_path):
+        """A node died mid DeepSpeed save: rank 0's files are there, 7 of 16
+        shards are not. Every attempt of this run shares its topology, so that
+        is an incomplete save, not a topology mismatch."""
+        src = tmp_path / "src"
+        self._checkpoint(src, 2000)
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        self._checkpoint(dst, 2250)
+        self._checkpoint(dst, 2500, shards=9)
+
+        result, _ = self._run(tmp_path, src)
+
+        assert result.returncode == 0, result.stderr
+        assert "moved incomplete checkpoint-2500 aside" in result.stdout
+        assert "resumes from checkpoint-2250" in result.stdout
+
+    def test_sharded_weights_are_complete(self, tmp_path):
+        """save_pretrained's sharded layout has no model.safetensors, only shards
+        and the index it writes after them; such a checkpoint is seeded and
+        resumed, not moved aside."""
+        src = tmp_path / "src"
+        ckpt = self._checkpoint(src, 2000)
+        (ckpt / "model.safetensors").rename(ckpt / "model-00001-of-00002.safetensors")
+        (ckpt / "model.safetensors.index.json").write_text("{}")
+        dst = tmp_path / "run" / "checkpoints" / "gold_node2"
+        own = self._checkpoint(dst, 2500)
+        (own / "model.safetensors").rename(own / "model-00001-of-00002.safetensors")
+        (own / "model.safetensors.index.json").write_text("{}")
+
+        result, _ = self._run(tmp_path, src)
+
+        assert result.returncode == 0, result.stderr
+        assert "moved incomplete" not in result.stdout
+        assert "seeded checkpoint-2000" in result.stdout
+        assert "resumes from checkpoint-2500" in result.stdout
 
     def test_only_hfs_checkpoint_names_are_seeded(self, tmp_path):
         """get_last_checkpoint loads only checkpoint-<digits>, so nothing else is
@@ -1147,10 +1184,11 @@ class TestResumeFromCheckpointDir:
         self._checkpoint(src, 500, complete=False)
         rank0, dst = self._run(tmp_path, src)
         assert rank0.returncode == 1
-        worker, _ = self._run(tmp_path, src, rank="1")
+        # quick_wait: a broken trap fails here in ~1s ("did not finish seeding"),
+        # not after 900s.
+        worker, _ = self._run(tmp_path, src, rank="1", quick_wait=True)
         assert worker.returncode == 1
         assert "rank 0 failed to seed" in worker.stderr
-        assert "after 0s" not in worker.stdout
 
 
 class TestNcclIbHcaOverride:
@@ -1196,24 +1234,32 @@ class TestResumeEmitSeeded:
         config.update(overrides)
         return Template(script).render(config=config, bindings=_bindings())
 
-    def _emitted(self, tmp_path, emit_seeded):
+    def _emitted(self, tmp_path, emit_seeded, own=()):
+        """Checkpoint ids one watcher sweep emits after the "trainer" writes
+        checkpoint-2000, with 500 and 1500 seeded from the source and `own` left
+        complete by a failed attempt of this run."""
+        src = tmp_path / "src"
         rendered = self._render(
-            resume_from_checkpoint_dir="/src", resume_emit_seeded=emit_seeded
+            resume_from_checkpoint_dir=str(src), resume_emit_seeded=emit_seeded
         )
-        # The watcher setup through the function definitions, then one sweep after
-        # a checkpoint the "trainer" wrote.
+        # The resume block's helpers, then the watcher setup through the function
+        # definitions, then one sweep.
+        helpers = rendered.index('RESUME_SRC="')
+        helpers_end = rendered.index('if [ "$NODE_RANK" = "0" ]; then', helpers)
         start = rendered.index('CKPT_GLOB="checkpoint-"')
         end = rendered.index("watch_checkpoints() {")
         sentinels = ("model.safetensors", "tokenizer.json", "trainer_state.json")
         ckpt_dir = tmp_path / "ckpts"
-        for step in (500, 1500):
-            d = ckpt_dir / f"checkpoint-{step}"
-            d.mkdir(parents=True)
-            for name in sentinels:
-                (d / name).write_text("x")
+        for root, steps in ((src, (500, 1500)), (ckpt_dir, (500, 1500, *own))):
+            for step in steps:
+                d = root / f"checkpoint-{step}"
+                d.mkdir(parents=True)
+                for name in sentinels:
+                    (d / name).write_text("x")
         new = ckpt_dir / "checkpoint-2000"
         script = (
             "set -eu\n"
+            + rendered[helpers:helpers_end]
             + rendered[start:end]
             + f"mkdir -p {new}\n"
             + "".join(f"touch {new}/{n}\n" for n in sentinels)
@@ -1238,7 +1284,17 @@ class TestResumeEmitSeeded:
         ]
 
     def test_off_emits_only_what_this_run_wrote(self, tmp_path):
+        """Seeded rungs pre-marked; the trainer's new one announced."""
         assert self._emitted(tmp_path, False) == ["checkpoint_2000"]
+
+    def test_off_still_emits_a_failed_attempts_own_checkpoint(self, tmp_path):
+        """A retry_workload relaunch finds the failed attempt's checkpoint-1750,
+        which it may never have emitted (killed between watcher sweeps). It is not
+        in the source, so it is not pre-marked as seeded."""
+        assert sorted(self._emitted(tmp_path, False, own=(1750,))) == [
+            "checkpoint_1750",
+            "checkpoint_2000",
+        ]
 
     def test_off_renders_nothing_without_a_resume_source(self):
         assert "not re-emitting seeded" not in self._render(resume_emit_seeded=False)

@@ -483,12 +483,16 @@ checkpoint. Hardlinks, not copies: no data is duplicated and the source is never
   1000 steps would save every 1000 whatever its own `save_steps`. Rank 0 rewrites both in the
   resumed checkpoint's `trainer_state.json` and logs each change. That one file is replaced
   rather than edited, so it is no longer a hardlink and the source keeps its own.
-- **An automatic retry resumes from its own progress.** A `retry_workload` relaunch reuses
-  `GB_BUILD_WORKDIR`, so the checkpoint directory still holds what the failed attempt wrote,
-  and HF resumes from its highest `checkpoint-<N>`, not necessarily the source's. The
-  world-size check and the rewrite apply to that one. A checkpoint the failed attempt was
-  still writing is moved aside to `incomplete-checkpoint-<N>.<timestamp>` (kept, never
-  deleted), so the retry resumes from the highest complete one rather than failing on it.
+- **An automatic retry of a resumed run resumes from its own progress.** A `retry_workload`
+  relaunch reuses `GB_BUILD_WORKDIR`, so the checkpoint directory still holds what the
+  failed attempt wrote, and HF resumes from its highest `checkpoint-<N>`, not necessarily
+  the source's. The world-size check and the rewrite apply to that one. A checkpoint the
+  failed attempt was still writing (rank 0's files missing, or fewer ZeRO shards than
+  ranks) is moved aside to `incomplete-checkpoint-<N>.<timestamp>`, so the retry resumes
+  from the highest complete one rather than failing on it; the per-run workdir, and these
+  with it, is reaped when the target run tears down. This all happens only when
+  `resume_from_checkpoint_dir` is set: a retry of a run without it goes straight to
+  `gold.py`'s own resume.
 - **No complete checkpoint is an error,** not a fresh start: starting from step 0 would
   silently spend the whole schedule again.
 - **With `emit_checkpoint_artifacts` on,** every seeded checkpoint is emitted as
