@@ -58,26 +58,37 @@ def _search_block(step: str) -> str:
     return "\n".join(lines[start : end + 1])
 
 
+# mtimes: the eval's log, and files written before or after it (the -newer fallback).
+LOG_MTIME, OLD, NEW = 1000, 0, 2000
+
+
 def _emitted(step: str, root: Path, tmp_path: Path) -> str | None:
     log = tmp_path / "sage-eval.log"
     log.write_text("")
+    os.utime(log, (LOG_MTIME, LOG_MTIME))
     # The fallback search compares against the eval's log; point it at a private copy.
-    block = _search_block(step).replace("/tmp/sage-eval.log", str(log))
+    block = _search_block(step)
+    assert "/tmp/sage-eval.log" in block
+    block = block.replace("/tmp/sage-eval.log", str(log))
     env = {**os.environ, STEPS[step]: str(root), "EXPERIMENT": EXPERIMENT}
-    # check=False: an empty tree is meant to exit 1; the emitted line is what counts.
+    # -e as in the step's run script. check=False: an empty tree is meant to exit 1;
+    # the emitted line is what counts.
     out = subprocess.run(
-        ["bash", "-c", block], env=env, capture_output=True, text=True, check=False
+        ["bash", "-ec", block], env=env, capture_output=True, text=True, check=False
     ).stdout
-    m = re.search(r"GB_ARTIFACT_ID:sage_eval_results GB_ARTIFACT_PATH:(\S+)", out)
+    m = re.search(r"GB_ARTIFACT_ID:sage_eval_results GB_ARTIFACT_PATH:(.+)", out)
     return m.group(1) if m else None
 
 
-def _touch(root: Path, rel: str, experiment: str = EXPERIMENT) -> None:
+def _touch(
+    root: Path, rel: str, experiment: str = EXPERIMENT, mtime: int = OLD
+) -> Path:
     p = root / experiment / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("{}")
-    # Older than the eval's log, so the -newer fallback search cannot pick it up.
-    os.utime(p, (0, 0))
+    # OLD by default: older than the eval's log, so only the primary search sees it.
+    os.utime(p, (mtime, mtime))
+    return p
 
 
 @pytest.mark.parametrize("step", STEPS)
@@ -103,3 +114,37 @@ def test_an_empty_tree_emits_nothing(step, tmp_path):
     root = tmp_path / "out"
     (root / EXPERIMENT / "logs-dir").mkdir(parents=True)
     assert _emitted(step, root, tmp_path) is None
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_the_fallback_emits_a_new_csv_under_the_experiment(step, tmp_path):
+    """Only the fallback matches '*.csv', and only files newer than the eval's log."""
+    root = tmp_path / "out"
+    _touch(root, "code-eval/old.csv")
+    new = _touch(root, "code-eval/summary.csv", mtime=NEW)
+    assert _emitted(step, root, tmp_path) == str(new)
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_the_fallback_ignores_a_sibling_rungs_new_result(step, tmp_path):
+    """A crashed rung's log is older than results a parallel rung writes afterwards."""
+    root = tmp_path / "out"
+    _touch(
+        root, "safety-eval/attaq/results.json", experiment="exp-ckpt_2000", mtime=NEW
+    )
+    _touch(root, "summary.csv", experiment="exp-ckpt_2000", mtime=NEW)
+    (root / EXPERIMENT / "logs-dir").mkdir(parents=True)
+    assert _emitted(step, root, tmp_path) is None
+
+
+@pytest.mark.parametrize("step", STEPS)
+def test_traversal_order_decides_between_salad_and_a_sibling_eval(step, tmp_path):
+    """Known limit: the step emits *a* result under the experiment, not its own eval's.
+
+    With SALAD next to IFEval, whichever find reaches first is emitted. A crashed eval
+    can therefore pass on a sibling's file until each eval gets its own output path.
+    """
+    root = tmp_path / "out"
+    salad = _touch(root, SALAD)
+    ifeval = _touch(root, "ifeval/export-1000/metrics-all.jsonl")
+    assert _emitted(step, root, tmp_path) in {str(salad), str(ifeval)}
