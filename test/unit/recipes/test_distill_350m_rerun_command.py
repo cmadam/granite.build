@@ -154,6 +154,95 @@ def test_a_rung_without_a_checkpoint_is_reported_not_planned():
     assert "2250" in notes[0]
 
 
+def _died_after_last_save(on_disk):
+    """Build d7966914's shape: train-gold FAILED after writing 4500 but before
+    publishing it, and export-2250 lost to an SSH submit error."""
+    status, definition = _build(
+        overrides={"train-gold": ["failed"], "export-2250": ["failed"]},
+        missing={"export-4500", "export-combined"},
+    )
+    for t in status["targets"]:
+        if t["target_name"] == "train-gold":
+            t["output_artifacts"] = t["output_artifacts"][:1]
+    seen = []
+
+    def ckpt_on_disk(ckpt_dir, n):
+        seen.append((ckpt_dir, n))
+        return on_disk
+
+    params, notes = rc.plan(
+        status, definition, _APPLIED, _CATALOG, ckpt_on_disk=ckpt_on_disk
+    )
+    return params, notes, seen
+
+
+def test_a_failed_train_targets_published_checkpoint_is_used():
+    params, _, seen = _died_after_last_save(on_disk=True)
+    assert "2250" in params["NEW_RUNGS"].split(",")
+    assert params["CKPT_SRC_DIR"] == _CKPTS
+    # Published checkpoints are not looked for on disk; only the unpublished one is.
+    assert seen == [(_CKPTS, "4500")]
+
+
+def test_an_unpublished_checkpoint_found_on_disk_is_planned():
+    params, notes, _ = _died_after_last_save(on_disk=True)
+    assert params["NEW_RUNGS"] == "2250,4500"
+    assert params["NEW_RUNG_EVALS"] == "2250:" + ",".join(sorted(_SCREEN + ["bfcl"]))
+    assert any("checkpoint-4500" in n and "found complete" in n for n in notes)
+
+
+def test_an_unpublished_checkpoint_missing_on_disk_is_lost():
+    params, notes, _ = _died_after_last_save(on_disk=False)
+    assert params["NEW_RUNGS"] == "2250"
+    assert any("rungs 4500" in n for n in notes)
+
+
+def test_an_unpublished_checkpoint_that_cannot_be_checked_is_assumed_and_noted():
+    params, notes, _ = _died_after_last_save(on_disk=None)
+    assert params["NEW_RUNGS"] == "2250,4500"
+    assert any("checkpoint-4500" in n and "assumed" in n for n in notes)
+
+
+def test_a_successful_train_target_is_never_second_guessed_on_disk():
+    status, definition = _build(overrides={"export-2250": ["failed"]})
+    for t in status["targets"]:
+        if t["target_name"] == "train-gold":
+            t["output_artifacts"] = t["output_artifacts"][1:]
+    params, _ = rc.plan(
+        status, definition, _APPLIED, _CATALOG, ckpt_on_disk=lambda d, n: True
+    )
+    assert params is None
+
+
+def test_the_ssh_check_reads_the_remote_answer(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        out = {"yes": "yes\n", "no": "no\n"}[answer]
+        return rc.subprocess.CompletedProcess(
+            cmd, 255 if answer == "down" else 0, out, ""
+        )
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+    check = rc.ssh_ckpt_check("bluevela", "")
+    answer = "yes"
+    assert check("/d", "4500") is True
+    assert calls[0][-2] == "bluevela"
+    assert all(f"/d/checkpoint-4500/{s}" in calls[0][-1] for s in rc.CKPT_SENTINELS)
+    answer = "no"
+    assert check("/d", "4500") is False
+
+
+def test_the_ssh_check_is_unknown_when_ssh_fails(monkeypatch):
+    monkeypatch.setattr(
+        rc.subprocess,
+        "run",
+        lambda cmd, **kw: rc.subprocess.CompletedProcess(cmd, 255, "", "refused"),
+    )
+    assert rc.ssh_ckpt_check("bluevela", "")("/d", "4500") is None
+
+
 def test_a_failed_csv_that_registered_its_uri_is_flagged():
     status, definition = _build(overrides={"export-sage-ck2250": ["failed"]})
     for t in status["targets"]:

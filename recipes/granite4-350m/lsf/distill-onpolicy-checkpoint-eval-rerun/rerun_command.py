@@ -14,6 +14,11 @@ command that re-runs exactly those:
     failed export-bfcl-ck<N>  RERUN_BFCL_EXPORT, when the rung's BFCL eval passed
     failed export-combined    RUN_COMBINED, which also runs whenever anything above does
 
+A lost export's checkpoint is the one the train target published, even when the train
+target itself failed. A failed train target can also leave checkpoints it wrote but
+never published (it died after the last save); those are looked for in the directory
+it published the others in, over ssh to --ssh-host, and planned if complete.
+
 "Failed" means no attempt of the target succeeded, which covers targets that never
 dispatched. It is the gbserver status only: a sage eval that reported SUCCESS with
 another eval's file is not caught here (check the rung's CSV for MISSING cells).
@@ -83,6 +88,9 @@ _PLAN_KEYS = (
 )
 
 _EVAL_TARGET = re.compile(r"^eval-(.+)-ck(\d+)$")
+
+# The GOLD step's completeness test: these bracket HF Trainer's whole save sequence.
+CKPT_SENTINELS = ("model.safetensors", "tokenizer.json", "trainer_state.json")
 
 
 class RerunError(Exception):
@@ -180,12 +188,39 @@ def _outputs_of_failed(status, name):
     ]
 
 
-def plan(status, definition, applied, catalog):
+def ssh_ckpt_check(host, ssh_config):
+    """A ckpt_on_disk for plan(): True or False from `ssh host test -f`, None if ssh fails."""
+
+    def check(ckpt_dir, n):
+        path = shlex.quote(f"{ckpt_dir}/checkpoint-{n}")
+        test = " && ".join(f"test -f {path}/{s}" for s in CKPT_SENTINELS)
+        cmd = ["ssh", "-o", "BatchMode=yes"]
+        if ssh_config:
+            cmd += ["-F", os.path.expanduser(ssh_config)]
+        try:
+            proc = subprocess.run(
+                [*cmd, host, f"{test} && echo yes || echo no"],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        answer = proc.stdout.strip().splitlines()[-1:] if proc.returncode == 0 else []
+        return {"yes": True, "no": False}.get(answer[0]) if answer else None
+
+    return check
+
+
+def plan(status, definition, applied, catalog, ckpt_on_disk=None):
     """The rerun recipe's build-specific parameters, and the notes that go with them.
 
     `definition` is the build's target list (`gb build describe --format json`), so a
     target that never dispatched counts as failed; `catalog` is the parent recipe's
-    EVAL_CATALOG, the names RERUN_EVALS may use.
+    EVAL_CATALOG, the names RERUN_EVALS may use. `ckpt_on_disk(dir, n)` says whether
+    a checkpoint a failed train target never published is complete on disk (True,
+    False, or None for unknown); without it such a checkpoint is assumed and noted.
     """
     ok = _succeeded(status)
     defined = [t["target_name"] for t in definition]
@@ -213,13 +248,43 @@ def plan(status, definition, applied, catalog):
             "--parameters-path the build was started with"
         )
 
+    # A failed attempt's published checkpoints count too: the step publishes one only
+    # once its whole save sequence is on disk. Build d7966914 (A1u-s46) lost its driver
+    # after the final save, so train-gold read FAILED with every rung but the last
+    # published.
     checkpoints = {}
+    train_ok = False
     for t in status["targets"]:
-        if t["target_name"].startswith("train") and t["status"] == "success":
+        if t["target_name"].startswith("train"):
+            train_ok = train_ok or t["status"] == "success"
             for o in t["output_artifacts"]:
                 m = re.search(r"/checkpoint-(\d+)$", o["uri"])
                 if m:
                     checkpoints[m.group(1)] = o["uri"].removeprefix("env://")
+    published_dirs = {
+        str(pathlib.PurePosixPath(p).parent) for p in checkpoints.values()
+    }
+    # The checkpoints a failed train target wrote but never published (the last rung,
+    # above) are in the directory it published the others in. Only that directory is
+    # looked in: with more than one, which attempt wrote which rung is unknown.
+    if not train_ok and len(published_dirs) == 1:
+        ckpt_dir = next(iter(published_dirs))
+        for n in rungs:
+            if n in checkpoints:
+                continue
+            found = ckpt_on_disk(ckpt_dir, n) if ckpt_on_disk else None
+            if found is False:
+                continue
+            checkpoints[n] = f"{ckpt_dir}/checkpoint-{n}"
+            if found is None:
+                notes.append(
+                    f"checkpoint-{n} was never published; assumed complete in {ckpt_dir}. "
+                    f"Check that it holds {' '.join(CKPT_SENTINELS)} before launching"
+                )
+            else:
+                notes.append(
+                    f"checkpoint-{n} was never published; found complete in {ckpt_dir}"
+                )
 
     new, new_only, rerun, rerun_b, rerun_t, rerun_sx, rerun_bx = (
         [],
@@ -370,6 +435,17 @@ def main(argv=None):
         "--bcb-url", help="a live bcb-server URL, if BigCodeBench re-runs"
     )
     parser.add_argument(
+        "--ssh-host",
+        default="bluevela",
+        help="where to check checkpoints a failed train target never published "
+        "(default: bluevela); empty skips the check and assumes them",
+    )
+    parser.add_argument(
+        "--ssh-config",
+        default="~/.lsf/config",
+        help="ssh -F config for --ssh-host (default: ~/.lsf/config)",
+    )
+    parser.add_argument(
         "--allow-running",
         action="store_true",
         help="plan against a build that has not finished (its retries may still succeed)",
@@ -391,7 +467,12 @@ def main(argv=None):
             args.parameters_path or parent_recipe(status["details"]["name"])
         )
         parent = yaml.safe_load(parameters_path.read_text(encoding="utf-8"))
-        params, notes = plan(status, definition, applied, parent["EVAL_CATALOG"])
+        on_disk = (
+            ssh_ckpt_check(args.ssh_host, args.ssh_config) if args.ssh_host else None
+        )
+        params, notes = plan(
+            status, definition, applied, parent["EVAL_CATALOG"], ckpt_on_disk=on_disk
+        )
     except RerunError as e:
         print(f"rerun_command: {e}", file=sys.stderr)
         return 1
