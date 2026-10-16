@@ -83,3 +83,66 @@ def test_the_rungs_csv_and_the_table_wait_for_the_rerun(tmp_path):
         assert gate["binding"] == f"eval-bfcl-ck{n}.bfcl_results"
         combined = targets["export-combined"]["inputs"][f"gate_bfcl_{n}"]
         assert combined["binding"] == f"export-bfcl-ck{n}.bfcl_export_csv"
+
+
+def test_new_rung_evals_limits_a_new_rung_to_its_subset(tmp_path):
+    """A switch-study screening rung: its subset, not the whole battery."""
+    targets = _render(
+        tmp_path,
+        RERUN_EVALS="",
+        NEW_RUNGS="1500,2000",
+        NEW_RUNG_EVALS="1500:salad-bench,attaq",
+    )
+    rung = sorted(n for n in targets if n.endswith("1500"))
+    assert rung == [
+        "eval-attaq-ck1500",
+        "eval-salad-bench-ck1500",
+        "eval-transfer-1500",
+        "export-1500",
+        "export-sage-ck1500",
+    ]
+    gates = targets["export-sage-ck1500"]["inputs"]
+    assert sorted(gates) == ["gate_attaq", "gate_salad_bench"]
+    combined = targets["export-combined"]["inputs"]
+    assert "gate_bfcl_1500" not in combined and "gate_bfcl_2000" in combined
+
+
+def test_a_lost_csv_is_re_exported_from_the_rung_tree(tmp_path):
+    params = get_params_from_file(str(_PARENT_PARAMS))
+    targets = _render(tmp_path, RERUN_SAGE_EXPORT="1000,500", RERUN_BFCL_EXPORT="2000")
+    # 500 re-runs an eval, so its CSV is already written behind the merge.
+    assert [n for n in targets if n.startswith("export-sage")] == [
+        "export-sage-ck500",
+        "export-sage-ck1000",
+    ]
+    assert targets["export-sage-ck1000"]["inputs"]["rung_results"]["uri"] == (
+        f"env://{params['SAGE_OUTPUT_DIR']}/exp-ckpt_1000"
+    )
+    assert targets["export-bfcl-ck2000"]["inputs"]["rung_results"]["uri"] == (
+        f"env://{params['BFCL_OUTPUT_DIR']}/exp-ckpt_2000/{params['BFCL_EVAL_NAME']}"
+    )
+    assert sorted(targets["export-combined"]["inputs"]) == [
+        "gate_bfcl_2000",
+        "gate_sage_1000",
+        "gate_sage_500",
+    ]
+
+
+def test_a_transfer_rerun_reads_the_existing_export(tmp_path):
+    targets = _render(tmp_path, RERUN_TRANSFER="1000")
+    target = targets["eval-transfer-1000"]
+    assert target["inputs"]["student"]["uri"] == f"env://{_SRC}/export-1000"
+    config = target["steps"][0]["config"]["eval_config"]
+    assert config["output_dir"] == f"{_SRC}/eval-transfer-1000"
+
+
+def test_the_table_alone_reads_the_results_directory(tmp_path):
+    params = get_params_from_file(str(_PARENT_PARAMS))
+    targets = _render(tmp_path, RERUN_EVALS="")
+    assert list(targets) == ["export-combined"]
+    assert targets["export-combined"]["inputs"] == {
+        "sage_results": {
+            "uri": f"env://{params['SAGE_RESULTS_DIR']}/exp",
+            "type": "dataset",
+        }
+    }

@@ -221,7 +221,13 @@ gb build start -f $L/distill-model-screening-eval/build.yaml --parameters-path $
 ```
 
 `distill-onpolicy-checkpoint-eval-rerun` stays the tool for evals that FAILED inside an arm
-(pass `--parameters-path $P`).
+(pass `--parameters-path $P`). Its `rerun_command.py` prints that command from the arm's
+build id: the failed evals, the per-rung CSVs and the table they left unwritten, and every
+`--param` the arm ran with that the rerun reads. It prints nothing when there is nothing left.
+
+```bash
+python recipes/granite4-350m/lsf/distill-onpolicy-checkpoint-eval-rerun/rerun_command.py <BUILD>
+```
 
 ## What to read
 

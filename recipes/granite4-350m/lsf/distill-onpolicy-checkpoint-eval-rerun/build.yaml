@@ -16,6 +16,20 @@
 #                 its own list: eval-bfcl-ck<N> on the existing export, then the rung's
 #                 BFCL CSV. Optional; empty or absent re-runs no BFCL.
 #
+# and four optional ones, for gaps that need no sage eval re-run (empty or absent: none):
+#
+#   NEW_RUNG_EVALS     "<N>:<eval>,<eval>;..." -- the evals a NEW_RUNGS rung gets, when
+#                      not every one in EVAL_CATEGORIES ("bfcl" names BFCL). For a rung
+#                      of a study that screened it with a subset. A rung not named here
+#                      gets them all.
+#   RERUN_TRANSFER     rungs whose eval-transfer FAILED, re-run on the existing export.
+#   RERUN_SAGE_EXPORT  rungs whose sage evals all succeeded but whose export-sage did
+#                      not: the CSV alone, from the rung's sage tree.
+#   RERUN_BFCL_EXPORT  the same for a rung's BFCL CSV.
+#
+# rerun_command.py, beside this file, reads a finished build's status and prints the
+# command with all of these filled in.
+#
 # WHY RE-RUN EVALS DO NOT WRITE STRAIGHT INTO THE ORIGINAL RESULT DIRECTORY
 #
 # gbserver refuses an artifact URI another build already registered
@@ -54,6 +68,12 @@
 <% set NEW = (NEW_RUNGS | string | replace(" ", "")).split(",") if NEW_RUNGS | string | trim else [] %>
 <% set RERUN = (RERUN_EVALS | string | replace(" ", "")).split(";") if RERUN_EVALS | string | trim else [] %>
 <% set RERUN_B = (RERUN_BFCL | default("") | string | replace(" ", "")).split(",") if RERUN_BFCL | default("") | string | trim else [] %>
+<% set RERUN_T = (RERUN_TRANSFER | default("") | string | replace(" ", "")).split(",") if RERUN_TRANSFER | default("") | string | trim else [] %>
+<% set RERUN_SX = (RERUN_SAGE_EXPORT | default("") | string | replace(" ", "")).split(",") if RERUN_SAGE_EXPORT | default("") | string | trim else [] %>
+<% set RERUN_BX = (RERUN_BFCL_EXPORT | default("") | string | replace(" ", "")).split(",") if RERUN_BFCL_EXPORT | default("") | string | trim else [] %>
+<% set NEW_ONLY = {} %>
+<% for spec in (NEW_RUNG_EVALS | default("") | string | replace(" ", "")).split(";") if spec %><% set _ = NEW_ONLY.update({spec.split(":")[0]: spec.split(":")[1].split(",")}) %><% endfor %>
+<% set GATES = [] %>
 <% set SAGE_NAMES = [] %>
 <% for e in EVAL_CATALOG %><% if e.category in CATS %><% set _ = SAGE_NAMES.append(e.name) %><% endif %><% endfor %>
 granite.build:
@@ -65,6 +85,10 @@ granite.build:
 
     # ═══ NEW_RUNGS: the parent's per-rung pipeline, from a checkpoint on disk ════
 <% for N in NEW %>
+<% set ONLY = NEW_ONLY.get(N, []) %>
+<% set RUNG_SAGE = [] %>
+<% for name in SAGE_NAMES %><% if not ONLY or name in ONLY %><% set _ = RUNG_SAGE.append(name) %><% endif %><% endfor %>
+<% set RUNG_BFCL = "bfcl" in CATS and (not ONLY or "bfcl" in ONLY) %>
     export-$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -146,7 +170,7 @@ granite.build:
               dtype: "$${EVAL_DTYPE}"
               allow_tokenizer_mismatch: false
 
-<% for e in EVAL_CATALOG %><% if e.category in CATS %>
+<% for e in EVAL_CATALOG %><% if e.name in RUNG_SAGE %>
     eval-$${e.name}-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -187,11 +211,12 @@ granite.build:
                 memory: $${EVAL_MEMORY}
 <% endif %><% endfor %>
 
-<% if SAGE_NAMES %>
+<% if RUNG_SAGE %>
+<% set _ = GATES.append(["gate_sage_" ~ N, "export-sage-ck" ~ N ~ ".sage_export_csv"]) %>
     export-sage-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-<% for name in SAGE_NAMES %>
+<% for name in RUNG_SAGE %>
         gate_$${name | replace("-", "_")}:
           binding: eval-$${name}-ck$${N}.sage_eval_results
 <% endfor %>
@@ -215,7 +240,7 @@ granite.build:
                 memory: $${EXPORT_MEMORY}
 <% endif %>
 
-<% if "bfcl" in CATS %>
+<% if RUNG_BFCL %>
     eval-bfcl-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -246,6 +271,7 @@ granite.build:
                 zone: "$${EVAL_QUEUE}"
                 memory: $${GPU_MEMORY}
 
+<% set _ = GATES.append(["gate_bfcl_" ~ N, "export-bfcl-ck" ~ N ~ ".bfcl_export_csv"]) %>
     export-bfcl-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -401,6 +427,7 @@ granite.build:
                 date -u +%FT%TZ > "$MARKER"
                 echo "GB_ARTIFACT_ID:merged GB_ARTIFACT_PATH:$MARKER"
 
+<% set _ = GATES.append(["gate_sage_" ~ N, "export-sage-ck" ~ N ~ ".sage_export_csv"]) %>
     export-sage-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -463,6 +490,7 @@ granite.build:
                 zone: "$${EVAL_QUEUE}"
                 memory: $${GPU_MEMORY}
 
+<% set _ = GATES.append(["gate_bfcl_" ~ N, "export-bfcl-ck" ~ N ~ ".bfcl_export_csv"]) %>
     export-bfcl-ck$${N}:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
@@ -489,33 +517,137 @@ granite.build:
                 memory: $${EXPORT_MEMORY}
 <% endfor %>
 
+    # ═══ RERUN_TRANSFER: a failed eval-transfer on an exported rung ════════════
+    # Into the original output directory, like RERUN_BFCL: nothing reads it here, and
+    # nothing would merge it. A rung in NEW_RUNGS already gets its own.
+<% for N in RERUN_T if N not in NEW %>
+    eval-transfer-$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        student:
+          uri: "env://$${SRC_BUILD_DIR.rstrip('/')}/export-$${N}"
+          type: model
+        teacher:
+          uri: "env://$${TEACHER_MODEL}"
+          type: model
+      outputs:
+        eval_metrics:
+          uri: "env://{{ binding.path }}"
+          type: fileset
+      steps:
+        - step_uri: space://steps/distill/eval
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
+            compute_config:
+              num_nodes: 1
+              num_gpus_per_node: $${EVAL_NUM_GPUS}
+            launcher_config:
+              image_id: "$${IMAGE_ID}"
+              resources:
+                accelerators: "H100:$${EVAL_NUM_GPUS}"
+                cluster: "$${CLUSTER}"
+                zone: "$${QUEUE}"
+                memory: $${GPU_MEMORY}
+            eval_config:
+              # An empty CORPUS_DIR means the original build prepared its own corpus,
+              # under its build directory.
+<% if CORPUS_DIR | default("") | string | trim %>
+              corpus: "$${CORPUS_DIR.rstrip('/')}/eval.jsonl"
+<% else %>
+              corpus: "$${SRC_BUILD_DIR.rstrip('/')}/corpus/eval.jsonl"
+<% endif %>
+              output_dir: "$${SRC_BUILD_DIR.rstrip('/')}/eval-transfer-$${N}"
+              metrics: "$${EVAL_METRICS}"
+              max_samples: $${EVAL_MAX_SAMPLES}
+              seed: $${SEED}
+              max_length: $${MAX_LENGTH}
+              max_incomplete_fraction: $${MAX_INCOMPLETE_FRACTION}
+              batch_size: $${EVAL_BATCH_SIZE}
+              dtype: "$${EVAL_DTYPE}"
+              allow_tokenizer_mismatch: false
+<% endfor %>
+
+    # ═══ RERUN_SAGE_EXPORT / RERUN_BFCL_EXPORT: a lost per-rung CSV ═══════════
+    # Every eval of the rung succeeded, so its results are on disk; only the CSV is
+    # missing. The input is the rung's result tree read DIRECTLY: there is no eval
+    # target here to bind to. A rung that also re-runs evals already gets its CSV.
+<% set SAGE_HAS = NEW[:] %><% for spec in RERUN %><% set _ = SAGE_HAS.append(spec.split(":")[0]) %><% endfor %>
+<% for N in RERUN_SX if N not in SAGE_HAS %>
+<% set _ = GATES.append(["gate_sage_" ~ N, "export-sage-ck" ~ N ~ ".sage_export_csv"]) %>
+    export-sage-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        rung_results:
+          uri: "env://$${SAGE_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${N}"
+          type: dataset
+      outputs:
+        sage_export_csv:
+          type: dataset
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+      steps:
+        - step_uri: space://steps/sage-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            sage_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              export_stack: "$${EXPORT_STACK}"
+              input_dir: "$${SAGE_OUTPUT_DIR}"
+              output_csv: "$${SAGE_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-sage.csv"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endfor %>
+<% for N in RERUN_BX if N not in NEW and N not in RERUN_B %>
+<% set _ = GATES.append(["gate_bfcl_" ~ N, "export-bfcl-ck" ~ N ~ ".bfcl_export_csv"]) %>
+    export-bfcl-ck$${N}:
+      environment_uri: space://environments/skypilot/lsf/ibm-bluevela
+      inputs:
+        rung_results:
+          uri: "env://$${BFCL_OUTPUT_DIR}/$${EXPERIMENT}-ckpt_$${N}/$${BFCL_EVAL_NAME}"
+          type: dataset
+      outputs:
+        bfcl_export_csv:
+          type: dataset
+          uri: "env://$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+      steps:
+        - step_uri: space://steps/bfcl-export
+          config:
+            poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
+            bfcl_export_config:
+              experiment: "$${EXPERIMENT}-ckpt_$${N}"
+              eval_name: "$${BFCL_EVAL_NAME}"
+              input_dir: "$${BFCL_OUTPUT_DIR}"
+              output_csv: "$${BFCL_RESULTS_DIR}/$${EXPERIMENT}/ckpt_$${N}-bfcl.csv"
+              filter: "$${BFCL_FILTER}"
+            launcher_config:
+              resources:
+                cluster: "$${CLUSTER}"
+                zone: "$${EXPORT_QUEUE}"
+                memory: $${EXPORT_MEMORY}
+<% endfor %>
+
     # ─── export-combined ─────────────────────────────────────────────────────
     # Pivots EVERY per-rung CSV in the experiment's results directory, including the
     # ones the original build already wrote, so it is the whole run's table. Gated on
     # the CSVs this build writes -- so if another build already registered one of
     # those CSV paths (a manual export-results run, say), its binding is dropped and
-    # this never dispatches. RUN_COMBINED=false leaves it out for that case.
+    # this never dispatches. RUN_COMBINED=false leaves it out for that case. With no
+    # CSV to wait for (only the table itself was lost), it reads the results
+    # directory directly.
 <% if RUN_COMBINED | default(true) | string | lower in ("true", "1", "yes", "on") %>
     export-combined:
       environment_uri: space://environments/skypilot/lsf/ibm-bluevela
       inputs:
-<% for N in NEW %>
-<% if SAGE_NAMES %>
-        gate_sage_$${N}:
-          binding: export-sage-ck$${N}.sage_export_csv
-<% endif %>
-<% if "bfcl" in CATS %>
-        gate_bfcl_$${N}:
-          binding: export-bfcl-ck$${N}.bfcl_export_csv
-<% endif %>
-<% endfor %>
-<% for spec in RERUN %>
-        gate_sage_$${spec.split(":")[0]}:
-          binding: export-sage-ck$${spec.split(":")[0]}.sage_export_csv
-<% endfor %>
-<% for N in RERUN_B %>
-        gate_bfcl_$${N}:
-          binding: export-bfcl-ck$${N}.bfcl_export_csv
+<% for g in GATES %>
+        $${g[0]}:
+          binding: $${g[1]}
+<% else %>
+        sage_results:
+          uri: "env://$${SAGE_RESULTS_DIR}/$${EXPERIMENT}"
+          type: dataset
 <% endfor %>
       outputs:
         combined_csv:
