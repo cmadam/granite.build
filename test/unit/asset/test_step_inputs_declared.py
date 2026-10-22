@@ -40,6 +40,7 @@ ASSETS_DIR = REPO_ROOT / "configurations" / "assets"
 _SKY = "environments/skypilot/steps"
 _LSF = "environments/skypilot/lsf/ibm-bluevela/steps"
 _AWS = "environments/skypilot/aws/steps"
+_SLURM = "environments/skypilot/slurm/ibm-bluevela/steps"
 
 # step dir (relative to configurations/assets) -> (required, optional). Empty sets are
 # the listed exceptions: each such step.yaml says why in a comment above `inputs:`.
@@ -67,6 +68,7 @@ EXPECTED = {
     # key as a fallback.
     f"{_LSF}/sage-eval": (set(), {"model"}),
     f"{_LSF}/bfcl-eval": (set(), {"model"}),
+    f"{_SLURM}/bfcl-eval": (set(), {"model"}),
     f"{_LSF}/openinstruct-sft": (set(), {"model"}),
     f"{_LSF}/openinstruct-rl": (set(), {"rm_url", "code_url"}),
     f"{_SKY}/data/dpk": (set(), {"docs"}),
