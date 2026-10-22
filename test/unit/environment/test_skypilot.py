@@ -2521,9 +2521,7 @@ class TestInlineConfigMaterialization:
         env = self._env(
             {
                 "cluster_ssh_configs": {
-                    "slurm": [
-                        {"Host": "c", "HostName": "h", "IdentityStepCert": True}
-                    ]
+                    "slurm": [{"Host": "c", "HostName": "h", "IdentityStepCert": True}]
                 }
             }
         )
@@ -2554,9 +2552,7 @@ class TestInlineConfigMaterialization:
         env = self._env(
             {
                 "cluster_ssh_configs": {
-                    "slurm": [
-                        {"Host": "c", "HostName": "h", "IdentityStepCert": True}
-                    ]
+                    "slurm": [{"Host": "c", "HostName": "h", "IdentityStepCert": True}]
                 }
             }
         )
