@@ -295,6 +295,8 @@ class JudgedBenchmark(Benchmark):
 
         # The CLI already routes a --option judge_base_url through its meter; the class
         # default is a paid endpoint too and must be metered here (never twice).
+        if not (self.config.options.get("judge_base_url") or DEFAULT_JUDGE_BASE_URL):
+            raise SystemExit(f"{self.id}: no judge endpoint; pass --option judge_base_url=<OpenAI-compatible URL> (or judge_model=self)")
         base = self.config.options.get("judge_base_url") or meter.metered(DEFAULT_JUDGE_BASE_URL, role="judge")
         return Judge(
             base_url=base,

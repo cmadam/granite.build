@@ -138,6 +138,7 @@ def test_usage_totals_and_cost():
 
 
 def test_default_judge_goes_through_the_meter(tmp_path, monkeypatch):
+    monkeypatch.setattr(jg, "DEFAULT_JUDGE_BASE_URL", "https://judge.example.test/v1")  # no built-in endpoint: use a placeholder
     bench = jg.ProfBench(RunConfig(model="m", output_dir=tmp_path))
     monkeypatch.setenv("GRANITE_EVALS_JUDGE_API_KEY", "k")
     seen = []
@@ -149,6 +150,7 @@ def test_default_judge_goes_through_the_meter(tmp_path, monkeypatch):
 
 
 def test_default_judge_url_is_proxied_by_an_active_meter(tmp_path, monkeypatch):
+    monkeypatch.setattr(jg, "DEFAULT_JUDGE_BASE_URL", "https://judge.example.test/v1")  # no built-in endpoint: use a placeholder
     monkeypatch.setenv("GRANITE_EVALS_JUDGE_API_KEY", "k")
     monkeypatch.delenv("GRANITE_EVALS_SPEND_LEDGER", raising=False)
     bench = jg.GDPval(RunConfig(model="m", output_dir=tmp_path))

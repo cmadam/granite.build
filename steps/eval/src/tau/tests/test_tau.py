@@ -30,6 +30,13 @@ SUITE = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _placeholder_gateway(monkeypatch):
+    """The module has no built-in gateway URL (sites pass *_base_url); tests that take the default path need one."""
+    monkeypatch.setattr(tau, "DEFAULT_GATEWAY", "https://gateway.example.test/v1")
+
+
+
 def _bench(bid, tmp_path, **kw):
     options = kw.pop("options", {})
     return registry.get(bid)(RunConfig(model="m", output_dir=tmp_path, options=options, **kw))
