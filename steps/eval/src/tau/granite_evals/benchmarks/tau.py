@@ -444,6 +444,8 @@ class Tau3(Benchmark):
         # A given *_base_url option is already the CLI's metering proxy; the class
         # default is metered here. Either way every paid call is ledgered.
         given = self.config.options.get(f"{role}_base_url")
+        if not (given or DEFAULT_GATEWAY):
+            raise SystemExit(f"{self.id}: no {role} endpoint; pass --option {role}_base_url=<OpenAI-compatible URL> (or {role}_model=self)")
         url = given or meter.metered(DEFAULT_GATEWAY, role=role)
         # openai/ = litellm's generic OpenAI-compatible client; the name after it
         # is the gateway's model id.

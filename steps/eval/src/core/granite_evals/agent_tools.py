@@ -17,7 +17,7 @@ so this module imports without NeMo-Skills):
   fails the run instead of silently allowing network.
 - ``WebSearchTool`` -> ``web_search(query, num_results)``: Google results
   through a Google PSE MCP server (the ``google_pse_search`` tool, as
-  BFCL's web search in ``benchmarks/bfcl.py``).
+  BFCL web search via ``mcp_search.py``).
 - ``FetchUrlTool`` -> ``fetch_url(url, start)``: one web page as text, in
   pages of ``max_chars`` characters.
 
@@ -559,9 +559,11 @@ class WebSearchTool:
         return "\n".join(lines).rstrip()
 
     def _search(self, query: str, n: int) -> list[dict[str, str]]:
-        from granite_evals.benchmarks.bfcl import MCPSearch
+        from granite_evals.mcp_search import MCPSearch
 
         if self.client is None:
+            if not self.cfg["mcp_url"]:
+                raise RuntimeError("web_search needs an MCP search endpoint; pass --option search_mcp_url=<URL>")
             self.client = MCPSearch(self.cfg["mcp_url"])
         return self.client.search(query, n)
 
