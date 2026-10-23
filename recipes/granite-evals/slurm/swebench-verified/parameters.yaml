@@ -14,8 +14,8 @@ RUN_NAME: "granite-4.2-3b"
 OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
 
 # ─── Images (GPU generate + CPU score) ────────────────────────────────────
-IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-swebench:3ef3758"
-IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-swebench-cpu:3ef3758"
+IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-swebench:1280c95"
+IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-swebench-cpu:1280c95"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 LIMIT: "5"
