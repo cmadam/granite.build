@@ -16,7 +16,7 @@
 # One image per benchmark family (the harnesses' dependencies conflict, so they
 # cannot share an environment). The build context is this directory.
 #
-#   make images REGISTRY=quay.io/myorg            build all nine images
+#   make images REGISTRY=quay.io/myorg            build all 9 GPU + 7 CPU images (`-cpu` suffix)
 #   make image-nemoskills REGISTRY=...            build one
 #   make publish-images REGISTRY=...              push all (needs a prior `podman login`)
 #   make test-src                                 run the vendored unit tests (no GPU, no network)
@@ -27,6 +27,8 @@
 # ${REGISTRY}/gb-step-eval-<family>:${IMAGE_TAG}.
 
 FAMILIES := bfcl bird ifbench judged lmeval nemoskills swebench tau tbench
+# Families whose benchmarks split into GPU generate + CPU score (--phase); lmeval and tbench score inside generation.
+CPU_FAMILIES := bfcl bird ifbench judged nemoskills swebench tau
 
 REGISTRY  ?=
 PLATFORM  ?= linux/amd64
@@ -35,7 +37,7 @@ IMAGE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo latest)
 HF_HOME   ?=
 PYTHON    ?= python
 
-.PHONY: help images publish-images test-src prefetch check-pins $(addprefix image-,$(FAMILIES)) $(addprefix publish-image-,$(FAMILIES))
+.PHONY: help images-cpu publish-images-cpu $(addprefix image-cpu-,$(CPU_FAMILIES)) $(addprefix publish-image-cpu-,$(CPU_FAMILIES)) images publish-images test-src prefetch check-pins $(addprefix image-,$(FAMILIES)) $(addprefix publish-image-,$(FAMILIES))
 
 help:
 	@echo "Targets: images, publish-images, image-<family>, publish-image-<family>, test-src, prefetch, check-pins"
@@ -46,8 +48,18 @@ define require_registry
 	@test -n "$(REGISTRY)" || { echo "REGISTRY is not set: make $@ REGISTRY=quay.io/myorg" >&2; exit 1; }
 endef
 
-images: $(addprefix image-,$(FAMILIES))
-publish-images: $(addprefix publish-image-,$(FAMILIES))
+images: $(addprefix image-,$(FAMILIES)) $(addprefix image-cpu-,$(CPU_FAMILIES))
+images-cpu: $(addprefix image-cpu-,$(CPU_FAMILIES))
+publish-images-cpu: $(addprefix publish-image-cpu-,$(CPU_FAMILIES))
+publish-images: $(addprefix publish-image-,$(FAMILIES)) $(addprefix publish-image-cpu-,$(CPU_FAMILIES))
+
+$(addprefix image-cpu-,$(CPU_FAMILIES)): image-cpu-%:
+	$(require_registry)
+	$(DOCKER) build --platform $(PLATFORM) -f images/cpu/Dockerfile.$* . -t $(REGISTRY)/gb-step-eval-$*-cpu:$(IMAGE_TAG)
+
+$(addprefix publish-image-cpu-,$(CPU_FAMILIES)): publish-image-cpu-%:
+	$(require_registry)
+	$(DOCKER) push $(REGISTRY)/gb-step-eval-$*-cpu:$(IMAGE_TAG)
 
 $(addprefix image-,$(FAMILIES)): image-%:
 	$(require_registry)
