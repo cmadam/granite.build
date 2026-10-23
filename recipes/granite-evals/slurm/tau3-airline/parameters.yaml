@@ -1,0 +1,40 @@
+# tau3-airline on BlueVela (SkyPilot / SLURM), tau family image.
+# Data: pinned inside the image (GitHub/PyPI/task data baked by images/extras), nothing to fetch.
+#
+# SMOKE DEFAULTS: LIMIT is small so a first run finishes quickly. Set LIMIT to "" for the full benchmark:
+#   gb build start -f recipes/granite-evals/slurm/tau3-airline/build.yaml --space <space> --param LIMIT=
+# Override any value with --param KEY=VALUE.
+
+# ─── Model ────────────────────────────────────────────────────────────
+# https://huggingface.co/ibm-granite/granite-4.2-3b (vLLM downloads a hub id into the HF cache).
+MODEL_PATH: "ibm-granite/granite-4.2-3b"
+SERVED_MODEL_NAME: ""
+RUN_NAME: "granite-4.2-3b"
+OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
+
+# ─── Images (GPU generate + CPU score) ────────────────────────────────────
+IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-tau:3ef3758"
+IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-tau-cpu:3ef3758"
+
+# ─── Scale ────────────────────────────────────────────────────────────
+LIMIT: "5"
+REPEATS: ""
+WORKERS: 16
+OPTIONS: ""
+TENSOR_PARALLEL_SIZE: 1
+
+# ─── Judge (paid; key from the GRANITE_EVALS_JUDGE_API_KEY secret) ──────
+# OpenAI-compatible endpoint of the judge gateway. No default; set it for your site.
+JUDGE_BASE_URL: ""
+
+# ─── Cluster ──────────────────────────────────────────────────────────
+ENVIRONMENT_URI: "space://environments/skypilot/slurm/ibm-bluevela"
+CLUSTER: "bluevela"
+QUEUE: "gpu-mid"
+GPU_MEMORY: 256
+CPU_QUEUE: "cpu"
+SCORE_CPUS: 8
+SCORE_MEMORY: 64
+MAX_RETRIES: 2
+POLL_INTERVAL_SECONDS: 300
+LOG_RETRIEVAL_INTERVAL_SECONDS: 300

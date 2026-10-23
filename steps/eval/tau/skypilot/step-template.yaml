@@ -17,11 +17,10 @@ version: 0.1.0
 # (recipes/granite-evals/...) choose which benchmarks a model family is scored on
 # and set `benchmark` per target.
 #
-# THE CODE LIVES OUTSIDE THIS REPO. The benchmark runtime is the granite-evals project
-# (github.com/laminair/granite-evals), shipped as a prebuilt image per benchmark family
-# and pinned below by tag. Nothing is built from this directory, so there is no
-# Dockerfile and common.mk treats it as a non-image step; the image is chosen at run
-# time from granite_config.image, the byoc way.
+# THE CODE LIVES IN THIS REPO. The benchmark runtime is vendored under steps/eval/src
+# (core + this family's modules) and baked into the family's image by
+# steps/eval/images/{gpu,cpu}/Dockerfile.tau; see steps/eval/Makefile. The image is
+# chosen at run time from granite_config.image. Nothing is cloned or mounted at launch.
 #
 # WHAT RUNS. `granite-evals run <benchmark>` serves model_path with vLLM inside the job;
 # the served model is the tool-calling agent, an LLM user simulator plays the
@@ -30,7 +29,7 @@ version: 0.1.0
 # (schema: granite_evals/results.py).
 #
 # PAID APIS. The user simulator (and retail's NL-assertion judge) default to
-# aws/claude-sonnet-5 on the IBM LiteLLM gateway, keyed by $GRANITE_EVALS_USER_API_KEY /
+# aws/claude-sonnet-5 on a LiteLLM gateway, keyed by $GRANITE_EVALS_USER_API_KEY /
 # $GRANITE_EVALS_JUDGE_API_KEY in the job env; every call is metered against
 # $GRANITE_EVALS_SPEND_LEDGER / $GRANITE_EVALS_SPEND_BUDGET_USD. `user_model=self judge_model=self`
 # uses the served model instead (smoke runs, no key).
@@ -46,8 +45,8 @@ config:
     # The benchmark id passed to `granite-evals run`. Required, e.g. "tau3-airline".
     # See `granite-evals list` for this family's benchmark ids.
     benchmark: ""
-    # The granite-evals image for this benchmark family (`make image EXTRA=tau` in
-    # granite-evals), pinned by its commit tag; results.json records the versions inside.
+    # The granite-evals image for this benchmark family (`make image-tau` in
+    # steps/eval), pinned by its tag; results.json records the versions inside.
     # Recipes set it once, as the GRANITE_EVALS_IMAGE_TAU parameter.
     image: ""
     # The checkpoint to score, as a LOCAL PATH (normally a distill-hf-export `hf_model`

@@ -28,11 +28,10 @@ version: 0.1.0
 # (recipes/granite-evals/...) choose which benchmarks a model family is scored on
 # and set `benchmark` per target.
 #
-# THE CODE LIVES OUTSIDE THIS REPO. The benchmark runtime is the granite-evals project
-# (github.com/laminair/granite-evals), shipped as a prebuilt image per benchmark family
-# and pinned below by tag. Nothing is built from this directory, so there is no
-# Dockerfile and common.mk treats it as a non-image step; the image is chosen at run
-# time from granite_config.image, the byoc way.
+# THE CODE LIVES IN THIS REPO. The benchmark runtime is vendored under steps/eval/src
+# (core + this family's modules) and baked into the family's image by
+# steps/eval/images/{gpu,cpu}/Dockerfile.nemoskills; see steps/eval/Makefile. The image is
+# chosen at run time from granite_config.image. Nothing is cloned or mounted at launch.
 #
 # WHAT RUNS. `granite-evals run <benchmark>` serves model_path with vLLM inside the
 # job and runs NVIDIA NeMo-Skills' own pipeline for that benchmark against it, locally
@@ -42,7 +41,7 @@ version: 0.1.0
 #
 # THE JUDGE, for the judged benchmarks in this family (aa-lcr, browsecomp, hle,
 # hle-tools, omniscience, omniscience-hallucination), is a paid OpenAI-compatible
-# endpoint (default aws/claude-sonnet-5 on IBM LiteLLM). Its key must reach the score
+# endpoint (model aws/claude-sonnet-5; the gateway URL has no default: pass options "judge_base_url=<OpenAI-compatible endpoint>"). Its key must reach the score
 # job as $GRANITE_EVALS_JUDGE_API_KEY. Judge calls go through granite-evals' spend
 # meter ($GRANITE_EVALS_SPEND_LEDGER / $GRANITE_EVALS_SPEND_BUDGET_USD, if set); a 402
 # stops the run. The rest of this family grades symbolically (no judge, no spend).
@@ -58,8 +57,8 @@ config:
     # The benchmark id passed to `granite-evals run`. Required, e.g. "gpqa".
     # See `granite-evals list` for this family's benchmark ids.
     benchmark: ""
-    # The granite-evals image for this benchmark family (`make image EXTRA=nemoskills` in
-    # granite-evals), pinned by its commit tag; results.json records the versions inside.
+    # The granite-evals image for this benchmark family (`make image-nemoskills` in
+    # steps/eval), pinned by its tag; results.json records the versions inside.
     # Recipes set it once, as the GRANITE_EVALS_IMAGE_NEMOSKILLS parameter.
     image: ""
     # The checkpoint to score, as a LOCAL PATH (normally a distill-hf-export `hf_model`
