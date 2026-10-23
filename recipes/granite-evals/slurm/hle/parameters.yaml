@@ -12,6 +12,8 @@ MODEL_PATH: "ibm-granite/granite-4.2-3b"
 SERVED_MODEL_NAME: ""
 RUN_NAME: "granite-4.2-3b"
 OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
+# HF cache the container reads and writes (model + datasets). Empty = the image's /opt/hf-cache.
+HF_HOME: ""
 
 # ─── Images (GPU generate + CPU score) ────────────────────────────────────
 IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-nemoskills:1280c95"

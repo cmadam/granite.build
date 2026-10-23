@@ -28,6 +28,7 @@ granite.build:
               options: "$${OPTIONS}"
               phase: "all"
               tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+              hf_home: "$${HF_HOME}"
               sandbox_cache: "$${SANDBOX_CACHE}"
             launcher_config:
               resources:
