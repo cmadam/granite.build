@@ -28,6 +28,7 @@ granite.build:
               options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL} search_mcp_url=$${SEARCH_MCP_URL}"
               phase: "generate"
               tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+              hf_home: "$${HF_HOME}"
               sandbox_cache: "$${SANDBOX_CACHE}"
             skypilot:
               secrets:
@@ -65,6 +66,7 @@ granite.build:
               options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL} search_mcp_url=$${SEARCH_MCP_URL}"
               phase: "score"
               tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+              hf_home: "$${HF_HOME}"
               sandbox_cache: "$${SANDBOX_CACHE}"
             skypilot:
               secrets:

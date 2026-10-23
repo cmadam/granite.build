@@ -9,11 +9,10 @@ version: 0.1.0
 # (recipes/granite-evals/...) choose which benchmarks a model family is scored on
 # and set `benchmark` per target.
 #
-# THE CODE LIVES OUTSIDE THIS REPO. The benchmark runtime is the granite-evals project
-# (github.com/laminair/granite-evals), shipped as a prebuilt image per benchmark family
-# and pinned below by tag. Nothing is built from this directory, so there is no
-# Dockerfile and common.mk treats it as a non-image step; the image is chosen at run
-# time from granite_config.image, the byoc way.
+# THE CODE LIVES IN THIS REPO. The benchmark runtime is vendored under steps/eval/src
+# (core + this family's modules) and baked into the family's image by
+# steps/eval/images/{gpu,cpu}/Dockerfile.tbench; see steps/eval/Makefile. The image is
+# chosen at run time from granite_config.image. Nothing is cloned or mounted at launch.
 #
 # WHAT RUNS. `granite-evals run terminal-bench-2.1` serves model_path with vLLM inside the
 # job and runs each task as a harbor trial: the Terminus 2 agent drives the model in an
@@ -30,8 +29,8 @@ config:
     # The benchmark id passed to `granite-evals run`. Required, e.g. "terminal-bench-2.1".
     # See `granite-evals list` for this family's benchmark ids.
     benchmark: ""
-    # The granite-evals image for this benchmark family (`make image EXTRA=tbench` in
-    # granite-evals), pinned by its commit tag; results.json records the versions inside.
+    # The granite-evals image for this benchmark family (`make image-tbench` in
+    # steps/eval), pinned by its tag; results.json records the versions inside.
     # Recipes set it once, as the GRANITE_EVALS_IMAGE_TBENCH parameter.
     image: ""
     # The checkpoint to score, as a LOCAL PATH (normally a distill-hf-export `hf_model`
@@ -97,6 +96,11 @@ environment_configs:
             nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
             # vLLM refuses to start inside an initialised torch.distributed env.
             unset RANK WORLD_SIZE LOCAL_RANK MASTER_ADDR MASTER_PORT
+            # SLURM's pyxis/enroot injects the NVIDIA driver libraries at launch, after the image
+            # is built, so the image's ld.so cache has no libcuda.so and Triton/torch.compile
+            # fail with "libcuda.so cannot found!". Refreshing the cache is a per-step runtime
+            # job (no image can do it; pyxis bypasses ENTRYPOINT). Harmless where it is not needed.
+            ldconfig 2>/dev/null || true
             # The image's ENV PATH can be lost on BlueVela: the LSF provider flattens
             # enroot's layers in reverse order, so enroot's layer 0 (/etc/environment)
             # ends up under the base image's. The venv path is fixed by the image.
