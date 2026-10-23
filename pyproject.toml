@@ -253,7 +253,7 @@ known_third_party = ["huggingface_hub", "wandb"]
 # The vendored autotunex/ subtree uses ruff (format + import sorting) and has its
 # own CI (.github/workflows/autotunex-ci.yml); keep the repo-wide isort profile off
 # it (AutoTuneX import, PR #297).
-extend_skip_glob = ["autotunex/*"]
+extend_skip_glob = ["autotunex/*", "steps/eval/src/*"]
 
 [tool.black]
 target-version = ["py311"]
@@ -261,6 +261,7 @@ target-version = ["py311"]
 # its ruff-formatted (line-length 100) tree is not reflowed (AutoTuneX PR #297).
 extend-exclude = '''
 /autotunex/
+|/steps/eval/src/
 '''
 
 [tool.pytest.ini_options]
