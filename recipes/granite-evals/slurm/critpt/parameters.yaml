@@ -1,0 +1,37 @@
+# critpt on BlueVela (SkyPilot / SLURM), nemoskills family image.
+# Data: https://huggingface.co/datasets/CritPt-Benchmark/CritPt @ 9b9fc8498596ec08ab5437a72f4aa18beef2b876
+# (pinned in the image's code; fetch it into the HF cache with `make -C steps/eval prefetch HF_HOME=<cache>`).
+#
+# SMOKE DEFAULTS: LIMIT is small so a first run finishes quickly. Set LIMIT to "" for the full benchmark:
+#   gb build start -f recipes/granite-evals/slurm/critpt/build.yaml --space <space> --param LIMIT=
+# Override any value with --param KEY=VALUE.
+
+# ─── Model ────────────────────────────────────────────────────────────
+# https://huggingface.co/ibm-granite/granite-4.2-3b (vLLM downloads a hub id into the HF cache).
+MODEL_PATH: "ibm-granite/granite-4.2-3b"
+SERVED_MODEL_NAME: ""
+RUN_NAME: "granite-4.2-3b"
+OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
+
+# ─── Images (GPU generate + CPU score) ────────────────────────────────────
+IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-nemoskills:3ef3758"
+IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-nemoskills-cpu:3ef3758"
+
+# ─── Scale ────────────────────────────────────────────────────────────
+LIMIT: "5"
+REPEATS: ""
+WORKERS: 32
+OPTIONS: ""
+TENSOR_PARALLEL_SIZE: 1
+
+# ─── Cluster ──────────────────────────────────────────────────────────
+ENVIRONMENT_URI: "space://environments/skypilot/slurm/ibm-bluevela"
+CLUSTER: "bluevela"
+QUEUE: "gpu-mid"
+GPU_MEMORY: 256
+CPU_QUEUE: "cpu"
+SCORE_CPUS: 8
+SCORE_MEMORY: 64
+MAX_RETRIES: 2
+POLL_INTERVAL_SECONDS: 300
+LOG_RETRIEVAL_INTERVAL_SECONDS: 300
