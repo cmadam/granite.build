@@ -24,6 +24,12 @@ from granite_evals.registry import RunConfig, get  # noqa: E402
 
 # -- fakes ------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _placeholder_judge_endpoint(monkeypatch):
+    """The module has no built-in judge URL (sites pass judge_base_url); tests that take the default path need one."""
+    monkeypatch.setattr(jg, "DEFAULT_JUDGE_BASE_URL", "https://judge.example.test/v1")
+
+
 
 class Usage:
     def __init__(self, prompt=100, completion=5, cached=0, cache_write=0):
