@@ -70,7 +70,9 @@ def test_run_script_is_valid_bash(run_script, strip_optional):
     script = run_script
     if strip_optional:
         script = re.sub(r"\{%\s*if.*?%\}.*?\{%\s*endif\s*%\}", "", script, flags=re.S)
-    result = subprocess.run(["bash", "-n"], input=_as_shell(script), capture_output=True, text=True)
+    result = subprocess.run(
+        ["bash", "-n"], input=_as_shell(script), capture_output=True, text=True
+    )
     assert result.returncode == 0, result.stderr
 
 
@@ -90,9 +92,15 @@ def test_outputs_match_markers(step, run_script):
     # results.json (phase all/score) and generation.json (phase generate); which one a
     # run emits depends on the phase, so both are optional.
     assert step["outputs"] == {
-        "optional": {"granite_results": {"type": "dataset"}, "granite_generation": {"type": "dataset"}}
+        "optional": {
+            "granite_results": {"type": "dataset"},
+            "granite_generation": {"type": "dataset"},
+        }
     }
-    assert set(re.findall(r"GB_ARTIFACT_ID:(\w+)", run_script)) == {"granite_results", "granite_generation"}
+    assert set(re.findall(r"GB_ARTIFACT_ID:(\w+)", run_script)) == {
+        "granite_results",
+        "granite_generation",
+    }
     assert run_script.count("GB_ARTIFACT_PATH:${RESULT_FILE}") == 2
     assert 'RESULT_FILE="$OUTPUT_DIR/generation.json"' in run_script
 
@@ -106,7 +114,10 @@ def test_monitor_honours_recipe_poll_keys(step):
     mon = step["environment_configs"]["Skypilot"]["monitors"]["skypilot_monitor"]
     assert mon["ref"] == "space://monitors/skypilot"
     assert "config.poll_interval_seconds" in mon["config"]["poll_interval_seconds"]
-    assert "config.log_retrieval_interval_seconds" in mon["config"]["log_retrieval"]["interval_seconds"]
+    assert (
+        "config.log_retrieval_interval_seconds"
+        in mon["config"]["log_retrieval"]["interval_seconds"]
+    )
 
 
 def test_monitor_regex_is_keyed_on_the_configured_benchmark(step):
@@ -125,4 +136,6 @@ def test_every_config_key_reaches_the_script(step, run_script):
 
 def test_siblings_share_one_config_contract(step):
     reference = _load(_HERE / "step-template.yaml")
-    assert set(step["config"]["granite_config"]) == set(reference["config"]["granite_config"])
+    assert set(step["config"]["granite_config"]) == set(
+        reference["config"]["granite_config"]
+    )
