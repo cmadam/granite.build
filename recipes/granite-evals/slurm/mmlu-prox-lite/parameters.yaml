@@ -2,8 +2,9 @@
 # Data: https://huggingface.co/datasets/li-lab/MMLU-ProX-Lite @ e82aafb9460529687d3c7e51b401d8dd1dd309dd
 # (pinned in the image's code; fetch it into the HF cache with `make -C steps/eval prefetch HF_HOME=<cache>`).
 #
-# SMOKE DEFAULTS: LIMIT is small so a first run finishes quickly. Set LIMIT to "" for the full benchmark:
-#   gb build start -f recipes/granite-evals/slurm/mmlu-prox-lite/build.yaml --space <space> --param LIMIT=
+# LIMIT is empty: the full benchmark. For a quick functional check, score only the first N
+# examples (3-10 is enough to prove the plumbing):
+#   gb build start -f recipes/granite-evals/slurm/mmlu-prox-lite/build.yaml --space <space> --param LIMIT=5
 # Override any value with --param KEY=VALUE.
 
 # ─── Model ────────────────────────────────────────────────────────────
@@ -16,11 +17,11 @@ OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
 HF_HOME: ""
 
 # ─── Images (GPU only) ────────────────────────────────────
-IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-lmeval:1280c95"
-IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-lmeval-cpu:1280c95"
+IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-lmeval:5a6fc8c"
+IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-lmeval-cpu:5a6fc8c"
 
 # ─── Scale ────────────────────────────────────────────────────────────
-LIMIT: "5"
+LIMIT: ""
 REPEATS: ""
 WORKERS: 128
 OPTIONS: ""
