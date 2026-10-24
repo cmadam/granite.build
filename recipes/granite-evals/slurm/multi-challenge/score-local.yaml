@@ -39,7 +39,7 @@ granite.build:
                 rm -f "$OUT"/results*.json;
                 test -d "$OUT/items" || { echo "granite: no items/ next to $GEN"; exit 1; };
                 MODEL=$(jq -r .model "$OUT/generation.json");
-                LIMIT_ARGS=$(jq -r '(if .limit then "--limit \(.limit) " else "" end) + "--repeats \(.repeats)"' "$OUT/generation.json");
+                LIMIT_ARGS=$(jq -r '[(if .limit then "--limit \(.limit)" else empty end), (if .repeats then "--repeats \(.repeats)" else empty end)] | join(" ")' "$OUT/generation.json");
                 OPTS=(); for kv in $${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}<% if JUDGE_MODEL %> judge_model=$${JUDGE_MODEL}<% endif %><% if JUDGE_TAG %> judge_tag=$${JUDGE_TAG}<% endif %>; do OPTS+=(--option "$kv"); done;
                 echo "granite: scoring $MODEL $LIMIT_ARGS from $GEN";
                 granite-evals run multi-challenge --model "$MODEL" --output-dir "$OUT" --phase score $LIMIT_ARGS

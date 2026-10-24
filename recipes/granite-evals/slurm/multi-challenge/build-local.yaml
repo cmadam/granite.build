@@ -101,7 +101,7 @@ granite.build:
                 GEN="{{ bindings.generation.binding.path }}"; cp -r "${GEN%/*}/." "$OUT/";
                 OPTS=(); for kv in $${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}<% if JUDGE_MODEL %> judge_model=$${JUDGE_MODEL}<% endif %>; do OPTS+=(--option "$kv"); done;
                 granite-evals run multi-challenge --model "$${MODEL_PATH}" --output-dir "$OUT" --phase score
-                <% if SERVED_MODEL_NAME %>--served-model-name "$${SERVED_MODEL_NAME}" <% endif %><% if LIMIT %>--limit $${LIMIT} <% endif %><% if REPEATS %>--repeats $${REPEATS}<% endif %>
-                --workers $${WORKERS} "${OPTS[@]}" 2>&1 | tee "$OUT/granite.log";
+                --workers $${WORKERS}<% if SERVED_MODEL_NAME %> --served-model-name "$${SERVED_MODEL_NAME}"<% endif %><% if LIMIT %> --limit $${LIMIT}<% endif %><% if REPEATS %> --repeats $${REPEATS}<% endif %>
+                "${OPTS[@]}" 2>&1 | tee "$OUT/granite.log";
                 test -s "$OUT/results.json" || { echo "granite: no $OUT/results.json"; exit 1; };
                 echo "GB_ARTIFACT_ID:granite_results GB_ARTIFACT_PATH:$OUT/results.json"

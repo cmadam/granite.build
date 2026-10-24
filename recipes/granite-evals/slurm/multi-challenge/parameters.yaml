@@ -29,7 +29,7 @@ TENSOR_PARALLEL_SIZE: 1
 # ─── Judge (paid; key from the GRANITE_EVALS_JUDGE_API_KEY secret) ──────
 # OpenAI-compatible endpoint of the judge gateway. No default; set it for your site.
 JUDGE_BASE_URL: ""
-# build-local.yaml only: the judge model on that gateway. Empty = granite-evals' default judge.
+# build-local.yaml and score-local.yaml: the judge model on that gateway. Empty = granite-evals' default judge.
 JUDGE_MODEL: ""
 
 # ─── Cluster ──────────────────────────────────────────────────────────
@@ -45,8 +45,8 @@ POLL_INTERVAL_SECONDS: 300
 LOG_RETRIEVAL_INTERVAL_SECONDS: 300
 
 # ─── Local scoring (build-local.yaml only) ────────────────────────────
-# build-local.yaml generates on BlueVela as above, then copies generation.json to the gbserver
-# host and scores it there in IMAGE_CPU (local Docker), for a judge BlueVela cannot reach. E.g.:
+# build-local.yaml generates on BlueVela as above, then copies the output dir (generation.json and
+# items/) to the gbserver host and scores it there in IMAGE_CPU (local Docker), for a judge BlueVela cannot reach. E.g.:
 #   gb build start -f recipes/granite-evals/slurm/multi-challenge/build-local.yaml --space <space> \
 #     --param JUDGE_BASE_URL=https://litellm.cb.ete.res.ibm.com/v1 \
 #     --param JUDGE_MODEL=rits/deepseek-ai/DeepSeek-V4.1-Flash-1017 --param LIMIT=5
