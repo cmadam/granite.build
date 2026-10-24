@@ -133,7 +133,10 @@ and translates it to Docker container limits:
   path another target left on this host) are bind-mounted read-only under `/gb-env-inputs/<n>` (a
   file's parent directory, or the directory itself), and the binding is the in-container path. The
   mount source is always the input's host path, including an `env://` output an earlier Docker
-  target wrote in its own workspace.
+  target wrote in its own workspace. Because a file input mounts its **whole parent directory**
+  (so the step can read the file's siblings), an input whose mount source would be `/` or the
+  gbserver user's home directory is refused with an error: put the input in its own directory
+  (e.g. `~/run1/generation.json`, not `~/generation.json`).
 - **Workspace.** Each launch's own asset directory is bind-mounted at `/gb-workspace` (read-write)
   in that launch's container only; write outputs there.
 - **Outputs.** Register artifacts with the standard `GB_ARTIFACT_ID:<id> GB_ARTIFACT_PATH:<path>`

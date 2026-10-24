@@ -521,7 +521,13 @@ class Docker(Environment):
         directory already in ``_extra_volumes`` (e.g. mounted for another input)
         is reused, not mounted twice.
 
+        A file's whole parent directory is mounted so that steps can read its
+        siblings. To keep that scope bounded, an input whose mount source is
+        ``/`` or the gbserver user's home directory (both resolved) is refused:
+        it would expose e.g. ``~/.ssh`` to a container that may hold secrets.
+
         :raises FileNotFoundError: the host path does not exist.
+        :raises ValueError: the mount source is ``/`` or the home directory.
         """
         from gbserver.environment.environment import BINDING_KEY
 
@@ -533,6 +539,12 @@ class Docker(Environment):
             raise FileNotFoundError(f"env:// input {uri} not found at {host}")
         is_dir = host.is_dir()
         mount_src = host if is_dir else host.parent
+        resolved = mount_src.resolve()
+        if resolved == Path("/") or resolved == Path.home().resolve():
+            raise ValueError(
+                f"env:// input {uri} would mount {resolved} into the container; "
+                "put the input in its own directory"
+            )
         volume = self._extra_volumes.get(str(mount_src))
         if volume is None:
             n = sum(
