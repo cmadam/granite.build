@@ -101,11 +101,26 @@ async def test_distinct_inputs_get_distinct_mounts_shared_parent_reused(
 
 
 @pytest.mark.asyncio
-async def test_reuses_mount_registered_by_another_mechanism(docker_env, tmp_path):
+async def test_reuses_existing_read_only_mount(docker_env, tmp_path):
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "config.json").write_text("{}")
+    docker_env._extra_volumes[str(snap)] = {
+        "bind": "/gb-hf-models/org/repo",
+        "mode": "ro",
+    }
+    binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(snap / "config.json"))
+    assert binding[BINDING_KEY]["path"] == "/gb-hf-models/org/repo/config.json"
+    assert len(docker_env._extra_volumes) == 1
+
+
+@pytest.mark.asyncio
+async def test_input_in_workspace_mount_raises(docker_env, tmp_path):
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "gen.json").write_text("{}")
-    docker_env._extra_volumes[str(ws)] = {"bind": "/gb-workspace", "mode": "rw"}
-    binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(ws / "gen.json"))
-    assert binding[BINDING_KEY]["path"] == "/gb-workspace/gen.json"
-    assert len(docker_env._extra_volumes) == 1
+    rw = {"bind": "/gb-workspace", "mode": "rw"}
+    docker_env._extra_volumes[str(ws)] = dict(rw)
+    with pytest.raises(ValueError, match="Docker workspace dir"):
+        await docker_env.pullasset_envstore(uri=_env_uri(ws / "gen.json"))
+    assert docker_env._extra_volumes == {str(ws): rw}
