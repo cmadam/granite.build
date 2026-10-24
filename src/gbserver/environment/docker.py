@@ -445,9 +445,13 @@ class Docker(Environment):
         cannot see. Mount the path (a file's parent directory, or the
         directory itself) under ``/gb-env-inputs/<n>`` and return the
         container-side path as the binding. A directory already registered in
-        ``_extra_volumes`` (e.g. by another input) is reused, not mounted twice.
+        ``_extra_volumes`` as a read-only mount (e.g. by another input) is
+        reused, not mounted twice. A directory registered read-write is a
+        per-launch ``/gb-workspace`` mount, whose container path changes with
+        every launch, so it is never reused.
 
         :raises FileNotFoundError: the host path does not exist.
+        :raises ValueError: the host path lies in a read-write (workspace) mount.
         """
         from gbserver.environment.environment import BINDING_KEY
 
@@ -460,6 +464,11 @@ class Docker(Environment):
         is_dir = host.is_dir()
         mount_src = host if is_dir else host.parent
         volume = self._extra_volumes.get(str(mount_src))
+        if volume is not None and volume.get("mode") != "ro":
+            raise ValueError(
+                f"env:// input {uri} lies in a Docker workspace dir ({mount_src}); "
+                "bind it through a non-Docker producer or a file:// output"
+            )
         if volume is None:
             n = sum(
                 1
