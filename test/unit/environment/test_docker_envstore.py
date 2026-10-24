@@ -256,3 +256,55 @@ async def test_launch_records_workspace_by_targetsteprun(docker_env, tmp_path):
     await docker_env.cleanup_docker(launch_id="launchid123")
     # Survives cleanup so a push that races teardown still resolves.
     assert docker_env._workspaces_by_targetsteprun == {"tsrB": str(tmp_path / "wsB")}
+
+
+# ---------------------------------------------------------------------------
+# Per-launch workspace mounts: one instance serves every Docker target.
+# ---------------------------------------------------------------------------
+
+
+def _mock_launch_env(docker_env):
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    docker_env._get_docker = MagicMock(return_value=(MagicMock(), client))
+    docker_env._resolve_image = MagicMock(return_value="img:latest")
+    docker_env._pull_image = MagicMock()
+    docker_env._release_monitors = MagicMock()
+    docker_env.get_launch_env_vars = MagicMock(return_value={})
+    return client
+
+
+async def _launch(docker_env, launch_id, ws, tsr_id):
+    await docker_env.launch_docker(
+        launch_id=launch_id,
+        targetsteprun_asset_dir=ws,
+        config={},
+        launcher_config={"command": "true"},
+        step={"name": "s"},
+        run_metadata={"targetsteprun_id": tsr_id},
+    )
+
+
+def _workspace_binds(volumes):
+    return {h: v for h, v in volumes.items() if v["bind"] == "/gb-workspace"}
+
+
+@pytest.mark.asyncio
+async def test_second_launch_mounts_only_its_own_workspace(docker_env, tmp_path):
+    client = _mock_launch_env(docker_env)
+    ro = {str(tmp_path / "hf"): {"bind": "/gb-hf-models/x", "mode": "ro"}}
+    docker_env._extra_volumes.update(ro)
+    await _launch(docker_env, "launchAAAA", tmp_path / "wsA", "tsrA")
+    await _launch(docker_env, "launchBBBB", tmp_path / "wsB", "tsrB")
+    vols_a = client.containers.run.call_args_list[0].kwargs["volumes"]
+    vols_b = client.containers.run.call_args_list[1].kwargs["volumes"]
+    assert _workspace_binds(vols_a) == {
+        str(tmp_path / "wsA"): {"bind": "/gb-workspace", "mode": "rw"}
+    }
+    assert _workspace_binds(vols_b) == {
+        str(tmp_path / "wsB"): {"bind": "/gb-workspace", "mode": "rw"}
+    }
+    # Shared read-only mounts reach every container; launches never add to them.
+    assert vols_b[str(tmp_path / "hf")] == ro[str(tmp_path / "hf")]
+    assert docker_env._extra_volumes == ro
