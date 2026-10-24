@@ -308,3 +308,47 @@ async def test_second_launch_mounts_only_its_own_workspace(docker_env, tmp_path)
     # Shared read-only mounts reach every container; launches never add to them.
     assert vols_b[str(tmp_path / "hf")] == ro[str(tmp_path / "hf")]
     assert docker_env._extra_volumes == ro
+
+
+# ---------------------------------------------------------------------------
+# file:// outputs copy from the producing launch's workspace.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_push_copies_from_producing_launch(docker_env, tmp_path):
+    _mock_launch_env(docker_env)
+    for name in ("wsA", "wsB"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "r.txt").write_text(name)
+    await _launch(docker_env, "launchBBBB", tmp_path / "wsB", "tsrB")
+    await _launch(docker_env, "launchAAAA", tmp_path / "wsA", "tsrA")
+    dest = tmp_path / "out" / "r.txt"
+    dest.parent.mkdir()
+    await docker_env.pushasset_filestore(
+        binding={"path": "/gb-workspace/r.txt"},
+        uri=f"file://{dest}",
+        run_metadata=EntityRunMetadata(targetsteprun_id="tsrB"),
+    )
+    assert dest.read_text() == "wsB"
+
+
+@pytest.mark.asyncio
+async def test_file_push_unknown_launch_raises(docker_env, tmp_path):
+    with pytest.raises(LookupError, match="nope"):
+        await docker_env.pushasset_filestore(
+            binding={"path": "/gb-workspace/r.txt"},
+            uri=f"file://{tmp_path}/r.txt",
+            run_metadata=EntityRunMetadata(targetsteprun_id="nope"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_file_push_host_path_unchanged(docker_env, tmp_path):
+    src = tmp_path / "src.txt"
+    src.write_text("host")
+    dest = tmp_path / "dest.txt"
+    await docker_env.pushasset_filestore(
+        binding={"path": str(src)}, uri=f"file://{dest}"
+    )
+    assert dest.read_text() == "host"

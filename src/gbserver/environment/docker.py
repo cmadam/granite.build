@@ -1080,14 +1080,18 @@ class Docker(Environment):
         binding: Any,
         uri: Optional[Any] = None,
         storepush_config=None,
+        run_metadata: Optional[EntityRunMetadata] = None,
         **kwargs,
     ) -> Any:
         """Push an artifact from a Docker container workspace to a file URI.
 
-        The artifact was written inside the container at /gb-workspace/...
-        which is bind-mounted to the host workspace directory. This method
-        translates the container path to the host path and copies to the
-        output URI location.
+        The artifact was written inside the container at /gb-workspace/...,
+        which is bind-mounted to the producing launch's host workspace. The
+        container path is translated to that host path (see :meth:`_host_path`)
+        and copied to the output URI location. A host path is copied as is.
+
+        :raises LookupError: a ``/gb-workspace`` path whose producing launch
+            (``run_metadata.targetsteprun_id``) is unknown.
         """
         self._warn_non_default_mode(storepush_config, uri)
         if uri is None:
@@ -1099,20 +1103,7 @@ class Docker(Environment):
         else:
             source_path = str(binding)
 
-        # Translate container path (/gb-workspace/...) to host path
-        if source_path.startswith("/gb-workspace"):
-            workspace_dir = None
-            for _lid, wdir in self._launched_workspaces.items():
-                workspace_dir = wdir
-            if workspace_dir is None:
-                logger.warning(
-                    "No workspace mapping found for Docker pushasset, path=%s",
-                    source_path,
-                )
-                return uri
-            host_path = source_path.replace("/gb-workspace", workspace_dir, 1)
-        else:
-            host_path = source_path
+        host_path = self._host_path(source_path, run_metadata)
 
         uriobj = uri
         if isinstance(uri, str):
