@@ -54,3 +54,17 @@ LOG_RETRIEVAL_INTERVAL_SECONDS: 300
 SCORE_REMOTE_HOST: "bluevela"
 # ssh config for SCORE_REMOTE_HOST, relative to the gbserver user's home (the step gets no HOME).
 SCORE_SSH_CONFIG: ".lsf/config"
+
+# ─── Re-scoring (score-local.yaml only) ───────────────────────────────
+# score-local.yaml re-scores existing outputs on the gbserver host, e.g. to compare judges:
+#   gb build start -f recipes/granite-evals/slurm/multi-challenge/score-local.yaml --space <space> \
+#     --param GENERATION_PATH=<abs path>/multi-challenge/generation.json \
+#     --param JUDGE_BASE_URL=https://litellm.cb.ete.res.ibm.com/v1 \
+#     --param JUDGE_MODEL=rits/zai-org/glm-5-3 --param JUDGE_TAG=glm-5-3
+# A build-local.yaml run leaves its outputs under ~/.granite.build/workdir/llm-build-<build id>/
+# target-multi-challenge-fetch/.../outputs/multi-challenge/. Model, limit and repeats come from
+# generation.json.
+# Absolute path of a generation.json with items/ beside it. Required by score-local.yaml.
+GENERATION_PATH: ""
+# Tags this judge's grades and results (judgment-<tag>.json, results-<tag>.json). Empty = untagged.
+JUDGE_TAG: ""
