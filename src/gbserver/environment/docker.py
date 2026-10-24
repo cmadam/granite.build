@@ -428,6 +428,55 @@ class Docker(Environment):
         binding_config = {BINDING_KEY: {"path": container_path}}
         return binding_config, None
 
+    # ------------------------------------------------------------------
+    # pullasset_envstore
+    # ------------------------------------------------------------------
+
+    async def pullasset_envstore(
+        self: Self,
+        uri: Optional[Any] = None,
+        binding: Optional[Any] = None,
+        storeload_config=None,
+        **kwargs,
+    ) -> Tuple[Dict, None]:
+        """Bind-mount an ``env://`` host path into the container, read-only.
+
+        The base pull is a no-op that returns the host path, which a container
+        cannot see. Mount the path (a file's parent directory, or the
+        directory itself) under ``/gb-env-inputs/<n>`` and return the
+        container-side path as the binding. A directory already registered in
+        ``_extra_volumes`` (e.g. by another input) is reused, not mounted twice.
+
+        :raises FileNotFoundError: the host path does not exist.
+        """
+        from gbserver.environment.environment import BINDING_KEY
+
+        binding_config, _ = await super().pullasset_envstore(
+            uri=uri, binding=binding, storeload_config=storeload_config, **kwargs
+        )
+        host = Path(binding_config[BINDING_KEY]["path"])
+        if not host.exists():
+            raise FileNotFoundError(f"env:// input {uri} not found at {host}")
+        is_dir = host.is_dir()
+        mount_src = host if is_dir else host.parent
+        volume = self._extra_volumes.get(str(mount_src))
+        if volume is None:
+            n = sum(
+                1
+                for v in self._extra_volumes.values()
+                if v["bind"].startswith("/gb-env-inputs/")
+            )
+            volume = {"bind": f"/gb-env-inputs/{n}", "mode": "ro"}
+            self._extra_volumes[str(mount_src)] = volume
+        container = volume["bind"] if is_dir else f"{volume['bind']}/{host.name}"
+        logger.info(
+            "pullasset_envstore: mounted %s at %s (container path %s)",
+            mount_src,
+            volume["bind"],
+            container,
+        )
+        return {BINDING_KEY: {"path": container}}, None
+
     @staticmethod
     def _get_hf_cache_dir(storeload_config) -> str:
         """Resolve HF model cache directory from config or default."""
