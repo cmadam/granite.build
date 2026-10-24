@@ -14,14 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Docker env:// input: bind-mounted read-only, binding rewritten to the container path."""
+"""Docker env:// assets: inputs bind-mounted read-only; outputs registered at host paths."""
 
 import asyncio
+import logging
 
 import pytest
 
+from gbcommon.uri.uri import URI
 from gbserver.environment.docker import Docker
-from gbserver.environment.environment import BINDING_KEY
+from gbserver.environment.environment import BINDING_KEY, Environment
+from gbserver.types.buildevent import EntityRunMetadata
 
 
 @pytest.fixture
@@ -124,3 +127,132 @@ async def test_input_in_workspace_mount_raises(docker_env, tmp_path):
     with pytest.raises(ValueError, match="Docker workspace dir"):
         await docker_env.pullasset_envstore(uri=_env_uri(ws / "gen.json"))
     assert docker_env._extra_volumes == {str(ws): rw}
+
+
+# ---------------------------------------------------------------------------
+# env:// outputs: a /gb-workspace binding is registered at its host path.
+# ---------------------------------------------------------------------------
+
+_RESULTS = "/gb-workspace/outputs/x/results.json"
+
+
+def _push_env(docker_env):
+    """Route every URI to a minimal store of the URI's own scheme."""
+    from types import SimpleNamespace
+
+    def _storeconfig(uri, **kw):
+        scheme = URI.get_uristr(uri).split("://", 1)[0]
+        return (
+            SimpleNamespace(type=f"{scheme}store", get_secrets=lambda: {}),
+            SimpleNamespace(push=None),
+        )
+
+    docker_env._get_storeconfig = _storeconfig
+    Environment._thread_local.asset_events = {}
+    return docker_env
+
+
+def _register_launch(docker_env, tsr_id, ws):
+    docker_env._workspaces_by_targetsteprun[tsr_id] = str(ws)
+
+
+async def _push(docker_env, binding, uristr="env://{{ binding.path }}", tsr="tsrB"):
+    task = docker_env.pushasset(
+        task_group=None,  # type: ignore[arg-type]
+        binding=binding,
+        uristr=uristr,
+        binding_id="granite_results",
+        run_metadata=EntityRunMetadata(targetsteprun_id=tsr),
+    )
+    uri = await task
+    events = []
+    while not docker_env.event_q.empty():
+        events.append(docker_env.event_q.get_nowait())
+    return URI.get_uristr(uri), events
+
+
+@pytest.mark.asyncio
+async def test_env_output_in_workspace_registers_host_path(docker_env, tmp_path):
+    env = _push_env(docker_env)
+    _register_launch(env, "tsrB", tmp_path / "wsB")
+    binding = {"path": _RESULTS}
+    uristr, events = await _push(env, binding)
+    expected = f"env://{tmp_path}/wsB/outputs/x/results.json"
+    assert uristr == expected
+    assert {e.payload.uri for e in events} == {expected}
+    assert env.asset_bindings[expected][BINDING_KEY]["path"] == (
+        f"{tmp_path}/wsB/outputs/x/results.json"
+    )
+    # The caller's binding object is not mutated.
+    assert binding == {"path": _RESULTS}
+
+
+@pytest.mark.asyncio
+async def test_env_output_resolves_to_producing_launch(docker_env, tmp_path):
+    env = _push_env(docker_env)
+    _register_launch(env, "tsrA", tmp_path / "wsA")
+    _register_launch(env, "tsrB", tmp_path / "wsB")
+    # Launch order must not matter: A registered last still loses for B's push.
+    _register_launch(env, "tsrA", tmp_path / "wsA")
+    uristr, _ = await _push(env, {"path": _RESULTS}, tsr="tsrB")
+    assert uristr == f"env://{tmp_path}/wsB/outputs/x/results.json"
+
+
+@pytest.mark.asyncio
+async def test_env_output_host_path_unchanged(docker_env, tmp_path):
+    env = _push_env(docker_env)
+    _register_launch(env, "tsrB", tmp_path / "wsB")
+    host = str(tmp_path / "elsewhere" / "results.json")
+    uristr, _ = await _push(env, {"path": host})
+    assert uristr == f"env://{host}"
+
+
+@pytest.mark.asyncio
+async def test_file_output_binding_untouched(docker_env, tmp_path):
+    env = _push_env(docker_env)
+    _register_launch(env, "tsrB", tmp_path / "wsB")
+    seen = {}
+
+    async def _file_handler(self, binding=None, uri=None, **kw):
+        seen["binding"] = binding
+        return uri
+
+    env.pushasset_types = {"filestore": _file_handler}
+    uristr, _ = await _push(
+        env, {"path": _RESULTS}, uristr=f"file://{tmp_path}/out/results.json"
+    )
+    assert seen["binding"] == {"path": _RESULTS}
+    assert uristr == f"file://{tmp_path}/out/results.json"
+
+
+@pytest.mark.asyncio
+async def test_env_output_unknown_targetsteprun_unchanged(docker_env, caplog):
+    env = _push_env(docker_env)
+    with caplog.at_level(logging.WARNING):
+        uristr, _ = await _push(env, {"path": _RESULTS}, tsr="nope")
+    assert uristr == f"env://{_RESULTS}"
+    assert "nope" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_launch_records_workspace_by_targetsteprun(docker_env, tmp_path):
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    docker_env._get_docker = MagicMock(return_value=(MagicMock(), client))
+    docker_env._resolve_image = MagicMock(return_value="img:latest")
+    docker_env._pull_image = MagicMock()
+    docker_env._release_monitors = MagicMock()
+    docker_env.get_launch_env_vars = MagicMock(return_value={})
+    await docker_env.launch_docker(
+        launch_id="launchid123",
+        targetsteprun_asset_dir=tmp_path / "wsB",
+        config={},
+        launcher_config={"command": "true"},
+        step={"name": "s"},
+        run_metadata={"targetsteprun_id": "tsrB"},
+    )
+    assert docker_env._workspaces_by_targetsteprun == {"tsrB": str(tmp_path / "wsB")}
+    await docker_env.cleanup_docker(launch_id="launchid123")
+    # Survives cleanup so a push that races teardown still resolves.
+    assert docker_env._workspaces_by_targetsteprun == {"tsrB": str(tmp_path / "wsB")}

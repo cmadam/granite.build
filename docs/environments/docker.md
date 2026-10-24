@@ -140,7 +140,8 @@ and translates it to Docker container limits:
   still accepted). Docker steps reference the shared `space://monitors/docker` monitor, which carries
   both rules; they are **unanchored** (docker streams raw stdout).
   See [Monitoring and artifact events](../steps/monitoring-and-artifact-events.md).
-  On push, container paths under `/gb-workspace` are translated back to their host path automatically.
+  On push, container paths under `/gb-workspace` are translated back to their host path automatically,
+  so an `env://{{ binding.path }}` output written there is registered at its host path.
 
 ## See also
 
