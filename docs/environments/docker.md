@@ -131,17 +131,19 @@ and translates it to Docker container limits:
   bind-mounted read-only under `/gb-hf-models/...` (the whole `models--org--repo` dir is mounted so HF
   cache symlinks resolve), and the in-container path is supplied as the binding. `env://` inputs (a
   path another target left on this host) are bind-mounted read-only under `/gb-env-inputs/<n>` (a
-  file's parent directory, or the directory itself), and the binding is the in-container path. An
-  `env://` input inside a Docker step's own workspace is rejected: that mount is per launch.
-- **Workspace.** The step's asset directory is bind-mounted at `/gb-workspace` (read-write); write
-  outputs there.
+  file's parent directory, or the directory itself), and the binding is the in-container path. The
+  mount source is always the input's host path, including an `env://` output an earlier Docker
+  target wrote in its own workspace.
+- **Workspace.** Each launch's own asset directory is bind-mounted at `/gb-workspace` (read-write)
+  in that launch's container only; write outputs there.
 - **Outputs.** Register artifacts with the standard `GB_ARTIFACT_ID:<id> GB_ARTIFACT_PATH:<path>`
   log line (or the `GB_ARTIFACT_STATE:<value>` form for `mem://` outputs; the legacy `LLMB_` prefix is
   still accepted). Docker steps reference the shared `space://monitors/docker` monitor, which carries
   both rules; they are **unanchored** (docker streams raw stdout).
   See [Monitoring and artifact events](../steps/monitoring-and-artifact-events.md).
-  On push, container paths under `/gb-workspace` are translated back to their host path automatically,
-  so an `env://{{ binding.path }}` output written there is registered at its host path.
+  On push, container paths under `/gb-workspace` are translated back to the host workspace of the
+  launch that produced them, so an `env://{{ binding.path }}` output written there is registered at
+  its host path, and `file://` and `hf://` outputs are copied or uploaded from it.
 
 ## See also
 
