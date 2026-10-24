@@ -369,3 +369,60 @@ async def test_env_output_of_earlier_docker_target_is_mounted_on_pull(
     assert vol["mode"] == "ro"
     assert path == f"{vol['bind']}/results.json"
     assert path.startswith("/gb-env-inputs/")
+
+
+# ---------------------------------------------------------------------------
+# Mount scope: never / or the gbserver user's home directory.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_root_dir_input_refused(docker_env):
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri="env:///")
+    assert docker_env._extra_volumes == {}
+
+
+@pytest.fixture
+def fake_home(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return home
+
+
+@pytest.mark.asyncio
+async def test_file_in_home_dir_refused(docker_env, fake_home):
+    (fake_home / "generation.json").write_text("{}")
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(fake_home / "generation.json"))
+    assert docker_env._extra_volumes == {}
+
+
+@pytest.mark.asyncio
+async def test_home_dir_input_refused(docker_env, fake_home):
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(fake_home))
+
+
+@pytest.mark.asyncio
+async def test_home_dir_via_symlink_refused(docker_env, fake_home, tmp_path):
+    link = tmp_path / "link"
+    link.symlink_to(fake_home)
+    (fake_home / "generation.json").write_text("{}")
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(link / "generation.json"))
+
+
+@pytest.mark.asyncio
+async def test_subdir_of_home_is_mounted(docker_env, fake_home):
+    sub = fake_home / "run1"
+    sub.mkdir()
+    (sub / "generation.json").write_text("{}")
+    binding, _ = await docker_env.pullasset_envstore(
+        uri=_env_uri(sub / "generation.json")
+    )
+    assert docker_env._extra_volumes[str(sub)]["mode"] == "ro"
+    assert binding[BINDING_KEY]["path"].endswith("/generation.json")
