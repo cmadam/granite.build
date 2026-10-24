@@ -284,6 +284,36 @@ class Docker(Environment):
                     result = host + suffix
         return result
 
+    def _host_path(self: Self, container_path: str, run_metadata: Optional[Any]) -> str:
+        """Translate a container path from a pushed output to its host path.
+
+        A path under ``/gb-workspace`` maps into the host workspace of the
+        launch that produced the output, looked up by
+        ``run_metadata.targetsteprun_id``: each launch mounts its own workspace
+        there, so no shared volume map can answer. Any other path is resolved
+        through the shared read-only mounts by :meth:`_resolve_host_path`.
+
+        :raises LookupError: the path is under ``/gb-workspace`` but no
+            workspace is recorded for the producing targetsteprun (guessing
+            another launch's workspace would push the wrong files).
+        """
+        if not (
+            container_path == _WORKSPACE_MOUNT
+            or container_path.startswith(_WORKSPACE_MOUNT + "/")
+        ):
+            return self._resolve_host_path(container_path)
+        if isinstance(run_metadata, dict):
+            tsr_id = run_metadata.get("targetsteprun_id")
+        else:
+            tsr_id = getattr(run_metadata, "targetsteprun_id", None)
+        workspace = self._workspaces_by_targetsteprun.get(tsr_id or "")
+        if workspace is None:
+            raise LookupError(
+                f"no Docker workspace recorded for targetsteprun_id={tsr_id!r}; "
+                f"cannot resolve container path {container_path}"
+            )
+        return workspace + container_path[len(_WORKSPACE_MOUNT) :]
+
     def _pull_image(
         self: Self,
         client,
@@ -520,8 +550,9 @@ class Docker(Environment):
         """Upload a local file or directory to a HuggingFace repo.
 
         Translates any container-side path in ``binding`` to the corresponding
-        host path using the volume map built by ``pullasset_hfstore`` and
-        ``launch_docker``, then delegates to
+        host path (see :meth:`_host_path`: a ``/gb-workspace`` path maps into the
+        producing launch's workspace, others through the read-only input
+        mounts), then delegates to
         :func:`~gbserver.environment.local_assets.push_asset_hfstore`.
 
         Args:
@@ -531,7 +562,9 @@ class Docker(Environment):
             binding_id: Output binding name, included in the commit message.
             uri: Target HfURI string or object.
             assetstore: Hfstore instance whose secrets supply the HF token.
-            run_metadata: EntityRunMetadata with build_id and target_name.
+            run_metadata: EntityRunMetadata with build_id and target_name; its
+                ``targetsteprun_id`` selects the workspace of a
+                ``/gb-workspace`` path.
             storepush_config: Environment-level push config. Its ``hf`` block is
                 forwarded so the resource group settings apply here as they do on
                 the step-based environments.
@@ -544,12 +577,14 @@ class Docker(Environment):
 
         Raises:
             ValueError: If ``uri`` is absent or ``binding`` has no ``"path"``.
+            LookupError: A ``/gb-workspace`` path whose producing launch is
+                unknown.
             RuntimeError: If the push itself fails.
         """
         self._warn_non_default_mode(storepush_config, uri)
         if not isinstance(binding, dict) or "path" not in binding:
             raise ValueError(f"binding must be a dict with 'path', got: {binding}")
-        host_path = self._resolve_host_path(binding["path"])
+        host_path = self._host_path(binding["path"], run_metadata)
         return push_asset_hfstore(
             src=host_path,
             binding_id=binding_id,
@@ -699,14 +734,17 @@ class Docker(Environment):
                 container_name=container_name,
             )
 
-            # Build bind mount volumes
-            volumes = {}
+            # Build bind mount volumes: the shared read-only mounts plus this
+            # launch's own workspace. The workspace is never added to
+            # _extra_volumes, which every later launch on this instance reads;
+            # two host dirs bound to /gb-workspace make dockerd refuse the
+            # container ("Duplicate mount point").
+            volumes = dict(self._extra_volumes)
             if targetsteprun_asset_dir:
-                self._extra_volumes[str(targetsteprun_asset_dir)] = {
+                volumes[str(targetsteprun_asset_dir)] = {
                     "bind": _WORKSPACE_MOUNT,
                     "mode": "rw",
                 }
-            volumes = dict(self._extra_volumes)
 
             # Build resource kwargs
             resource_kwargs: Dict = {}
@@ -1024,18 +1062,13 @@ class Docker(Environment):
             path == _WORKSPACE_MOUNT or path.startswith(_WORKSPACE_MOUNT + "/")
         ):
             return binding
-        tsr_id = run_metadata.targetsteprun_id if run_metadata is not None else None
-        workspace = self._workspaces_by_targetsteprun.get(tsr_id or "")
-        if workspace is None:
-            logger.warning(
-                "No Docker workspace recorded for targetsteprun_id=%r; "
-                "registering env:// output at container path %s",
-                tsr_id,
-                path,
-            )
+        try:
+            host = self._host_path(path, run_metadata)
+        except LookupError as e:
+            logger.warning("%s; registering env:// output at container path", e)
             return binding
         host_binding = copy.deepcopy(binding)
-        host_binding["path"] = workspace + path[len(_WORKSPACE_MOUNT) :]
+        host_binding["path"] = host
         return host_binding
 
     # ------------------------------------------------------------------
