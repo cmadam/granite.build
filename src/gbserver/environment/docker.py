@@ -35,7 +35,10 @@ from gbserver.environment.local_assets import (
     pull_asset_hfstore,
     push_asset_hfstore,
 )
-from gbserver.types.buildconfig import BuildTargetOutputConfig
+from gbserver.types.buildconfig import (
+    BuildTargetOutputConfig,
+    BuildTargetStepConfig,
+)
 from gbserver.types.buildevent import (
     BuildEvent,
     BuildEventMessagePayload,
@@ -470,6 +473,33 @@ class Docker(Environment):
         return binding_config, None
 
     # ------------------------------------------------------------------
+    # pullasset
+    # ------------------------------------------------------------------
+
+    def pullasset(
+        self: Self, task_group: TaskGroup, uri: URI, binding: Optional[Any] = None
+    ) -> Task[Tuple[Dict, Optional[BuildTargetStepConfig]]]:
+        """Pull an asset, always mounting an ``env://`` input into the container.
+
+        The base returns a cached ``asset_bindings`` entry before dispatching to
+        a store. The base ``pushasset`` caches every output it registers, so an
+        ``env://`` output of an earlier Docker target on this instance would be
+        handed to the consumer as a bare host path with no mount. For a cached
+        ``env://`` URI only, the pull goes through :meth:`pullasset_envstore`
+        instead, which mounts the URI's host path (or reuses its mount).
+        Everything else is the base behaviour.
+        """
+        uristr = URI.get_uristr(uri)
+        if not (uristr.startswith("env://") and uristr in self.asset_bindings):
+            return super().pullasset(task_group, uri, binding)
+
+        async def mount() -> Tuple[Dict, Optional[BuildTargetStepConfig]]:
+            return await self.pullasset_envstore(uri=uri, binding=binding)
+
+        asyncio_runner = task_group if task_group is not None else asyncio
+        return asyncio_runner.create_task(mount())
+
+    # ------------------------------------------------------------------
     # pullasset_envstore
     # ------------------------------------------------------------------
 
@@ -485,14 +515,13 @@ class Docker(Environment):
         The base pull is a no-op that returns the host path, which a container
         cannot see. Mount the path (a file's parent directory, or the
         directory itself) under ``/gb-env-inputs/<n>`` and return the
-        container-side path as the binding. A directory already registered in
-        ``_extra_volumes`` as a read-only mount (e.g. by another input) is
-        reused, not mounted twice. A directory registered read-write is a
-        per-launch ``/gb-workspace`` mount, whose container path changes with
-        every launch, so it is never reused.
+        container-side path as the binding. The mount source is always the
+        input's host path, including one an earlier Docker target wrote in its
+        own workspace (its env:// output is registered at that host path). A
+        directory already in ``_extra_volumes`` (e.g. mounted for another input)
+        is reused, not mounted twice.
 
         :raises FileNotFoundError: the host path does not exist.
-        :raises ValueError: the host path lies in a read-write (workspace) mount.
         """
         from gbserver.environment.environment import BINDING_KEY
 
@@ -505,11 +534,6 @@ class Docker(Environment):
         is_dir = host.is_dir()
         mount_src = host if is_dir else host.parent
         volume = self._extra_volumes.get(str(mount_src))
-        if volume is not None and volume.get("mode") != "ro":
-            raise ValueError(
-                f"env:// input {uri} lies in a Docker workspace dir ({mount_src}); "
-                "bind it through a non-Docker producer or a file:// output"
-            )
         if volume is None:
             n = sum(
                 1

@@ -117,18 +117,6 @@ async def test_reuses_existing_read_only_mount(docker_env, tmp_path):
     assert len(docker_env._extra_volumes) == 1
 
 
-@pytest.mark.asyncio
-async def test_input_in_workspace_mount_raises(docker_env, tmp_path):
-    ws = tmp_path / "ws"
-    ws.mkdir()
-    (ws / "gen.json").write_text("{}")
-    rw = {"bind": "/gb-workspace", "mode": "rw"}
-    docker_env._extra_volumes[str(ws)] = dict(rw)
-    with pytest.raises(ValueError, match="Docker workspace dir"):
-        await docker_env.pullasset_envstore(uri=_env_uri(ws / "gen.json"))
-    assert docker_env._extra_volumes == {str(ws): rw}
-
-
 # ---------------------------------------------------------------------------
 # env:// outputs: a /gb-workspace binding is registered at its host path.
 # ---------------------------------------------------------------------------
@@ -352,3 +340,32 @@ async def test_file_push_host_path_unchanged(docker_env, tmp_path):
         binding={"path": str(src)}, uri=f"file://{dest}"
     )
     assert dest.read_text() == "host"
+
+
+# ---------------------------------------------------------------------------
+# Docker -> Docker env:// chaining on one instance.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_env_output_of_earlier_docker_target_is_mounted_on_pull(
+    docker_env, tmp_path
+):
+    env = _push_env(docker_env)
+    ws = tmp_path / "wsA"
+    (ws / "outputs" / "x").mkdir(parents=True)
+    (ws / "outputs" / "x" / "results.json").write_text("{}")
+    _register_launch(env, "tsrA", ws)
+    uristr, _ = await _push(env, {"path": _RESULTS}, tsr="tsrA")
+    host = f"{ws}/outputs/x/results.json"
+    assert uristr == f"env://{host}"
+    # The base push cached the host binding; a pull must not hand it back as is.
+    assert env.asset_bindings[uristr][BINDING_KEY]["path"] == host
+
+    binding, step = await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
+    assert step is None
+    path = binding[BINDING_KEY]["path"]
+    vol = env._extra_volumes[str(ws / "outputs" / "x")]
+    assert vol["mode"] == "ro"
+    assert path == f"{vol['bind']}/results.json"
+    assert path.startswith("/gb-env-inputs/")
