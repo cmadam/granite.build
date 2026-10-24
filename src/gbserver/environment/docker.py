@@ -10,9 +10,11 @@ Set DOCKER_HOST to point to Podman's socket:
 """
 
 import asyncio
+import copy
 import functools
 import queue
 import threading
+from asyncio import Queue, Task, TaskGroup
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Self, Tuple
 
@@ -33,10 +35,12 @@ from gbserver.environment.local_assets import (
     pull_asset_hfstore,
     push_asset_hfstore,
 )
+from gbserver.types.buildconfig import BuildTargetOutputConfig
 from gbserver.types.buildevent import (
     BuildEvent,
     BuildEventMessagePayload,
     BuildEventType,
+    EntityRunMetadata,
 )
 from gbserver.types.constants import (
     DOCKER_PULL_MAX_ATTEMPTS,
@@ -53,6 +57,9 @@ from gbserver.utils.filesystem import sync_or_copy
 from gbserver.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Container path the targetsteprun workspace is bind-mounted at.
+_WORKSPACE_MOUNT = "/gb-workspace"
 
 # Pull errors no retry fixes: bad reference, missing image or platform, bad
 # credentials, full disk.
@@ -194,6 +201,10 @@ class Docker(Environment):
         self._launched_workspaces: Dict[str, str] = (
             {}
         )  # launch_id -> host workspace dir
+        # targetsteprun_id -> host workspace dir. Unlike _launched_workspaces it
+        # is never popped by cleanup_docker, so an output push that races the
+        # container teardown still finds its producer's workspace.
+        self._workspaces_by_targetsteprun: Dict[str, str] = {}
         self._extra_volumes: Dict[str, Dict] = {}
         self._docker_module = None  # cached docker module
         self._docker_client = None  # cached Docker client
@@ -692,7 +703,7 @@ class Docker(Environment):
             volumes = {}
             if targetsteprun_asset_dir:
                 self._extra_volumes[str(targetsteprun_asset_dir)] = {
-                    "bind": "/gb-workspace",
+                    "bind": _WORKSPACE_MOUNT,
                     "mode": "rw",
                 }
             volumes = dict(self._extra_volumes)
@@ -745,6 +756,11 @@ class Docker(Environment):
             self._launched_containers[launch_id] = container.id
             if targetsteprun_asset_dir:
                 self._launched_workspaces[launch_id] = str(targetsteprun_asset_dir)
+                tsr_id = run_metadata.get("targetsteprun_id")
+                if tsr_id:
+                    self._workspaces_by_targetsteprun[tsr_id] = str(
+                        targetsteprun_asset_dir
+                    )
             logger.info(
                 "Created Docker container: id=%s launch_id=%s",
                 container.id,
@@ -955,6 +971,72 @@ class Docker(Environment):
         finally:
             self._launched_containers.pop(launch_id, None)
             self._launched_workspaces.pop(launch_id, None)
+
+    # ------------------------------------------------------------------
+    # pushasset
+    # ------------------------------------------------------------------
+
+    def pushasset(
+        self: Self,
+        task_group: TaskGroup,
+        binding: Any,
+        uristr: str,
+        binding_id: Optional[str] = None,
+        additional_targetsteps_queue: Optional[Queue] = None,
+        run_metadata: Optional[EntityRunMetadata] = None,
+        output_config: Optional[BuildTargetOutputConfig] = None,
+        unique_hash: Optional[str] = None,
+    ) -> Task[URI]:
+        """Push an asset, registering env:// workspace outputs at their host path.
+
+        An env:// output is a no-transfer reference, so the base renders its URI
+        straight from the producer binding — which holds the in-container path
+        (``/gb-workspace/...``) that no consumer can reach. For env:// outputs
+        under ``/gb-workspace`` only, the binding path is rewritten to the
+        producing launch's host workspace (looked up by
+        ``run_metadata.targetsteprun_id``) before the base renders and registers
+        it. Every other store and path is passed through unchanged.
+        """
+        if URI.get_uristr(uristr).startswith("env://"):
+            binding = self._env_output_host_binding(binding, run_metadata)
+        return super().pushasset(
+            task_group=task_group,
+            binding=binding,
+            uristr=uristr,
+            binding_id=binding_id,
+            additional_targetsteps_queue=additional_targetsteps_queue,
+            run_metadata=run_metadata,
+            output_config=output_config,
+            unique_hash=unique_hash,
+        )
+
+    def _env_output_host_binding(
+        self: Self, binding: Any, run_metadata: Optional[EntityRunMetadata]
+    ) -> Any:
+        """Return a copy of *binding* with a /gb-workspace path mapped to the host.
+
+        Returns *binding* itself when its path is not under ``/gb-workspace`` or
+        when no workspace is recorded for the producing targetsteprun (logged:
+        guessing another launch's workspace would register a wrong path).
+        """
+        path = binding.get("path") if isinstance(binding, dict) else None
+        if not isinstance(path, str) or not (
+            path == _WORKSPACE_MOUNT or path.startswith(_WORKSPACE_MOUNT + "/")
+        ):
+            return binding
+        tsr_id = run_metadata.targetsteprun_id if run_metadata is not None else None
+        workspace = self._workspaces_by_targetsteprun.get(tsr_id or "")
+        if workspace is None:
+            logger.warning(
+                "No Docker workspace recorded for targetsteprun_id=%r; "
+                "registering env:// output at container path %s",
+                tsr_id,
+                path,
+            )
+            return binding
+        host_binding = copy.deepcopy(binding)
+        host_binding["path"] = workspace + path[len(_WORKSPACE_MOUNT) :]
+        return host_binding
 
     # ------------------------------------------------------------------
     # pushasset_filestore
