@@ -43,6 +43,10 @@ from gbserver.types.constants import (
     DOCKER_PULL_RETRY_BASE_DELAY,
     DOCKER_PULL_RETRY_MAX_DELAY,
 )
+from gbserver.types.environment.environment import (
+    EnvironmentVariableConfig,
+    StepSecretsConfig,
+)
 from gbserver.types.environmentconfig import EnvironmentConfig
 from gbserver.types.errors import LogMonitoringFailedException
 from gbserver.utils.filesystem import sync_or_copy
@@ -512,10 +516,9 @@ class Docker(Environment):
     def _launch_env_layers(self: Self, **kwargs: Any) -> List[Dict[str, str]]:
         """Docker env layers for the shared launch-env composer.
 
-        Overrides :meth:`Environment._launch_env_layers` (Docker injects no
-        declared space secrets, so it leaves :meth:`_declared_secret_mappings`
-        at its empty default). Ordered lowest->highest above the empty secret
-        layer and below the standard set: environment.yaml defaults ``env`` <
+        Overrides :meth:`Environment._launch_env_layers` (declared space secrets
+        come from :meth:`_declared_secret_mappings`). Ordered lowest->highest
+        above the declared-secret layer and below the standard set: environment.yaml defaults ``env`` <
         ``config.docker.env`` < launcher ``env`` < the built-in
         ``LLMB_DOCKER_*`` vars.
 
@@ -549,6 +552,24 @@ class Docker(Environment):
             launcher_env if isinstance(launcher_env, dict) else {},
             builtins,
         ]
+
+    def _declared_secret_mappings(
+        self: Self, **kwargs: Any
+    ) -> List[EnvironmentVariableConfig]:
+        """Declared Docker secret mappings for the shared launch-env composer.
+
+        Overrides :meth:`Environment._declared_secret_mappings` so only secrets
+        the step declares in ``config.docker.secrets.secret_names_to_use_as_env_variable``
+        are injected into the container (least-privilege, matching
+        LSF/SkyPilot). ``secret_name`` defaults to ``env_name`` verbatim.
+
+        :param kwargs: the launch context; only ``config`` is read.
+        :returns: the declared ``EnvironmentVariableConfig`` mappings.
+        """
+        docker_config = (kwargs.get("config") or {}).get("docker") or {}
+        return StepSecretsConfig.model_validate(
+            docker_config.get("secrets") or {}
+        ).secret_names_to_use_as_env_variable
 
     async def launch_docker(
         self: Self,
@@ -602,6 +623,7 @@ class Docker(Environment):
             # standard vars like GB_BUILD_ID; see Docker.get_launch_env_vars).
             env_vars = self.get_launch_env_vars(
                 run_metadata=run_metadata,
+                config=config,
                 launcher_config=launcher_config,
                 docker_config=docker_config,
                 launch_id=launch_id,
