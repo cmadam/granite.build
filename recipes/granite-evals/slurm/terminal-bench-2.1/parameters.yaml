@@ -17,8 +17,8 @@ OUTPUT_ROOT: "/proj/granite-build/g4os/granite/runs"
 HF_HOME: ""
 
 # ─── Images (GPU only) ────────────────────────────────────
-IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-tbench:5a6fc8c"
-IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-tbench-cpu:5a6fc8c"
+IMAGE: "us.icr.io/cil15-shared-registry/gb-step-eval-tbench:de4d8818"
+IMAGE_CPU: "us.icr.io/cil15-shared-registry/gb-step-eval-tbench-cpu:de4d8818"
 
 # ─── Scale ────────────────────────────────────────────────────────────
 LIMIT: ""
