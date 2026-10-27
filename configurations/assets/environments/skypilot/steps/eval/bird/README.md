@@ -13,15 +13,16 @@ Execution is read-only, and both queries share a 30 s budget. The data is the of
 BIRD `dev.zip` (`dev_20240627`, 1,534 questions over 11 databases), pinned by sha256
 and downloaded once into `$HF_HOME/granite-data`.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`), baked into this
+family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/bird
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|

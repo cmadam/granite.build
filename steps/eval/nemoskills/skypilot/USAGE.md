@@ -3,17 +3,17 @@
 Scores a checkpoint on one of the granite-evals **nemoskills** family's benchmarks:
 each run through NVIDIA NeMo-Skills' own pipeline, locally (no Slurm, no NeMo-Run) —
 data preparation (every upstream read pinned), prompt, generation, answer extraction
-and metrics. `granite_config.benchmark` selects which one.
+and metrics. `benchmark` selects which one.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/nemoskills
     config:
-      granite_config:
-        benchmark: gpqa
+      benchmark: gpqa
 ```
 
 ## Benchmarks in this family
@@ -40,7 +40,7 @@ steps:
 
 See `granite-evals list` for the current, authoritative set and sizes.
 
-## Config (`granite_config`)
+## Config
 
 | Field | Purpose |
 |---|---|

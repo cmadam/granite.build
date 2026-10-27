@@ -16,20 +16,19 @@ granite.build:
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
-            granite_config:
-              benchmark: "gdpval"
-              image: "$${IMAGE}"
-              model_path: "$${MODEL_PATH}"
-              served_model_name: "$${SERVED_MODEL_NAME}"
-              output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gdpval"
-              limit: "$${LIMIT}"
-              repeats: "$${REPEATS}"
-              workers: "$${WORKERS}"
-              options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}"
-              phase: "generate"
-              tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
-              hf_home: "$${HF_HOME}"
-              sandbox_cache: "$${SANDBOX_CACHE}"
+            benchmark: "gdpval"
+            image: "$${IMAGE}"
+            model_path: "$${MODEL_PATH}"
+            served_model_name: "$${SERVED_MODEL_NAME}"
+            output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gdpval"
+            limit: "$${LIMIT}"
+            repeats: "$${REPEATS}"
+            workers: "$${WORKERS}"
+            options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}"
+            phase: "generate"
+            tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+            hf_home: "$${HF_HOME}"
+            sandbox_cache: "$${SANDBOX_CACHE}"
             launcher_config:
               resources:
                 accelerators: "H200:$${TENSOR_PARALLEL_SIZE}"
@@ -50,20 +49,19 @@ granite.build:
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
-            granite_config:
-              benchmark: "gdpval"
-              image: "$${IMAGE_CPU}"
-              model_path: "$${MODEL_PATH}"
-              served_model_name: "$${SERVED_MODEL_NAME}"
-              output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gdpval"
-              limit: "$${LIMIT}"
-              repeats: "$${REPEATS}"
-              workers: "$${WORKERS}"
-              options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}"
-              phase: "score"
-              tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
-              hf_home: "$${HF_HOME}"
-              sandbox_cache: "$${SANDBOX_CACHE}"
+            benchmark: "gdpval"
+            image: "$${IMAGE_CPU}"
+            model_path: "$${MODEL_PATH}"
+            served_model_name: "$${SERVED_MODEL_NAME}"
+            output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gdpval"
+            limit: "$${LIMIT}"
+            repeats: "$${REPEATS}"
+            workers: "$${WORKERS}"
+            options: "$${OPTIONS} judge_base_url=$${JUDGE_BASE_URL}"
+            phase: "score"
+            tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+            hf_home: "$${HF_HOME}"
+            sandbox_cache: "$${SANDBOX_CACHE}"
             skypilot:
               secrets:
                 secret_names_to_use_as_env_variable:

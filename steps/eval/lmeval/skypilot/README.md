@@ -13,15 +13,16 @@ ar, cs, it, ko and zh. Dutch is on Granite's list but MMLU-ProX has no Dutch. Th
 11 x 588 test questions. Neither the model card nor the blog defines the subset, so
 `languages=` changes it.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/lmeval
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -75,5 +76,6 @@ results (`lm_eval_results.json`).
 
 ## Developing
 
-`make unit-tests` runs the template contract tests. The runtime has its own tests in
-granite-evals. Every step under `steps/eval/` follows this template; the test checks this.
+`make unit-tests` runs the template contract tests. The runtime's own tests live in
+`steps/eval/src` (`make test-src` from `steps/eval/`). Every granite-evals family step
+under `steps/eval/` follows this template; the test checks this.

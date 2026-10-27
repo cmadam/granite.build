@@ -3,18 +3,18 @@
 Scores a checkpoint on one of the granite-evals **tau** family's benchmarks: τ³-bench
 domains, each run through the pinned [tau2-bench](https://github.com/sierra-research/tau2-bench)
 v1.0.1 harness. The served model is the tool-calling agent, an LLM user simulator plays
-the customer, and the harness's own evaluators grade each simulation. `granite_config.benchmark`
+the customer, and the harness's own evaluators grade each simulation. `benchmark`
 selects which domain (or the Overall average).
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/tau
     config:
-      granite_config:
-        benchmark: tau3-airline
+      benchmark: tau3-airline
 ```
 
 ## Benchmarks in this family
@@ -29,7 +29,7 @@ steps:
 
 See `granite-evals list` for the current, authoritative set and sizes.
 
-## Config (`granite_config`)
+## Config
 
 | Field | Purpose |
 |---|---|
@@ -89,5 +89,6 @@ Per-simulation records, with the full harness trajectory, are kept next to it un
 
 ## Developing
 
-`make unit-tests` runs the template contract tests. The runtime has its own tests in
-granite-evals. Every step under `steps/eval/` follows this template; the test checks this.
+`make unit-tests` runs the template contract tests. The runtime's own tests live in
+`steps/eval/src` (`make test-src` from `steps/eval/`). Every granite-evals family step
+under `steps/eval/` follows this template; the test checks this.

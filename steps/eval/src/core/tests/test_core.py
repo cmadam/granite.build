@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from granite_evals import cli, data, registry, suites
 from granite_evals.registry import Benchmark, RunConfig
 from granite_evals.results import write_results
@@ -13,7 +12,10 @@ from granite_evals.serving import ServerConfig, VLLMServer, server_env
 @pytest.mark.parametrize(
     "image,uri",
     [
-        ("swebench/sweb.eval.x86_64.a_1776_b-1:latest", "docker://swebench/sweb.eval.x86_64.a_1776_b-1:latest"),
+        (
+            "swebench/sweb.eval.x86_64.a_1776_b-1:latest",
+            "docker://swebench/sweb.eval.x86_64.a_1776_b-1:latest",
+        ),
         ("docker.io/swebench/x:latest", "docker://swebench/x:latest"),
         ("us.icr.io/ns/img:1.0", "docker://us.icr.io#ns/img:1.0"),
         ("localhost:5000/img", "docker://localhost:5000#img"),
@@ -73,8 +75,12 @@ def test_enroot_sandbox_kills_its_leftovers_before_remove(tmp_path, monkeypatch)
     # outlive the sandbox and answer the next task on its port.
     monkeypatch.setenv("ENROOT_DATA_PATH", str(tmp_path / "data"))
     calls = []
-    monkeypatch.setattr(enroot, "_kill_rooted", lambda rootfs: calls.append(("kill", rootfs)) or 1)
-    monkeypatch.setattr(enroot.subprocess, "run", lambda argv, **k: calls.append(("run", argv[1])))
+    monkeypatch.setattr(
+        enroot, "_kill_rooted", lambda rootfs: calls.append(("kill", rootfs)) or 1
+    )
+    monkeypatch.setattr(
+        enroot.subprocess, "run", lambda argv, **k: calls.append(("run", argv[1]))
+    )
     sb = enroot.EnrootSandbox("img:latest")
     sb.close()
     assert calls == [("kill", str(tmp_path / "data" / sb.name)), ("run", "remove")]
@@ -82,14 +88,25 @@ def test_enroot_sandbox_kills_its_leftovers_before_remove(tmp_path, monkeypatch)
 
 def test_enroot_sandbox_gets_no_secrets(monkeypatch):
     # enroot start passes its environment into the sandbox, where model-written code runs.
-    for name in ("GRANITE_EVALS_JUDGE_API_KEY", "GRANITE_EVALS_USER_API_KEY", "HF_TOKEN", "AWS_SECRET_ACCESS_KEY"):
+    for name in (
+        "GRANITE_EVALS_JUDGE_API_KEY",
+        "GRANITE_EVALS_USER_API_KEY",
+        "HF_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+    ):
         monkeypatch.setenv(name, "s3cret")
     monkeypatch.setenv("GRANITE_EVALS_SPEND_LEDGER", "/tmp/ledger.jsonl")
     sb = enroot.EnrootSandbox("img:latest", env={"HF_TOKEN": "explicit"})
     env = sb._run_env()
-    assert "s3cret" not in env.values() and env["PATH"] and env["GRANITE_EVALS_SPEND_LEDGER"]
+    assert (
+        "s3cret" not in env.values()
+        and env["PATH"]
+        and env["GRANITE_EVALS_SPEND_LEDGER"]
+    )
     argv = sb._exec_argv("true", "/", sb.env)
-    assert argv[argv.index("--env") + 1] == "HF_TOKEN=explicit"  # explicit env still reaches it
+    assert (
+        argv[argv.index("--env") + 1] == "HF_TOKEN=explicit"
+    )  # explicit env still reaches it
 
 
 def test_take_is_stable_and_limited():
@@ -120,7 +137,9 @@ def test_suites_reference_unique_ids():
 
 
 def test_every_implemented_benchmark_is_in_a_suite():
-    listed = {b["id"] for name in suites.names() for b in suites.load(name)["benchmarks"]}
+    listed = {
+        b["id"] for name in suites.names() for b in suites.load(name)["benchmarks"]
+    }
     assert set(registry.all_benchmarks()) <= listed
 
 
@@ -144,7 +163,9 @@ def test_results_schema(tmp_path):
 def _granite42(d):
     # Excerpts of ibm-granite/granite-4.2-3b's chat_template.jinja and plugin.
     d.mkdir()
-    (d / "chat_template.jinja").write_text("<tool_call>\n<function={{ tool_call.name }}>\n<parameter=")
+    (d / "chat_template.jinja").write_text(
+        "<tool_call>\n<function={{ tool_call.name }}>\n<parameter="
+    )
     (d / "granite_thinking_parser.py").write_text(
         '@ReasoningParserManager.register_module("granite_thinking_parser")\nclass GraniteThinkingParser: ...'
     )
@@ -153,23 +174,37 @@ def _granite42(d):
 
 def test_vllm_command_resolves_granite42_parsers(tmp_path):
     m = _granite42(tmp_path / "m")
-    cmd = VLLMServer(ServerConfig(model=str(m), served_model_name="g"), tmp_path / "log").command()
+    cmd = VLLMServer(
+        ServerConfig(model=str(m), served_model_name="g"), tmp_path / "log"
+    ).command()
     assert cmd[:3] == ["vllm", "serve", str(m)]
     assert "--enable-auto-tool-choice" in cmd
     assert cmd[cmd.index("--tool-call-parser") + 1] == "qwen3_coder"
     assert cmd[cmd.index("--reasoning-parser") + 1] == "granite_thinking_parser"
-    assert cmd[cmd.index("--reasoning-parser-plugin") + 1] == str(m / "granite_thinking_parser.py")
+    assert cmd[cmd.index("--reasoning-parser-plugin") + 1] == str(
+        m / "granite_thinking_parser.py"
+    )
 
 
 def test_vllm_command_parsers_explicit_and_undetected(tmp_path):
     m = _granite42(tmp_path / "m")
-    cfg = ServerConfig(model=str(m), served_model_name="g", tool_call_parser="hermes", reasoning_parser="")
+    cfg = ServerConfig(
+        model=str(m),
+        served_model_name="g",
+        tool_call_parser="hermes",
+        reasoning_parser="",
+    )
     cmd = VLLMServer(cfg, tmp_path / "log").command()
     assert cmd[cmd.index("--tool-call-parser") + 1] == "hermes"
     assert "--reasoning-parser" not in cmd
     (tmp_path / "plain").mkdir()
-    (tmp_path / "plain" / "tokenizer_config.json").write_text('{"chat_template": "{{ messages }}"}')
-    cmd = VLLMServer(ServerConfig(model=str(tmp_path / "plain"), served_model_name="g"), tmp_path / "log").command()
+    (tmp_path / "plain" / "tokenizer_config.json").write_text(
+        '{"chat_template": "{{ messages }}"}'
+    )
+    cmd = VLLMServer(
+        ServerConfig(model=str(tmp_path / "plain"), served_model_name="g"),
+        tmp_path / "log",
+    ).command()
     assert "--tool-call-parser" not in cmd and "--reasoning-parser" not in cmd
 
 
@@ -188,14 +223,22 @@ def test_cli_list(capsys):
 
 
 def test_dockerfile_extras_run_without_project_uv_config():
-    """images/extras/<family>.sh run from the project dir; UV_NO_CONFIG keeps a separate
+    """A family's extras.sh runs from the project dir; UV_NO_CONFIG keeps a separate
     env they build from inheriting this project's [tool.uv] overrides."""
     from pathlib import Path
 
-    images = Path(__file__).parents[3] / "images" / "gpu"
-    if not images.exists():  # the image build runs the tests without images/
-        pytest.skip("no images/gpu (inside the image)")
-    for dockerfile in images.glob("Dockerfile.*"):
+    root = Path(__file__).parents[3]
+    dockerfiles = sorted(root.glob("*/Dockerfile.*"))
+    if not dockerfiles:  # the image build runs the tests without the family dirs
+        pytest.skip("no family Dockerfiles (inside the image)")
+    for dockerfile in dockerfiles:
+        # Re-join continuation lines so a RUN and its command read as one string.
+        runs = []
         for line in dockerfile.read_text().splitlines():
-            if line.startswith("RUN") and "/tmp/extras/" in line and ".sh" in line:
-                assert "UV_NO_CONFIG=1 bash" in line, dockerfile.name
+            if line.startswith("RUN"):
+                runs.append(line)
+            elif runs and runs[-1].endswith("\\"):
+                runs[-1] += "\n" + line
+        for run in runs:
+            if "/tmp/extras/" in run and ".sh" in run:
+                assert "UV_NO_CONFIG=1 bash" in run, dockerfile.name

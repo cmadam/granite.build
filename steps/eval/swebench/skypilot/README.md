@@ -2,18 +2,18 @@
 
 Scores a checkpoint on one of the granite-evals **swebench** family's benchmarks:
 SWE-bench variants, each run with mini-swe-agent in one enroot sandbox per instance and
-graded in a fresh sandbox with the upstream `swebench` harness. `granite_config.benchmark`
+graded in a fresh sandbox with the upstream `swebench` harness. `benchmark`
 selects which one.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/swebench
     config:
-      granite_config:
-        benchmark: swebench-verified
+      benchmark: swebench-verified
 ```
 
 ## Benchmarks in this family
@@ -26,7 +26,7 @@ steps:
 
 See `granite-evals list` for the current, authoritative set and sizes.
 
-## Config (`granite_config`)
+## Config
 
 | Field | Purpose |
 |---|---|
@@ -79,5 +79,6 @@ Per-instance trajectories, patches and test logs are kept next to it under
 
 ## Developing
 
-`make unit-tests` runs the template contract tests. The runtime has its own tests in
-granite-evals. Every step under `steps/eval/` follows this template; the test checks this.
+`make unit-tests` runs the template contract tests. The runtime's own tests live in
+`steps/eval/src` (`make test-src` from `steps/eval/`). Every granite-evals family step
+under `steps/eval/` follows this template; the test checks this.

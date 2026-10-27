@@ -12,17 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# granite-evals image for the `tau` benchmark family: tau3-bench agentic tool use (task data baked in).
+# granite-evals image for the `bird` benchmark family: BIRD text-to-SQL through NeMo-Skills.
 #
 # One image per benchmark family, because the upstream harnesses' own dependencies
 # conflict with one another (see [tool.uv] conflicts in src/core/pyproject.toml).
 # Build context is steps/eval/ (see the Makefile):
-#   podman build --platform linux/amd64 -f images/cpu/Dockerfile.tau . -t <registry>/gb-step-eval-tau-cpu:<tag>
+#   podman build --platform linux/amd64 -f bird/Dockerfile.cpu . -t <registry>/gb-step-eval-bird-cpu:<tag>
 #
 # CPU sibling of the GPU image for `--phase score` (grading, no model served):
 # no vLLM. The image carries the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (src/tau), the
-# family's pinned harness (the `tau` extra) and the enroot CLI for benchmarks
+# (src/core) overlaid with this family's benchmark modules (src/bird), the
+# family's pinned harness (the `bird` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
 # System packages are installed in a throwaway stage and shipped as ONE plain layer.
@@ -63,20 +63,13 @@ ENV UV_PROJECT_ENVIRONMENT=${EVALS_HOME}/.venv \
 # unreadable to other users, which COPY would preserve.
 COPY --chmod=755 src/core/pyproject.toml src/core/uv.lock ./
 
-# Family-specific system setup (images/extras/*.sh), bind-mounted so nothing is left
-# behind in a layer. UV_NO_CONFIG: the scripts run from WORKDIR, and uv would otherwise
-# apply this project's [tool.uv] settings to any separate env they build.
-RUN --mount=type=bind,source=images/extras,target=/tmp/extras \
-    UV_NO_CONFIG=1 bash -euxo pipefail /tmp/extras/tau.sh \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN uv sync --locked --no-install-project --no-dev --extra tau
+RUN uv sync --locked --no-install-project --no-dev --extra bird
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 src/tau/granite_evals ./src/granite_evals
+COPY --chmod=755 src/bird/granite_evals ./src/granite_evals
 COPY --chmod=755 src/core/tests ./tests
-COPY --chmod=755 src/tau/tests ./tests
-RUN uv sync --locked --no-dev --extra tau \
+COPY --chmod=755 src/bird/tests ./tests
+RUN uv sync --locked --no-dev --extra bird \
     && uv run --no-sync --with pytest pytest -q -p no:cacheprovider --basetemp=/opt/granite-evals/.pytest-tmp tests \
     && granite-evals list \
     && rm -rf /opt/granite-evals/.pytest-tmp /tmp/pytest-of-root

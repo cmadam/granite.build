@@ -6,15 +6,16 @@ rate). The job serves the model with vLLM and runs each task as a
 agent drives the model inside an enroot sandbox started from the task's prebuilt image,
 then harbor's verifier runs the task's tests. It writes one `results.json`.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/tbench
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -74,5 +75,6 @@ Harbor's trial directories (agent trajectory, terminal recording, verifier outpu
 
 ## Developing
 
-`make unit-tests` runs the template contract tests. The runtime has its own tests in
-granite-evals. Every step under `steps/eval/` follows this template; the test checks this.
+`make unit-tests` runs the template contract tests. The runtime's own tests live in
+`steps/eval/src` (`make test-src` from `steps/eval/`). Every granite-evals family step
+under `steps/eval/` follows this template; the test checks this.

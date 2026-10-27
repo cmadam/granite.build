@@ -14,7 +14,9 @@
 #
 # Build the granite-evals images shared by the benchmark steps in steps/eval/<family>/.
 # One image per benchmark family (the harnesses' dependencies conflict, so they
-# cannot share an environment). The build context is this directory.
+# cannot share an environment). The build context is this directory; each
+# family's recipe is <family>/Dockerfile.gpu and, for the CPU_FAMILIES,
+# <family>/Dockerfile.cpu, with any extra system setup in <family>/extras.sh.
 #
 #   make images REGISTRY=quay.io/myorg            build all 9 GPU + 7 CPU images (`-cpu` suffix)
 #   make image-nemoskills REGISTRY=...            build one
@@ -55,7 +57,7 @@ publish-images: $(addprefix publish-image-,$(FAMILIES)) $(addprefix publish-imag
 
 $(addprefix image-cpu-,$(CPU_FAMILIES)): image-cpu-%:
 	$(require_registry)
-	$(DOCKER) build --platform $(PLATFORM) -f images/cpu/Dockerfile.$* . -t $(REGISTRY)/gb-step-eval-$*-cpu:$(IMAGE_TAG)
+	$(DOCKER) build --platform $(PLATFORM) -f $*/Dockerfile.cpu . -t $(REGISTRY)/gb-step-eval-$*-cpu:$(IMAGE_TAG)
 
 $(addprefix publish-image-cpu-,$(CPU_FAMILIES)): publish-image-cpu-%:
 	$(require_registry)
@@ -63,7 +65,7 @@ $(addprefix publish-image-cpu-,$(CPU_FAMILIES)): publish-image-cpu-%:
 
 $(addprefix image-,$(FAMILIES)): image-%:
 	$(require_registry)
-	$(DOCKER) build --platform $(PLATFORM) -f images/gpu/Dockerfile.$* . -t $(REGISTRY)/gb-step-eval-$*:$(IMAGE_TAG)
+	$(DOCKER) build --platform $(PLATFORM) -f $*/Dockerfile.gpu . -t $(REGISTRY)/gb-step-eval-$*:$(IMAGE_TAG)
 
 $(addprefix publish-image-,$(FAMILIES)): publish-image-%:
 	$(require_registry)

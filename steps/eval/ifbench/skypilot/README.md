@@ -9,15 +9,16 @@ come with NeMo-Skills' patch, baked into the image. NeMo-Skills' `if` metrics pr
 the score. The job writes one `results.json`. A prompt counts only if the response
 follows all of its instructions.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`), baked into this
+family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/ifbench
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|
@@ -70,5 +71,6 @@ outputs are `generation/output-rs<k>.jsonl`, with each response's `loose_eval` a
 
 ## Developing
 
-`make unit-tests` runs the template contract tests. The runtime has its own tests in
-granite-evals. Every step under `steps/eval/` follows this template; the test checks this.
+`make unit-tests` runs the template contract tests. The runtime's own tests live in
+`steps/eval/src` (`make test-src` from `steps/eval/`). Every granite-evals family step
+under `steps/eval/` follows this template; the test checks this.

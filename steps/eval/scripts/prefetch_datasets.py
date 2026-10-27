@@ -21,7 +21,7 @@ from the cache (HF_HUB_OFFLINE=1).
 Every entry is pinned to the commit the benchmark module pins
 (src/*/granite_evals/benchmarks/*.py); `--check` verifies that against the source.
 Datasets that are not on the Hub (GitHub files, PyPI packages, task data) are
-pinned by commit/sha256 and baked into the image by images/extras/*.sh instead.
+pinned by commit/sha256 and baked into the image by the owning family's extras.sh instead.
 
     python scripts/prefetch_datasets.py --hf-home /path/to/hf-cache [--benchmark gpqa ...]
 

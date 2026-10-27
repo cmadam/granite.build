@@ -1,39 +1,45 @@
 # steps/eval/
 
-A pure grouping directory (no behavior of its own) containing one step per benchmark
-in the [granite-evals](https://github.com/laminair/granite-evals) suite.
+Granite benchmark steps: one step per granite-evals image family, the vendored
+benchmark runtime those images are built from, and the image recipes themselves.
 
-## Dependency direction
+## What lives here
 
-**granite.build depends on granite-evals. Not the other way around.**
+| Path | What it is |
+|---|---|
+| `<family>/skypilot/` | One step per benchmark family: `step-template.yaml` (the source of truth), `README.md` / `USAGE.md`, and the shared contract test. |
+| `<family>/Dockerfile.gpu`, `<family>/Dockerfile.cpu` | The family's image recipe(s). Every family has a GPU image; the families whose benchmarks split into GPU generate + CPU score (`--phase`) also have a `-cpu` image. Families needing extra system setup carry an `extras.sh` (and `nemoskills` a pinned `comet-requirements.txt` for its COMET judge). |
+| `src/core/` | The shared granite-evals runtime: harness adapters, vLLM serving, scoring, results. |
+| `src/<family>/` | The family's benchmark modules, overlaid onto the same package. |
+| `scripts/prefetch_datasets.py` | Pins and pre-fetches the HF datasets into a cache the (offline) jobs read. |
+| `eval-example/` | The framework's generic eval exemplar step — pre-existing, not one of the granite-evals families. |
 
-```
-granite.build  ──────depends on──────>  github.com/laminair/granite-evals
-(this repo)                              (separate repo, separate releases)
-```
+The nine families — `bfcl`, `bird`, `ifbench`, `judged`, `lmeval`, `nemoskills`,
+`swebench`, `tau`, `tbench` — exist because the upstream harnesses' own
+dependencies conflict (see the `[tool.uv]` conflicts in `src/core/pyproject.toml`),
+so each ships as its own image. `benchmark` selects which benchmark in the family
+a target runs.
 
-- The benchmark runtime — datasets, harnesses, scoring, judges, sandboxes — lives
-  entirely in `granite-evals`, which ships it as one prebuilt image per benchmark
-  family (`make publish-image EXTRA=<family>` in that repo).
-- **None of that code is vendored into this repo.** Every step here is a thin
-  SkyPilot launcher: it picks the pinned image (`granite_config.image`), serves the
-  checkpoint with vLLM, and shells out to `granite-evals run <benchmark>` inside the
-  job. There is no Dockerfile and nothing is built from these directories.
-- Bumping a benchmark's behavior means cutting a new `granite-evals` image and
-  re-pinning its tag in the recipe `parameters.yaml` (e.g. `GRANITE_EVALS_IMAGE_BFCL`)
-  — not editing anything under `steps/eval/`.
-- granite.build only pulls in benchmark *code* this way (via image) for now; it does
-  not import or build against the `granite-evals` Python package directly.
+## Images
 
-## Layout
+`make images REGISTRY=...` from this directory builds every family image from
+`<family>/Dockerfile.{gpu,cpu}` (build context: this directory; see the
+[Makefile](Makefile)). The steps themselves build nothing at run time: each picks
+its pinned image (`config.image`, set by the recipe — e.g. the `IMAGE` /
+`IMAGE_CPU` parameters), serves the checkpoint with vLLM, and shells out to
+`granite-evals run <benchmark>` inside the job.
 
-Each `steps/eval/<benchmark>/skypilot/` is one step: `step-template.yaml` (the
-source of truth), `README.md` / `USAGE.md`, and `test/test_step_template.py` (a
-shared contract test — every sibling has the identical copy, which is what lets one
-test file assert all 41 steps follow the same shape). The rendered, committed form
-that `space://steps/eval/<benchmark>` actually resolves to lives under
-`configurations/assets/environments/skypilot/steps/eval/<benchmark>/`, produced by
+Bumping a benchmark's behavior means editing `src/`, rebuilding the family image,
+pushing it, and re-pinning its tag in the recipe `parameters.yaml` — recipes under
+`recipes/granite-evals/` choose which benchmarks a model family is scored on and
+own the image pins.
+
+## Layout of a family step
+
+Each `steps/eval/<family>/skypilot/` is one step: `step-template.yaml` (the source
+of truth), `README.md` / `USAGE.md`, and `test/test_step_template.py` (a shared
+contract test — every sibling has the identical copy, which is what lets one test
+file assert all nine steps follow the same shape). The rendered, committed form
+that `space://steps/eval/<family>` actually resolves to lives under
+`configurations/assets/environments/skypilot/steps/eval/<family>/`, produced by
 `make publish-step` from the source template — never hand-edited.
-
-Recipes under `recipes/granite-evals/` choose which benchmarks a model family is
-scored on and own the per-benchmark image pins.

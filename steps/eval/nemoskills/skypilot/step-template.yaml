@@ -1,7 +1,7 @@
 name: nemoskills
 version: 0.1.0
 # The granite-evals "nemoskills" image family: benchmarks run through NVIDIA
-# NeMo-Skills' own pipelines, locally (no Slurm, no NeMo-Run). `granite_config.benchmark`
+# NeMo-Skills' own pipelines, locally (no Slurm, no NeMo-Run). `benchmark`
 # selects which one; see `granite-evals list` for the current set. As of this writing:
 #   aa-lcr                    AA-LCR (long-context reasoning), pass@1 judge correct
 #   aime25                    AIME25, pass@1 symbolic correct
@@ -30,8 +30,9 @@ version: 0.1.0
 #
 # THE CODE LIVES IN THIS REPO. The benchmark runtime is vendored under steps/eval/src
 # (core + this family's modules) and baked into the family's image by
-# steps/eval/images/{gpu,cpu}/Dockerfile.nemoskills; see steps/eval/Makefile. The image is
-# chosen at run time from granite_config.image. Nothing is cloned or mounted at launch.
+# the Dockerfile.gpu / Dockerfile.cpu in this family's directory (see
+# steps/eval/Makefile). The image is chosen at run time from config.image.
+# Nothing is cloned or mounted at launch.
 #
 # WHAT RUNS. `granite-evals run <benchmark>` serves model_path with vLLM inside the
 # job and runs NVIDIA NeMo-Skills' own pipeline for that benchmark against it, locally
@@ -53,56 +54,55 @@ version: 0.1.0
 # CUSTOM, not EVAL: gbcommon's StepType has no EVAL member.
 type: custom
 config:
-  granite_config:
-    # The benchmark id passed to `granite-evals run`. Required, e.g. "gpqa".
-    # See `granite-evals list` for this family's benchmark ids.
-    benchmark: ""
-    # The granite-evals image for this benchmark family (`make image-nemoskills` in
-    # steps/eval), pinned by its tag; results.json records the versions inside.
-    # Recipes set it once, as the GRANITE_EVALS_IMAGE_NEMOSKILLS parameter.
-    image: ""
-    # The checkpoint to score, as a LOCAL PATH (normally a distill-hf-export `hf_model`
-    # or an hfpull binding). Required.
-    model_path: ""
-    # Name the model is served under; empty = basename of model_path.
-    served_model_name: ""
-    # Relative values resolve against $GB_BUILD_WORKDIR.
-    output_dir: "output"
-    # SMOKE KNOB: score only the first N examples (in the order of the pinned prepared
-    # data, so two smoke runs are comparable). Empty = the benchmark's full set.
-    # Recipes set this per benchmark; see `granite-evals list` for each one's size.
-    limit: ""
-    # Independent generations per example (avg-of-k). Empty = benchmark default (1).
-    repeats: ""
-    # Concurrent requests to vLLM (NeMo-Skills max_concurrent_requests). Recipes set a
-    # per-benchmark default (32 for most of this family; gpqa/livecodebench-v6/scicode
-    # 64, mmlu-pro 128).
-    workers: "32"
-    # Dataset: empty = the upstream dataset and commit this benchmark pins in
-    # granite-evals (e.g. `Idavidrein/gpqa` for gpqa). A hub id, a prepared .jsonl or a
-    # directory holding <split>.jsonl overrides it, where the benchmark supports one.
-    dataset: ""
-    dataset_revision: ""
-    # Space-separated key=value benchmark options passed as --option, e.g.
-    # "temperature=0.6 max_tokens=32768" (unset sampling = the checkpoint's generation_config),
-    # "answers=gold" (reference answers through the same grading; model_path may be "none"),
-    # "ns.<key>=<value>" (any NeMo-Skills generation override).
-    options: ""
-    # all | generate | score. "generate" serves the model and saves its outputs
-    # (generation.json, the granite_generation artifact); "score" serves nothing and
-    # grades them on CPU in the same output_dir (results.json). Recipes run
-    # generate on a GPU target and score on a CPU-only target bound to it.
-    phase: "all"
-    # vLLM.
-    tensor_parallel_size: "1"
-    gpu_memory_utilization: "0.9"
-    max_model_len: ""
-    # Shared enroot squashfs cache. Only critpt-tools, hle-tools, livecodebench-v6,
-    # ruler-* and scicode in this family sandbox; set this for those, leave empty
-    # (skips the setup below) for the rest.
-    sandbox_cache: ""
-    # Empty leaves the image's HF cache default alone.
-    hf_home: ""
+  # The benchmark id passed to `granite-evals run`. Required, e.g. "gpqa".
+  # See `granite-evals list` for this family's benchmark ids.
+  benchmark: ""
+  # The granite-evals image for this benchmark family (`make image-nemoskills` in
+  # steps/eval), pinned by its tag; results.json records the versions inside.
+  # Recipes set it once, as the GRANITE_EVALS_IMAGE_NEMOSKILLS parameter.
+  image: ""
+  # The checkpoint to score, as a LOCAL PATH (normally a distill-hf-export `hf_model`
+  # or an hfpull binding). Required.
+  model_path: ""
+  # Name the model is served under; empty = basename of model_path.
+  served_model_name: ""
+  # Relative values resolve against $GB_BUILD_WORKDIR.
+  output_dir: "output"
+  # SMOKE KNOB: score only the first N examples (in the order of the pinned prepared
+  # data, so two smoke runs are comparable). Empty = the benchmark's full set.
+  # Recipes set this per benchmark; see `granite-evals list` for each one's size.
+  limit: ""
+  # Independent generations per example (avg-of-k). Empty = benchmark default (1).
+  repeats: ""
+  # Concurrent requests to vLLM (NeMo-Skills max_concurrent_requests). Recipes set a
+  # per-benchmark default (32 for most of this family; gpqa/livecodebench-v6/scicode
+  # 64, mmlu-pro 128).
+  workers: "32"
+  # Dataset: empty = the upstream dataset and commit this benchmark pins in
+  # granite-evals (e.g. `Idavidrein/gpqa` for gpqa). A hub id, a prepared .jsonl or a
+  # directory holding <split>.jsonl overrides it, where the benchmark supports one.
+  dataset: ""
+  dataset_revision: ""
+  # Space-separated key=value benchmark options passed as --option, e.g.
+  # "temperature=0.6 max_tokens=32768" (unset sampling = the checkpoint's generation_config),
+  # "answers=gold" (reference answers through the same grading; model_path may be "none"),
+  # "ns.<key>=<value>" (any NeMo-Skills generation override).
+  options: ""
+  # all | generate | score. "generate" serves the model and saves its outputs
+  # (generation.json, the granite_generation artifact); "score" serves nothing and
+  # grades them on CPU in the same output_dir (results.json). Recipes run
+  # generate on a GPU target and score on a CPU-only target bound to it.
+  phase: "all"
+  # vLLM.
+  tensor_parallel_size: "1"
+  gpu_memory_utilization: "0.9"
+  max_model_len: ""
+  # Shared enroot squashfs cache. Only critpt-tools, hle-tools, livecodebench-v6,
+  # ruler-* and scicode in this family sandbox; set this for those, leave empty
+  # (skips the setup below) for the rest.
+  sandbox_cache: ""
+  # Empty leaves the image's HF cache default alone.
+  hf_home: ""
 outputs:
   optional:
     # phase all | score: the scored results.json.
@@ -121,12 +121,12 @@ environment_configs:
         monitors:
           - skypilot_monitor
         config:
-          image_id: '{{ ("docker:" ~ config.granite_config.image) if config.granite_config.image else "" }}'
+          image_id: '{{ ("docker:" ~ config.image) if config.image else "" }}'
           resources: {}
           run: |
             set -e
             set -o pipefail
-            BENCHMARK="{{ config.granite_config.benchmark }}"
+            BENCHMARK="{{ config.benchmark }}"
             echo "=== granite $BENCHMARK on $(hostname) ==="
             nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
             # vLLM refuses to start inside an initialised torch.distributed env.
@@ -140,45 +140,45 @@ environment_configs:
             # enroot's layers in reverse order, so enroot's layer 0 (/etc/environment)
             # ends up under the base image's. The venv path is fixed by the image.
             export PATH="/opt/granite-evals/.venv/bin:$PATH"
-            command -v granite-evals >/dev/null || { echo "granite: granite-evals not on PATH; is granite_config.image set to a granite-evals image?"; exit 1; }
-            test -n "{{ config.granite_config.model_path }}" || { echo "granite: granite_config.model_path is required"; exit 1; }
+            command -v granite-evals >/dev/null || { echo "granite: granite-evals not on PATH; is config.image set to a granite-evals image?"; exit 1; }
+            test -n "{{ config.model_path }}" || { echo "granite: config.model_path is required"; exit 1; }
 
-            {% if config.granite_config.hf_home %}export HF_HOME="{{ config.granite_config.hf_home }}"; mkdir -p "$HF_HOME"{% endif %}
+            {% if config.hf_home %}export HF_HOME="{{ config.hf_home }}"; mkdir -p "$HF_HOME"{% endif %}
 
-            {% if config.granite_config.sandbox_cache %}
+            {% if config.sandbox_cache %}
             # Sandboxes: enroot inside this job's container. Image squashfs files go to
             # the shared cache; the per-sandbox rootfs goes to node-local scratch.
             export GRANITE_EVALS_SANDBOX=enroot
-            export GRANITE_EVALS_ENROOT_CACHE="{{ config.granite_config.sandbox_cache }}"
+            export GRANITE_EVALS_ENROOT_CACHE="{{ config.sandbox_cache }}"
             SCRATCH="${TMPDIR:-/tmp}/granite-$$"
             export ENROOT_DATA_PATH="$SCRATCH/enroot-data" ENROOT_CACHE_PATH="$SCRATCH/enroot-cache" ENROOT_RUNTIME_PATH="$SCRATCH/enroot-run" ENROOT_TEMP_PATH="$SCRATCH/enroot-tmp"
             mkdir -p "$GRANITE_EVALS_ENROOT_CACHE" "$ENROOT_DATA_PATH" "$ENROOT_CACHE_PATH" "$ENROOT_RUNTIME_PATH" "$ENROOT_TEMP_PATH"
             trap 'rm -rf "$SCRATCH"' EXIT
             {% endif %}
 
-            OUTPUT_DIR="{{ config.granite_config.output_dir }}"
+            OUTPUT_DIR="{{ config.output_dir }}"
             case "$OUTPUT_DIR" in /*) ;; *) OUTPUT_DIR="${GB_BUILD_WORKDIR:-$PWD}/$OUTPUT_DIR" ;; esac
             mkdir -p "$OUTPUT_DIR"
 
             OPTS=()
-            for kv in {{ config.granite_config.options }}; do OPTS+=(--option "$kv"); done
+            for kv in {{ config.options }}; do OPTS+=(--option "$kv"); done
 
             granite-evals run "$BENCHMARK" \
-              --model "{{ config.granite_config.model_path }}" \
+              --model "{{ config.model_path }}" \
               --output-dir "$OUTPUT_DIR" \
-              {% if config.granite_config.served_model_name %}--served-model-name "{{ config.granite_config.served_model_name }}"{% endif %} \
-              {% if config.granite_config.limit %}--limit {{ config.granite_config.limit }}{% endif %} \
-              {% if config.granite_config.repeats %}--repeats {{ config.granite_config.repeats }}{% endif %} \
-              --workers {{ config.granite_config.workers }} \
-              {% if config.granite_config.dataset %}--dataset "{{ config.granite_config.dataset }}"{% endif %} \
-              {% if config.granite_config.dataset_revision %}--dataset-revision "{{ config.granite_config.dataset_revision }}"{% endif %} \
-              --tensor-parallel-size {{ config.granite_config.tensor_parallel_size }} \
-              --gpu-memory-utilization "{{ config.granite_config.gpu_memory_utilization }}" \
-              --phase "{{ config.granite_config.phase }}" \
-              {% if config.granite_config.max_model_len %}--max-model-len {{ config.granite_config.max_model_len }}{% endif %} \
+              {% if config.served_model_name %}--served-model-name "{{ config.served_model_name }}"{% endif %} \
+              {% if config.limit %}--limit {{ config.limit }}{% endif %} \
+              {% if config.repeats %}--repeats {{ config.repeats }}{% endif %} \
+              --workers {{ config.workers }} \
+              {% if config.dataset %}--dataset "{{ config.dataset }}"{% endif %} \
+              {% if config.dataset_revision %}--dataset-revision "{{ config.dataset_revision }}"{% endif %} \
+              --tensor-parallel-size {{ config.tensor_parallel_size }} \
+              --gpu-memory-utilization "{{ config.gpu_memory_utilization }}" \
+              --phase "{{ config.phase }}" \
+              {% if config.max_model_len %}--max-model-len {{ config.max_model_len }}{% endif %} \
               "${OPTS[@]}" \
               2>&1 | tee "$OUTPUT_DIR/granite.log"
-            if [ "{{ config.granite_config.phase }}" = generate ]; then
+            if [ "{{ config.phase }}" = generate ]; then
               RESULT_FILE="$OUTPUT_DIR/generation.json"
               test -s "$RESULT_FILE" || { echo "granite: no $RESULT_FILE"; exit 1; }
               echo "GB_ARTIFACT_ID:granite_generation GB_ARTIFACT_PATH:${RESULT_FILE}"
@@ -197,7 +197,7 @@ environment_configs:
             interval_seconds: "{{ config.log_retrieval_interval_seconds | default(900) }}"
           extra_event_configs:
             - event_type: WORKLOAD_STATUS_EVENT
-              line_regex: "(vLLM ready at|granite-evals: {{ config.granite_config.benchmark }} =|granite-evals: \\S+ generated)"
+              line_regex: "(vLLM ready at|granite-evals: {{ config.benchmark }} =|granite-evals: \\S+ generated)"
               event_fields:
                 - field_name: status
                   field_value_template: "RUNNING"

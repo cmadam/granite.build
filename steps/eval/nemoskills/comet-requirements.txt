@@ -1,4 +1,4 @@
-# wmt24pp: the env /opt/comet runs ns's COMET scorer in (docker/extras/nemoskills.sh).
+# wmt24pp: the env /opt/comet runs ns's COMET scorer in (nemoskills/extras.sh).
 # Compiled from (comet.in): unbabel-comet==2.2.7 torch==2.13.0 setuptools==80.9.0 huggingface-hub<1.0
 #   UV_NO_CONFIG=1 uv pip compile comet.in --python-version 3.12 \
 #     --python-platform x86_64-manylinux_2_28 --generate-hashes --no-header

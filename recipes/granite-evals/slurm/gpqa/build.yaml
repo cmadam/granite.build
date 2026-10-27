@@ -16,19 +16,18 @@ granite.build:
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
-            granite_config:
-              benchmark: "gpqa"
-              image: "$${IMAGE}"
-              model_path: "$${MODEL_PATH}"
-              served_model_name: "$${SERVED_MODEL_NAME}"
-              output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gpqa"
-              limit: "$${LIMIT}"
-              repeats: "$${REPEATS}"
-              workers: "$${WORKERS}"
-              options: "$${OPTIONS}"
-              phase: "generate"
-              tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
-              hf_home: "$${HF_HOME}"
+            benchmark: "gpqa"
+            image: "$${IMAGE}"
+            model_path: "$${MODEL_PATH}"
+            served_model_name: "$${SERVED_MODEL_NAME}"
+            output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gpqa"
+            limit: "$${LIMIT}"
+            repeats: "$${REPEATS}"
+            workers: "$${WORKERS}"
+            options: "$${OPTIONS}"
+            phase: "generate"
+            tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+            hf_home: "$${HF_HOME}"
             skypilot:
               secrets:
                 secret_names_to_use_as_env_variable:
@@ -53,19 +52,18 @@ granite.build:
           config:
             poll_interval_seconds: $${POLL_INTERVAL_SECONDS}
             log_retrieval_interval_seconds: $${LOG_RETRIEVAL_INTERVAL_SECONDS}
-            granite_config:
-              benchmark: "gpqa"
-              image: "$${IMAGE_CPU}"
-              model_path: "$${MODEL_PATH}"
-              served_model_name: "$${SERVED_MODEL_NAME}"
-              output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gpqa"
-              limit: "$${LIMIT}"
-              repeats: "$${REPEATS}"
-              workers: "$${WORKERS}"
-              options: "$${OPTIONS}"
-              phase: "score"
-              tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
-              hf_home: "$${HF_HOME}"
+            benchmark: "gpqa"
+            image: "$${IMAGE_CPU}"
+            model_path: "$${MODEL_PATH}"
+            served_model_name: "$${SERVED_MODEL_NAME}"
+            output_dir: "$${OUTPUT_ROOT}/$${RUN_NAME}/gpqa"
+            limit: "$${LIMIT}"
+            repeats: "$${REPEATS}"
+            workers: "$${WORKERS}"
+            options: "$${OPTIONS}"
+            phase: "score"
+            tensor_parallel_size: "$${TENSOR_PARALLEL_SIZE}"
+            hf_home: "$${HF_HOME}"
             skypilot:
               secrets:
                 secret_names_to_use_as_env_variable:

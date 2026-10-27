@@ -1,19 +1,19 @@
 # judged (SkyPilot)
 
 Scores a checkpoint on one of the granite-evals **judged** family's benchmarks: LLM-judged
-tasks, several run through an agent in an enroot sandbox. `granite_config.benchmark`
+tasks, several run through an agent in an enroot sandbox. `benchmark`
 selects which one. The job serves the model with vLLM, runs the benchmark locally, has
 an LLM judge score the result (except where noted), and writes one `results.json`.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image (the `judged` extra). Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`, the `judged` extra),
+baked into this family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/judged
     config:
-      granite_config:
-        benchmark: gdpval
+      benchmark: gdpval
 ```
 
 ## Benchmarks in this family
@@ -45,7 +45,7 @@ Judge calls go through granite-evals' spend meter: with `GRANITE_EVALS_SPEND_LED
 has `details.judge_usage` (tokens, cache hits, estimated cost) and `details.api_spend`
 (the gateway's reported cost).
 
-## Config (`granite_config`)
+## Config
 
 | Field | Purpose |
 |---|---|

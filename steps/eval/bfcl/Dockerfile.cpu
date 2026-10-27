@@ -12,16 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# granite-evals image for the `nemoskills` benchmark family: NeMo-Skills benchmarks (aime25, gpqa, hle, ruler, scicode, browsecomp, ...).
+# granite-evals image for the `bfcl` benchmark family: BFCL v4 (gorilla) function calling.
 #
 # One image per benchmark family, because the upstream harnesses' own dependencies
 # conflict with one another (see [tool.uv] conflicts in src/core/pyproject.toml).
 # Build context is steps/eval/ (see the Makefile):
-#   podman build --platform linux/amd64 -f images/gpu/Dockerfile.nemoskills . -t <registry>/gb-step-eval-nemoskills:<tag>
+#   podman build --platform linux/amd64 -f bfcl/Dockerfile.cpu . -t <registry>/gb-step-eval-bfcl-cpu:<tag>
 #
-# The image carries vLLM (the `serve` extra), the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (src/nemoskills), the
-# family's pinned harness (the `nemoskills` extra) and the enroot CLI for benchmarks
+# CPU sibling of the GPU image for `--phase score` (grading, no model served):
+# no vLLM. The image carries the shared granite_evals core
+# (src/core) overlaid with this family's benchmark modules (src/bfcl), the
+# family's pinned harness (the `bfcl` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
 # System packages are installed in a throwaway stage and shipped as ONE plain layer.
@@ -61,20 +62,14 @@ ENV UV_PROJECT_ENVIRONMENT=${EVALS_HOME}/.venv \
 # come first so code edits don't reinstall them. --chmod: the build host's checkout may be
 # unreadable to other users, which COPY would preserve.
 COPY --chmod=755 src/core/pyproject.toml src/core/uv.lock ./
-# Family-specific system setup (images/extras/*.sh), bind-mounted so nothing is left
-# behind in a layer. UV_NO_CONFIG: the scripts run from WORKDIR, and uv would otherwise
-# apply this project's [tool.uv] settings to any separate env they build.
-RUN --mount=type=bind,source=images/extras,target=/tmp/extras \
-    UV_NO_CONFIG=1 bash -euxo pipefail /tmp/extras/nemoskills.sh \
-    && rm -rf /var/lib/apt/lists/*
 
-RUN uv sync --locked --no-install-project --no-dev --extra serve --extra nemoskills
+RUN uv sync --locked --no-install-project --no-dev --extra bfcl
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 src/nemoskills/granite_evals ./src/granite_evals
+COPY --chmod=755 src/bfcl/granite_evals ./src/granite_evals
 COPY --chmod=755 src/core/tests ./tests
-COPY --chmod=755 src/nemoskills/tests ./tests
-RUN uv sync --locked --no-dev --extra serve --extra nemoskills \
+COPY --chmod=755 src/bfcl/tests ./tests
+RUN uv sync --locked --no-dev --extra bfcl \
     && uv run --no-sync --with pytest pytest -q -p no:cacheprovider --basetemp=/opt/granite-evals/.pytest-tmp tests \
     && granite-evals list \
     && rm -rf /opt/granite-evals/.pytest-tmp /tmp/pytest-of-root

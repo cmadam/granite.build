@@ -12,15 +12,16 @@ BFCL's SerpAPI/DuckDuckGo backend. `results.json` records the backend under
 `web_search_backend`. Scores in the web-search categories are not directly comparable
 with the public leaderboard. No paid APIs are called.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`), baked into this
+family's image by `Dockerfile.gpu` / `Dockerfile.cpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/bfcl
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|

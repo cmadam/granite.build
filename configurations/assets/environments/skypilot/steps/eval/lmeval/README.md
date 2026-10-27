@@ -13,15 +13,16 @@ ar, cs, it, ko and zh. Dutch is on Granite's list but MMLU-ProX has no Dutch. Th
 11 x 588 test questions. Neither the model card nor the blog defines the subset, so
 `languages=` changes it.
 
-The code is the external [granite-evals](https://github.com/laminair/granite-evals) runtime,
-shipped as a prebuilt image. Nothing is built from this step.
+The code is the vendored granite-evals runtime (`steps/eval/src`),
+baked into this family's image by `Dockerfile.gpu` one directory up (built by
+`steps/eval/Makefile`). Nothing is built from this step at run time.
 
 ```yaml
 steps:
   - step_uri: space://steps/eval/lmeval
 ```
 
-## Config (`granite_config`)
+## Config
 
 | Field | Default | Purpose |
 |---|---|---|
