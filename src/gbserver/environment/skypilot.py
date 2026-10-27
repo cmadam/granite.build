@@ -3198,10 +3198,12 @@ class Skypilot(Environment):
         ``None`` to launch with the step's own ``image_id``.
 
         Only acts when the environment sets ``slurm_image_cache`` and the step
-        targets SLURM with a registry image; see ``_slurm_image_cache``. Every
-        failure there falls back to the registry image, so this never fails
-        a launch. A config or SSH-materialize error is left to
-        ``_launch_skypilot_inner``, which reports it through the normal path.
+        targets SLURM with a registry image; see ``_slurm_image_cache``. This
+        never fails a launch: a cache failure, and an error resolving the
+        launch's cloud or SSH config here, log a warning and launch from the
+        registry image. A malformed block is rejected earlier, when the
+        environment loads (``EnvironmentConfig``); an SSH-config error recurs
+        in ``_launch_skypilot_inner``, which reports it through the normal path.
         """
         from gbserver.environment._slurm_image_cache import (
             parse_cache_config,

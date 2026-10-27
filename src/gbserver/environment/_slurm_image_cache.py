@@ -56,9 +56,10 @@ import re
 import shlex
 import threading
 import time
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from gbserver.utils.logger import get_logger
 
@@ -69,6 +70,12 @@ logger = get_logger(__name__)
 # cache is skipped rather than quoting it into a script.
 _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
 _SHARE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
+# The import job's #SBATCH lines come from operator config. A newline in a key
+# or value would end the comment and become a script line, so both are
+# allowlisted when the block is parsed.
+_PARTITION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SBATCH_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+_SBATCH_VALUE_RE = re.compile(r"^[\x21-\x7e]+$")  # printable ASCII, no spaces
 
 # A flat root filesystem has /bin/sh (or /usr/bin/sh when /bin is a symlink).
 # A layered OCI sqsh (numbered layer dirs at the root) does not, and Pyxis
@@ -79,6 +86,12 @@ _SHARE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 _VALID_SQSH_FN = (
     'sqsh_valid() { [ -s "$1" ] && unsquashfs -l "$1" 2>/dev/null '
     "| grep -E '^squashfs-root/(usr/)?bin/sh$' >/dev/null; }"
+)
+
+# A host-key line: "<hosts> <keytype> <base64>", nothing else (no newline).
+_KNOWN_HOSTS_LINE_RE = re.compile(
+    r"^[A-Za-z0-9.,:\[\]*?-]+ (ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) "
+    r"[A-Za-z0-9+/=]+$"
 )
 
 _SSH_OPTIONS = (
@@ -94,12 +107,23 @@ _SSH_OPTIONS = (
     "LogLevel=ERROR",
 )
 
+# gbserver's own known_hosts for these checks, beside ~/.slurm/config. ssh -F
+# reads only that config, whose gbserver-written block has no host-key options,
+# so without this a fresh host (new pod, CI runner) with an empty
+# ~/.ssh/known_hosts fails every check with "Host key verification failed".
+KNOWN_HOSTS_FILENAME = "gbserver_known_hosts"
+
+# The 20 GB nemo-rl image took 72 min to import on BlueVela's cpu partition,
+# nearly all of it download and extract, so the job gets 3 hours.
 _DEFAULT_IMPORT_SBATCH: Dict[str, Any] = {
-    # enroot's mksquashfs uses every CPU it is given; the squash dominates.
     "cpus-per-task": 16,
     "mem": "64G",
-    "time": "02:00:00",
+    "time": "03:00:00",
 }
+# How long gbserver waits for an import, counted from when it holds the
+# per-image lock and so including the import job's queue time. Kept well above
+# the job's own --time, so a healthy import is never abandoned for queueing.
+_DEFAULT_TIMEOUT_SECONDS = 5 * 3600.0
 
 
 @dataclass(frozen=True)
@@ -113,18 +137,23 @@ class SlurmImageCacheConfig:
         sbatch_options: Extra ``#SBATCH`` directives for the import job (keys
             without the leading ``--``; ``None`` drops a default, ``True``
             emits a bare flag). Merged over cpus/mem/time defaults.
-        timeout_seconds: How long to wait for an import (queueing included)
+        timeout_seconds: How long to wait for an import, counted once this
+            launch holds the per-image lock (the job's queue time included),
             before falling back to the registry reference.
         poll_interval_seconds: How often to poll the import job.
         ssh_timeout_seconds: Bound on each SSH command to the login node.
+        known_hosts: Pinned host-key lines for the login nodes. When set, only
+            these keys are trusted; otherwise a login node's key is recorded on
+            first contact (``accept-new``) and must match afterwards.
     """
 
     share_path: str
     partition: str
     sbatch_options: Dict[str, Any] = field(default_factory=dict)
-    timeout_seconds: float = 7200.0
+    timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     poll_interval_seconds: float = 30.0
     ssh_timeout_seconds: float = 120.0
+    known_hosts: Tuple[str, ...] = ()
 
     @property
     def cache_dir(self) -> str:
@@ -134,8 +163,10 @@ class SlurmImageCacheConfig:
 def parse_cache_config(raw: Any) -> Optional[SlurmImageCacheConfig]:
     """Parse ``config.slurm_image_cache``; ``None`` when unset or disabled.
 
-    :raises ValueError: on a malformed block, so a typo fails the launch
-        loudly instead of silently disabling the cache.
+    ``EnvironmentConfig`` calls this when the environment loads, so a typo
+    surfaces there, before any launch, instead of silently disabling the cache.
+
+    :raises ValueError: on a malformed block.
     """
     if not raw:
         return None
@@ -149,20 +180,43 @@ def parse_cache_config(raw: Any) -> Optional[SlurmImageCacheConfig]:
         raise ValueError(
             f"slurm_image_cache.share_path must be an absolute path, got {share_path!r}"
         )
-    if not isinstance(partition, str) or not partition:
-        raise ValueError(f"slurm_image_cache.partition is required, got {partition!r}")
+    if not isinstance(partition, str) or not _PARTITION_RE.match(partition):
+        raise ValueError(
+            f"slurm_image_cache.partition must be a partition name, got {partition!r}"
+        )
     sbatch_options = raw.get("sbatch_options") or {}
     if not isinstance(sbatch_options, dict):
         raise ValueError("slurm_image_cache.sbatch_options must be a mapping")
-    kwargs = {
-        k: float(raw[k])
-        for k in ("timeout_seconds", "poll_interval_seconds", "ssh_timeout_seconds")
-        if raw.get(k) is not None
-    }
+    for key, value in sbatch_options.items():
+        if not _SBATCH_KEY_RE.match(str(key).lstrip("-")):
+            raise ValueError(f"slurm_image_cache.sbatch_options: bad key {key!r}")
+        if value is None or isinstance(value, bool):
+            continue
+        if not _SBATCH_VALUE_RE.match(str(value)):
+            raise ValueError(
+                f"slurm_image_cache.sbatch_options.{key}: bad value {value!r}"
+            )
+    kwargs = {}
+    for k in ("timeout_seconds", "poll_interval_seconds", "ssh_timeout_seconds"):
+        if raw.get(k) is None:
+            continue
+        kwargs[k] = float(raw[k])
+        if kwargs[k] <= 0:
+            raise ValueError(f"slurm_image_cache.{k} must be > 0, got {raw[k]!r}")
+    known_hosts: List[str] = raw.get("known_hosts") or []
+    if not isinstance(known_hosts, list) or not all(
+        isinstance(line, str) and _KNOWN_HOSTS_LINE_RE.match(line.strip())
+        for line in known_hosts
+    ):
+        raise ValueError(
+            "slurm_image_cache.known_hosts must be a list of known_hosts lines "
+            '("<host> <keytype> <base64 key>")'
+        )
     return SlurmImageCacheConfig(
         share_path=share_path,
         partition=partition,
         sbatch_options=dict(sbatch_options),
+        known_hosts=tuple(line.strip() for line in known_hosts),
         **kwargs,
     )
 
@@ -264,17 +318,21 @@ if sqsh_valid "$SQSH"; then
 fi
 
 # Job-unique names: a killed job never leaves a partial file at the final name.
+# Import onto node-local NVMe when there is one, then copy beside the target;
+# without it, import straight to the temporary name (no second GPFS copy).
 FINAL_TMP="$DIR/.$(basename "$SQSH" .sqsh).tmp-$SLURM_JOB_ID.sqsh"
-SCRATCH="$DIR"
+LOCAL_TMP="$FINAL_TMP"
 if [ -d "/opt/nvme/$USER" ] && [ -w "/opt/nvme/$USER" ]; then
-    SCRATCH="/opt/nvme/$USER/gb-image-cache"
-    mkdir -p "$SCRATCH"
+    mkdir -p "/opt/nvme/$USER/gb-image-cache"
+    LOCAL_TMP="/opt/nvme/$USER/gb-image-cache/.$(basename "$SQSH" .sqsh).import-$SLURM_JOB_ID.sqsh"
 fi
-LOCAL_TMP="$SCRATCH/.$(basename "$SQSH" .sqsh).import-$SLURM_JOB_ID.sqsh"
 trap 'rm -f "$LOCAL_TMP" "$FINAL_TMP"' EXIT
 
-echo "[$(date)] importing {image_ref} on $(hostname) into $LOCAL_TMP"
+echo "[$(date)] importing "{shlex.quote(image_ref)}" on $(hostname) into $LOCAL_TMP"
 enroot import -o "$LOCAL_TMP" {q_uri}
+# enroot import writes a flat rootfs. The layered sqsh the LSF driver has to
+# flatten comes from its own mksquashovlfs wrapper, which this job does not
+# install, so a layered or broken result is refused rather than flattened.
 if ! sqsh_valid "$LOCAL_TMP"; then
     echo "[$(date)] ERROR: imported image has no /bin/sh (layered or broken); not caching it" >&2
     exit 1
@@ -293,10 +351,28 @@ class _LoginNode:  # pylint: disable=too-few-public-methods
     """Runs commands on a SLURM login node through the ``~/.slurm/config``
     alias gbserver materializes (``ssh -F``)."""
 
-    def __init__(self, alias: str, ssh_config: Path, timeout: float) -> None:
+    def __init__(
+        self,
+        alias: str,
+        ssh_config: Path,
+        timeout: float,
+        known_hosts: Tuple[str, ...] = (),
+    ) -> None:
         self._alias = alias
         self._ssh_config = ssh_config
         self._timeout = timeout
+        self._known_hosts_file = ssh_config.parent / KNOWN_HOSTS_FILENAME
+        if known_hosts:
+            # Pinned: the file holds exactly the configured keys, refreshed
+            # on every use so a config change takes effect.
+            self._known_hosts_file.parent.mkdir(parents=True, exist_ok=True)
+            self._known_hosts_file.write_text("\n".join(known_hosts) + "\n")
+            self._host_key_options: Tuple[str, ...] = (
+                "-o",
+                "StrictHostKeyChecking=yes",
+            )
+        else:
+            self._host_key_options = ("-o", "StrictHostKeyChecking=accept-new")
 
     async def run(
         self, command: str, stdin: Optional[str] = None
@@ -310,6 +386,9 @@ class _LoginNode:  # pylint: disable=too-few-public-methods
             "-F",
             str(self._ssh_config),
             *_SSH_OPTIONS,
+            "-o",
+            f"UserKnownHostsFile={self._known_hosts_file}",
+            *self._host_key_options,
             self._alias,
             command,
             stdin=asyncio.subprocess.PIPE if stdin is not None else None,
@@ -347,7 +426,7 @@ async def _queued_job_id(node: _LoginNode, job_name: str) -> Optional[str]:
     rc, out, err = await node.run(f"squeue -h -n {shlex.quote(job_name)} -o %i")
     if rc != 0:
         raise RuntimeError(f"squeue failed (rc={rc}): {err.strip()}")
-    ids = out.split()
+    ids = [i for i in out.split() if i.isdigit()]
     return ids[0] if ids else None
 
 
@@ -364,9 +443,15 @@ async def _submit(
 
 
 async def _wait_for_job(
-    node: _LoginNode, job_id: str, cfg: SlurmImageCacheConfig, deadline: float
+    node: _LoginNode,
+    job_id: str,
+    cfg: SlurmImageCacheConfig,
+    deadline: float,
+    owned: bool,
 ) -> None:
-    """Poll until ``job_id`` leaves the queue; on timeout cancel it and raise.
+    """Poll until ``job_id`` leaves the queue; on timeout raise, cancelling the
+    job first only if this process submitted it (``owned``). A job another
+    gbserver submitted is left to that gbserver and its own time limit.
 
     ``squeue -j`` of a job that has left the queue prints nothing, or (once
     slurmctld has purged it) exits 1 with "Invalid job id". Any other failure
@@ -385,10 +470,11 @@ async def _wait_for_job(
         except RuntimeError as e:
             logger.warning("Polling image import job %s failed: %s", job_id, e)
         if time.monotonic() >= deadline:
-            try:
-                await node.run(f"scancel {job_id}")
-            except RuntimeError:
-                pass
+            if owned:
+                try:
+                    await node.run(f"scancel {job_id}")
+                except RuntimeError:
+                    pass
             raise RuntimeError(
                 f"image import job {job_id} did not finish in {cfg.timeout_seconds:.0f}s"
             )
@@ -398,24 +484,31 @@ async def _wait_for_job(
 @dataclass
 class _Slot:
     """Per-(event loop, cache file) state: the lock that serializes resolves
-    of one file, and the outcome of the last import attempt made under it."""
+    of one file, and how many import attempts made under it have failed."""
 
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    attempts: int = 0
-    last_failed: bool = False
+    failures: int = 0
 
 
-# Keyed by event loop too: asyncio locks bind to the loop they first run on.
-_SLOTS: Dict[Tuple[int, str], _Slot] = {}
+# Per event loop, because an asyncio.Lock binds to the loop it first runs on,
+# and each build runs in its own asyncio.run (BuildRunner). Weakly keyed by the
+# loop object, so a finished build's slots go with its loop and a new loop can
+# never inherit a dead loop's lock.
+_SLOTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, _Slot]]" = (
+    weakref.WeakKeyDictionary()
+)
 _SLOTS_GUARD = threading.Lock()
 
 
 def _slot_for(sqsh_path: str) -> _Slot:
-    key = (id(asyncio.get_running_loop()), sqsh_path)
+    loop = asyncio.get_running_loop()
     with _SLOTS_GUARD:
-        slot = _SLOTS.get(key)
+        slots = _SLOTS.get(loop)
+        if slots is None:
+            slots = _SLOTS[loop] = {}
+        slot = slots.get(sqsh_path)
         if slot is None:
-            slot = _SLOTS[key] = _Slot()
+            slot = slots[sqsh_path] = _Slot()
         return slot
 
 
@@ -442,15 +535,22 @@ async def resolve_cached_image(
         return image_id
     sqsh_path = f"{cfg.cache_dir}/{sqsh_name(ref)}"
     cached = f"{prefix or 'docker:'}{sqsh_path}"
-    node = _LoginNode(
-        cluster_alias,
-        ssh_config or Path.home() / ".slurm" / "config",
-        cfg.ssh_timeout_seconds,
-    )
-    started = time.monotonic()
     slot = _slot_for(sqsh_path)
-    attempts_seen = slot.attempts
+    # Snapshot on arrival: an attempt that fails after this, while this launch
+    # waits for the lock, makes it fall back instead of retrying (below).
+    failures_seen = slot.failures
+    attempted = False
     try:
+        node = _LoginNode(
+            cluster_alias,
+            ssh_config or Path.home() / ".slurm" / "config",
+            cfg.ssh_timeout_seconds,
+            cfg.known_hosts,
+        )
+        # Hits need no lock, so the targets of one image check in parallel.
+        if await _is_cached(node, sqsh_path):
+            logger.info("SLURM image cache hit: %s -> %s", ref, sqsh_path)
+            return cached
         async with slot.lock:
             if await _is_cached(node, sqsh_path):
                 logger.info("SLURM image cache hit: %s -> %s", ref, sqsh_path)
@@ -458,14 +558,17 @@ async def resolve_cached_image(
             # An import ran and failed while this launch waited for the lock:
             # fall back with it rather than each waiter submitting another
             # import of an image that just failed. The next launch retries.
-            if slot.attempts != attempts_seen and slot.last_failed:
+            if slot.failures != failures_seen:
                 raise RuntimeError(
                     "the import attempted for a concurrent launch failed"
                 )
-            slot.attempts += 1
-            slot.last_failed = True
+            attempted = True
+            # The wait budget starts once the lock is held, so time spent
+            # queued behind another launch's import does not count against it.
+            started = time.monotonic()
             job_name = import_job_name(sqsh_path)
             job_id = await _queued_job_id(node, job_name)
+            owned = job_id is None
             if job_id:
                 logger.info(
                     "SLURM image cache miss for %s: waiting on import job %s "
@@ -486,13 +589,12 @@ async def resolve_cached_image(
                     job_name,
                     job_id,
                 )
-            await _wait_for_job(node, job_id, cfg, started + cfg.timeout_seconds)
+            await _wait_for_job(node, job_id, cfg, started + cfg.timeout_seconds, owned)
             if not await _is_cached(node, sqsh_path):
                 raise RuntimeError(
                     f"import job {job_id} finished but {sqsh_path} is not a valid "
                     f"image; see {cfg.cache_dir}/logs/{job_name}-{job_id}.out"
                 )
-            slot.last_failed = False
             logger.info(
                 "SLURM image cache filled: %s -> %s in %.0fs",
                 ref,
@@ -501,6 +603,8 @@ async def resolve_cached_image(
             )
             return cached
     except Exception as e:  # pylint: disable=broad-except
+        if attempted:
+            slot.failures += 1
         logger.warning(
             "SLURM image cache unavailable for %s (%s); launching from the "
             "registry instead, which imports the image inside the job",

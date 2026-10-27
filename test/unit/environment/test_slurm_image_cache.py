@@ -127,11 +127,91 @@ class TestParseCacheConfig:
             {"share_path": "/a b", "partition": "cpu"},
             {"share_path": SHARE},
             {"share_path": SHARE, "partition": "cpu", "sbatch_options": "x"},
+            # A newline would end the #SBATCH comment and run as a command.
+            {"share_path": SHARE, "partition": "cpu\nid > /tmp/pwned"},
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "sbatch_options": {"qos": "cpu\nid"},
+            },
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "sbatch_options": {"q\nos": "cpu"},
+            },
+            {"share_path": SHARE, "partition": "cpu", "sbatch_options": {"qos": "a b"}},
+            {"share_path": SHARE, "partition": "c pu"},
+            {"share_path": SHARE, "partition": "cpu", "poll_interval_seconds": 0},
+            {"share_path": SHARE, "partition": "cpu", "timeout_seconds": -1},
+            {"share_path": SHARE, "partition": "cpu", "known_hosts": "x"},
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "known_hosts": ["h ssh-ed25519 AAA\nid"],
+            },
         ],
     )
     def test_malformed_fails_loudly(self, raw):
         with pytest.raises(ValueError):
             parse_cache_config(raw)
+
+    def test_sbatch_flags_and_null_still_parse(self):
+        cfg = parse_cache_config(
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "sbatch_options": {"exclusive": True, "mem": None, "time": "04:00:00"},
+                "known_hosts": ["login2.bluevela.rmf.ibm.com ssh-ed25519 AAAAC3Nz+/="],
+            }
+        )
+        assert cfg is not None
+        assert cfg.sbatch_options == {
+            "exclusive": True,
+            "mem": None,
+            "time": "04:00:00",
+        }
+        assert cfg.known_hosts == (
+            "login2.bluevela.rmf.ibm.com ssh-ed25519 AAAAC3Nz+/=",
+        )
+
+    def test_default_wait_outlasts_the_import_jobs_time_limit(self):
+        # The budget includes the import job's queue time, so it must exceed
+        # the job's own --time or a healthy, late-starting import is abandoned.
+        cfg = _cfg()
+        h, m, sec = (int(x) for x in cache._DEFAULT_IMPORT_SBATCH["time"].split(":"))
+        assert cfg.timeout_seconds > h * 3600 + m * 60 + sec
+        # 72 min measured for the 20 GB nemo-rl image.
+        assert h * 3600 + m * 60 + sec > 72 * 60
+
+
+class TestEnvironmentLoad:
+    def test_malformed_block_is_rejected_when_the_environment_loads(self):
+        from pydantic import ValidationError
+
+        from gbserver.types.environmentconfig import EnvironmentConfig
+
+        with pytest.raises(ValidationError, match="slurm_image_cache"):
+            EnvironmentConfig(
+                name="x",
+                type="Skypilot",
+                config={
+                    "slurm_image_cache": {"share_path": SHARE, "partition": "cpu\nid"}
+                },
+            )
+
+    def test_the_bluevela_environment_loads(self):
+        from pathlib import Path
+
+        import yaml
+
+        from gbserver.types.environmentconfig import EnvironmentConfig
+
+        path = (
+            Path(__file__).resolve().parents[3]
+            / "configurations/assets/environments/skypilot/slurm/ibm-bluevela/environment.yaml"
+        )
+        env = EnvironmentConfig(**yaml.safe_load(path.read_text()))
+        assert parse_cache_config(env.config["slurm_image_cache"]) is not None
 
 
 class TestImportScript:
@@ -168,10 +248,18 @@ class TestImportScript:
         assert "tmp-$SLURM_JOB_ID.sqsh" in s
         assert "import-$SLURM_JOB_ID.sqsh" in s
         assert 'enroot import -o "$LOCAL_TMP"' in s
+        # Without NVMe the import goes straight to the temporary name: one
+        # GPFS write, not an import plus a full copy.
+        assert s.index('LOCAL_TMP="$FINAL_TMP"') < s.index("/opt/nvme/$USER")
         assert s.rindex('mv -f "$FINAL_TMP" "$SQSH"') > s.index(
             'if ! sqsh_valid "$LOCAL_TMP"'
         )
         assert 'trap \'rm -f "$LOCAL_TMP" "$FINAL_TMP"\' EXIT' in s
+
+    def test_image_ref_is_quoted_in_the_echo(self):
+        assert f'importing "{REF}" on' in self._script() or (
+            f"importing \"'{REF}'\"" in self._script()
+        )
 
     def test_uses_the_enroot_registry_syntax(self):
         assert (
@@ -275,9 +363,19 @@ class FakeNode:
         return sum(1 for c in self.calls if prefix in c)
 
 
+@pytest.fixture(autouse=True)
+def _restore_login_node():
+    """Put the real ``_LoginNode`` back after each test. ``_resolve`` swaps it
+    without a context manager because concurrent resolves would interleave
+    ``patch`` enter/exit and leave the fake installed."""
+    real = cache._LoginNode
+    yield
+    cache._LoginNode = real
+
+
 async def _resolve(node: FakeNode, image_id=f"docker:{REF}", **cfg_kw):
-    with patch.object(cache, "_LoginNode", lambda *a, **k: node):
-        return await resolve_cached_image(image_id, _cfg(**cfg_kw), "bluevela")
+    cache._LoginNode = lambda *a, **k: node  # type: ignore[assignment,misc]
+    return await resolve_cached_image(image_id, _cfg(**cfg_kw), "bluevela")
 
 
 class TestResolve:
@@ -334,6 +432,37 @@ class TestResolve:
         assert node.count("scancel 4242") == 1
 
     @pytest.mark.asyncio
+    async def test_timeout_never_cancels_another_gbservers_import(self):
+        node = FakeNode(queued="999", squeue_polls=10**6)
+        assert await _resolve(node, timeout_seconds=0) == f"docker:{REF}"
+        assert node.count("scancel") == 0
+
+    @pytest.mark.asyncio
+    async def test_a_non_numeric_squeue_id_is_ignored(self):
+        node = FakeNode(queued="junk;rm")
+        assert await _resolve(node) == f"docker:{SQSH}"
+        assert node.count("squeue -h -j junk") == 0
+        assert node.count("sbatch --parsable") == 1
+
+    @pytest.mark.asyncio
+    async def test_time_queued_behind_another_import_is_not_counted(self, monkeypatch):
+        # The launch waits for the lock while the clock passes its whole
+        # budget. Its own wait must start once it holds the lock; measured
+        # from arrival, it would give up after the first poll and cancel.
+        clock = {"t": 0.0}
+        monkeypatch.setattr(cache.time, "monotonic", lambda: clock["t"])
+        node = FakeNode(squeue_polls=2)
+        slot = cache._slot_for(SQSH)
+        await slot.lock.acquire()
+        task = asyncio.create_task(_resolve(node, timeout_seconds=100))
+        while node.count("sqsh_valid") == 0:
+            await asyncio.sleep(0)
+        clock["t"] = 1000.0
+        slot.lock.release()
+        assert await task == f"docker:{SQSH}"
+        assert node.count("scancel") == 0
+
+    @pytest.mark.asyncio
     async def test_poll_ssh_blip_is_retried(self):
         node = FakeNode(squeue_polls=1)
         real_run = node.run
@@ -356,6 +485,27 @@ class TestResolve:
         assert node.count("sbatch --parsable") == 1
 
     @pytest.mark.asyncio
+    async def test_a_launch_arriving_mid_import_falls_back_when_it_fails(self):
+        # The second launch arrives after the first already holds the lock
+        # and is waiting on its job. The old attempt counter was bumped
+        # before the second read it, so the failure went unnoticed and the
+        # second launch submitted its own import.
+        node = FakeNode(import_fills=False, squeue_polls=3)
+        first = asyncio.create_task(_resolve(node))
+        while node.count("sbatch --parsable") == 0:
+            await asyncio.sleep(0)
+        second = asyncio.create_task(_resolve(node))
+        assert await asyncio.gather(first, second) == [f"docker:{REF}"] * 2
+        assert node.count("sbatch --parsable") == 1
+
+    @pytest.mark.asyncio
+    async def test_hits_do_not_wait_for_the_lock(self):
+        node = FakeNode(cached=True)
+        slot = cache._slot_for(SQSH)
+        async with slot.lock:
+            assert await _resolve(node) == f"docker:{SQSH}"
+
+    @pytest.mark.asyncio
     async def test_a_later_launch_retries_after_a_failure(self):
         node = FakeNode(import_fills=False)
         assert await _resolve(node) == f"docker:{REF}"
@@ -370,6 +520,66 @@ class TestResolve:
         results = await asyncio.gather(*(_resolve(node) for _ in range(5)))
         assert results == [f"docker:{SQSH}"] * 5
         assert node.count("sbatch --parsable") == 1
+
+
+class TestSlots:
+    def test_each_event_loop_gets_its_own_lock(self):
+        # Each build runs in its own asyncio.run (BuildRunner). A lock reused
+        # from an earlier loop raises "bound to a different event loop" on the
+        # first contended acquire.
+        async def contend():
+            node = FakeNode(squeue_polls=2)
+            return await asyncio.gather(_resolve(node), _resolve(node))
+
+        for _ in range(3):
+            assert asyncio.run(contend()) == [f"docker:{SQSH}"] * 2
+
+    def test_slots_go_away_with_their_loop(self):
+        import gc
+
+        async def touch():
+            cache._slot_for(SQSH)
+
+        before = len(cache._SLOTS)
+        for _ in range(5):
+            asyncio.run(touch())
+        gc.collect()
+        assert len(cache._SLOTS) <= before
+
+
+class TestHostKeys:
+    def _argv(self, tmp_path, known_hosts=()):
+        cfg = tmp_path / ".slurm" / "config"
+        cfg.parent.mkdir()
+        cfg.write_text("Host bluevela\n")
+        node = cache._LoginNode("bluevela", cfg, 5, known_hosts)
+        seen = {}
+
+        async def fake_exec(*argv, **_):
+            seen["argv"] = argv
+            proc = AsyncMock()
+            proc.communicate.return_value = (b"", b"")
+            proc.returncode = 0
+            return proc
+
+        with patch.object(asyncio, "create_subprocess_exec", fake_exec):
+            asyncio.run(node.run("true"))
+        return seen["argv"], cfg.parent / cache.KNOWN_HOSTS_FILENAME
+
+    def test_first_contact_records_the_key_in_gbservers_own_file(self, tmp_path):
+        # ssh -F reads only ~/.slurm/config, which has no host-key options, so
+        # without these BatchMode fails with "Host key verification failed" on
+        # any host whose ~/.ssh/known_hosts lacks the login node.
+        argv, kh = self._argv(tmp_path)
+        assert f"UserKnownHostsFile={kh}" in argv
+        assert "StrictHostKeyChecking=accept-new" in argv
+        assert "StrictHostKeyChecking=no" not in argv
+
+    def test_pinned_keys_are_written_and_enforced(self, tmp_path):
+        line = "login2.bluevela.rmf.ibm.com ssh-ed25519 AAAAC3Nz"
+        argv, kh = self._argv(tmp_path, (line,))
+        assert kh.read_text() == line + "\n"
+        assert "StrictHostKeyChecking=yes" in argv
 
 
 # ---------------------------------------------------------------------------
@@ -444,8 +654,19 @@ class TestLaunchWiring:
         assert kwargs["image_id"] is None
 
     @pytest.mark.asyncio
-    async def test_malformed_block_skips_the_cache_without_failing(self):
-        env = {**_SLURM_ENV, "slurm_image_cache": {"partition": "cpu"}}
-        kwargs, resolver = await self._launch(env)
+    async def test_cloud_resolution_error_skips_the_cache_without_failing(self):
+        # A malformed block can no longer reach launch (EnvironmentConfig
+        # rejects it). An error resolving the launch itself still only skips
+        # the cache.
+        env = _make_env(_SLURM_ENV)
+        resolver = AsyncMock(return_value=f"docker:{SQSH}")
+        with (
+            patch(
+                "gbserver.environment._slurm_image_cache.resolve_cached_image", resolver
+            ),
+            patch.object(
+                env, "_prepare_ssh_for_launch", AsyncMock(side_effect=OSError("x"))
+            ),
+        ):
+            assert await env._resolve_slurm_cached_image("l1", **_LAUNCH) is None
         assert resolver.await_count == 0
-        assert kwargs["image_id"] == f"docker:{REF}"

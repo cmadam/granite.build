@@ -301,9 +301,11 @@ config:
       account: grp_granite_dot_build
       qos: cpu
     # Optional:
-    # timeout_seconds: 7200                # give up waiting (queueing included) and fall back
+    # timeout_seconds: 18000               # give up waiting (queueing included) and fall back
     # poll_interval_seconds: 30
     # ssh_timeout_seconds: 120
+    # known_hosts:                         # pin the login nodes' host keys (see below)
+    #   - "login1.bluevela.rmf.ibm.com ssh-ed25519 AAAA..."
     # enabled: false                       # turn it off without deleting the block
 ```
 
@@ -312,8 +314,13 @@ Before a SLURM container step launches, gbserver checks over SSH (the `~/.slurm/
 that path, which the driver hands to Pyxis unchanged, and the container starts in seconds. On a miss,
 gbserver submits one short job on `partition` (the login nodes have no `enroot`) that imports the image,
 waits for it, then launches from the new file. The GPU job is not submitted until the image is ready.
-The import job defaults to 16 CPUs, 64 GB and a 2-hour limit; override them in `sbatch_options` (a
-`null` value drops a default). Its log goes to `<share_path>/enroot/logs/gb-image-import-<hash>-<jobid>.out`.
+The import job defaults to 16 CPUs, 64 GB and a 3-hour limit; override them in `sbatch_options` (a
+`null` value drops a default). gbserver waits up to `timeout_seconds` (default 5 hours), counted once it
+holds the image's lock and including the import job's queue time; keep it above the job's `time`, or a
+healthy import that started late is abandoned. An import gbserver gives up on is cancelled only if that
+gbserver submitted it. Allow for the image size: the 20 GB NeMo-RL image took 72 minutes, nearly all of it
+download and extract. For a large image the first launch therefore takes about as long as before, but no
+GPU is allocated while it waits; later launches start in seconds. Its log goes to `<share_path>/enroot/logs/gb-image-import-<hash>-<jobid>.out`.
 
 Concurrent launches of one image import it once:
 
@@ -325,6 +332,21 @@ Concurrent launches of one image import it once:
 
 The job imports to a job-unique temporary file and renames it into place only after checking that it has
 `/bin/sh`, so a killed or failed import never leaves a truncated or layered `.sqsh` at the final name.
+Unlike the LSF driver it does not flatten a layered image. The layered files the LSF driver flattens come
+from its own `enroot-mksquashovlfs` wrapper, which the import job does not install, and a plain `enroot
+import` writes a flat root filesystem. If one ever came out layered, the job would refuse it, and that
+image would launch from the registry every time; the import job's log says why.
+
+gbserver checks for and imports the image over SSH using the `~/.slurm/config` alias, with its own
+`~/.slurm/gbserver_known_hosts` file. By default a login node's host key is recorded on first contact and
+must match afterwards (`StrictHostKeyChecking=accept-new`), so a fresh gbserver host needs no
+`~/.ssh/known_hosts` entry. To trust only known keys instead, list them in `known_hosts` (lines as
+`ssh-keyscan` prints them); gbserver then writes exactly those to the file and checks strictly. Without
+either, `BatchMode` would refuse an unknown host and every launch would quietly fall back to the registry.
+
+A malformed block (a bad path, partition or `sbatch_options` key or value, a non-positive interval) is
+rejected when the environment loads. Partition names and `sbatch_options` keys and values are
+allowlisted because they become `#SBATCH` lines in the import script.
 
 File names match the LSF driver (`us.icr.io/a/b:tag` → `us.icr.io-a-b-tag.sqsh`). Point `share_path` at
 the LSF environment's `enroot.share_path` and each backend reuses the other's imports.
