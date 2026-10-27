@@ -155,6 +155,13 @@ environment_configs:
             SCRATCH="${TMPDIR:-/tmp}/granite-$$"
             export ENROOT_DATA_PATH="$SCRATCH/enroot-data" ENROOT_CACHE_PATH="$SCRATCH/enroot-cache" ENROOT_RUNTIME_PATH="$SCRATCH/enroot-run" ENROOT_TEMP_PATH="$SCRATCH/enroot-tmp"
             mkdir -p "$GRANITE_EVALS_ENROOT_CACHE" "$ENROOT_DATA_PATH" "$ENROOT_CACHE_PATH" "$ENROOT_RUNTIME_PATH" "$ENROOT_TEMP_PATH"
+            # Nested enroot bind-mounts this job's cgroup path into each sandbox; SLURM's
+            # step cgroup path carries ../.. segments that do not exist lexically, so the
+            # enroot cgroup mount fails until the resolved source directory exists. Create
+            # it (validated as probe6, SLURM job 432842: REPRO_EXIT=1 -> FIX_EXIT=0).
+            CG=$(awk -F: '/^0::/{print $3}' /proc/self/cgroup)
+            LEX=$(readlink -m "/sys/fs/cgroup/$CG")
+            mkdir -p "$LEX" 2>/dev/null || true
             trap 'rm -rf "$SCRATCH"' EXIT
             {% endif %}
 
