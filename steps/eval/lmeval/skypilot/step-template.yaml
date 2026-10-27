@@ -85,6 +85,13 @@ outputs:
     granite_generation:
       type: dataset
 
+# No named inputs: the model checkpoint arrives as the config string
+# model_path, not a binding, and recipes bind ordering-only inputs (the score
+# target's generation, whose name varies by recipe) only to order targets.
+# Nothing is read through bindings; allow_unknown keeps every binding valid.
+inputs:
+  allow_unknown: true
+
 environment_configs:
   Skypilot:
     default_launcher: granite

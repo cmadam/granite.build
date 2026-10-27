@@ -121,6 +121,13 @@ def test_outputs_match_markers(step, run_script):
     assert 'RESULT_FILE="$OUTPUT_DIR/generation.json"' in run_script
 
 
+def test_inputs_allow_recipe_ordering_bindings(step):
+    # The checkpoint is the config string model_path, and recipes bind only
+    # ordering-only inputs (names vary by recipe); nothing is read through
+    # bindings.
+    assert step["inputs"] == {"allow_unknown": True}
+
+
 def test_phase_defaults_to_one_job(step, run_script):
     assert step["config"]["phase"] == "all"
     assert '--phase "{{ config.phase }}"' in run_script
