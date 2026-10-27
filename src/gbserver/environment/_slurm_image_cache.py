@@ -52,8 +52,10 @@ the other.
 
 import asyncio
 import hashlib
+import os
 import re
 import shlex
+import tempfile
 import threading
 import time
 import weakref
@@ -72,7 +74,8 @@ _IMAGE_REF_RE = re.compile(r"^[A-Za-z0-9._/:@-]+$")
 _SHARE_PATH_RE = re.compile(r"^/[A-Za-z0-9._/-]+$")
 # The import job's #SBATCH lines come from operator config. A newline in a key
 # or value would end the comment and become a script line, so both are
-# allowlisted when the block is parsed.
+# allowlisted when the block is parsed. Every pattern here is applied with
+# fullmatch: with re.match, `$` also matches before a trailing "\n".
 _PARTITION_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _SBATCH_KEY_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _SBATCH_VALUE_RE = re.compile(r"^[\x21-\x7e]+$")  # printable ASCII, no spaces
@@ -176,11 +179,11 @@ def parse_cache_config(raw: Any) -> Optional[SlurmImageCacheConfig]:
         return None
     share_path = raw.get("share_path")
     partition = raw.get("partition")
-    if not isinstance(share_path, str) or not _SHARE_PATH_RE.match(share_path):
+    if not isinstance(share_path, str) or not _SHARE_PATH_RE.fullmatch(share_path):
         raise ValueError(
             f"slurm_image_cache.share_path must be an absolute path, got {share_path!r}"
         )
-    if not isinstance(partition, str) or not _PARTITION_RE.match(partition):
+    if not isinstance(partition, str) or not _PARTITION_RE.fullmatch(partition):
         raise ValueError(
             f"slurm_image_cache.partition must be a partition name, got {partition!r}"
         )
@@ -188,11 +191,11 @@ def parse_cache_config(raw: Any) -> Optional[SlurmImageCacheConfig]:
     if not isinstance(sbatch_options, dict):
         raise ValueError("slurm_image_cache.sbatch_options must be a mapping")
     for key, value in sbatch_options.items():
-        if not _SBATCH_KEY_RE.match(str(key).lstrip("-")):
+        if not _SBATCH_KEY_RE.fullmatch(str(key).lstrip("-")):
             raise ValueError(f"slurm_image_cache.sbatch_options: bad key {key!r}")
         if value is None or isinstance(value, bool):
             continue
-        if not _SBATCH_VALUE_RE.match(str(value)):
+        if not _SBATCH_VALUE_RE.fullmatch(str(value)):
             raise ValueError(
                 f"slurm_image_cache.sbatch_options.{key}: bad value {value!r}"
             )
@@ -205,7 +208,7 @@ def parse_cache_config(raw: Any) -> Optional[SlurmImageCacheConfig]:
             raise ValueError(f"slurm_image_cache.{k} must be > 0, got {raw[k]!r}")
     known_hosts: List[str] = raw.get("known_hosts") or []
     if not isinstance(known_hosts, list) or not all(
-        isinstance(line, str) and _KNOWN_HOSTS_LINE_RE.match(line.strip())
+        isinstance(line, str) and _KNOWN_HOSTS_LINE_RE.fullmatch(line.strip())
         for line in known_hosts
     ):
         raise ValueError(
@@ -237,7 +240,7 @@ def split_image_ref(image_id: Optional[str]) -> Tuple[str, Optional[str]]:
             break
     if image_id.endswith(".sqsh") or image_id.startswith("/"):
         return prefix, None
-    if not _IMAGE_REF_RE.match(image_id):
+    if not _IMAGE_REF_RE.fullmatch(image_id):
         return prefix, None
     return prefix, image_id
 
@@ -347,6 +350,31 @@ echo "[$(date)] cached $SQSH ($(du -h "$SQSH" | cut -f1))"
 """
 
 
+def _write_if_changed(path: Path, text: str) -> None:
+    """Make ``path`` hold ``text`` without a moment where it is empty.
+
+    Resolves run in parallel and each ``ssh`` reads this file. A plain
+    ``write_text`` truncates first, so an ``ssh`` reading at that instant sees
+    no keys, fails host-key verification and that launch falls back to the
+    registry. So: no write when the content is already right (the usual case),
+    otherwise a temp file in the same directory, ``os.replace``d into place.
+    """
+    try:
+        if path.read_text() == text:
+            return
+    except FileNotFoundError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 class _LoginNode:  # pylint: disable=too-few-public-methods
     """Runs commands on a SLURM login node through the ``~/.slurm/config``
     alias gbserver materializes (``ssh -F``)."""
@@ -363,10 +391,9 @@ class _LoginNode:  # pylint: disable=too-few-public-methods
         self._timeout = timeout
         self._known_hosts_file = ssh_config.parent / KNOWN_HOSTS_FILENAME
         if known_hosts:
-            # Pinned: the file holds exactly the configured keys, refreshed
-            # on every use so a config change takes effect.
-            self._known_hosts_file.parent.mkdir(parents=True, exist_ok=True)
-            self._known_hosts_file.write_text("\n".join(known_hosts) + "\n")
+            # Pinned: the file holds exactly the configured keys, so a config
+            # change takes effect on the next resolve.
+            _write_if_changed(self._known_hosts_file, "\n".join(known_hosts) + "\n")
             self._host_key_options: Tuple[str, ...] = (
                 "-o",
                 "StrictHostKeyChecking=yes",
@@ -492,8 +519,11 @@ class _Slot:
 
 # Per event loop, because an asyncio.Lock binds to the loop it first runs on,
 # and each build runs in its own asyncio.run (BuildRunner). Weakly keyed by the
-# loop object, so a finished build's slots go with its loop and a new loop can
-# never inherit a dead loop's lock.
+# loop object, so a new loop can never inherit a dead loop's lock. Weak keys
+# alone do not free a finished build's entry: once a waiter has blocked on a
+# lock, the lock references its loop, so the value keeps its own key alive.
+# _slot_for therefore also drops loops that are closed, which asyncio.run does
+# when each build ends.
 _SLOTS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, Dict[str, _Slot]]" = (
     weakref.WeakKeyDictionary()
 )
@@ -503,6 +533,8 @@ _SLOTS_GUARD = threading.Lock()
 def _slot_for(sqsh_path: str) -> _Slot:
     loop = asyncio.get_running_loop()
     with _SLOTS_GUARD:
+        for dead in [other for other in _SLOTS if other.is_closed()]:
+            del _SLOTS[dead]
         slots = _SLOTS.get(loop)
         if slots is None:
             slots = _SLOTS[loop] = {}

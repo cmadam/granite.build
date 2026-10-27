@@ -9,6 +9,7 @@ deduplication), and the wiring into ``Skypilot.launch_skypilot``.
 import asyncio
 import shutil
 import subprocess
+from pathlib import Path
 from typing import List, Optional, Tuple
 from unittest.mock import AsyncMock, patch
 
@@ -84,6 +85,8 @@ class TestSplitImageRef:
             # Already a .sqsh path: nothing to cache.
             (f"docker:{SQSH}", ("docker:", None)),
             (SQSH, ("", None)),
+            # A trailing newline is not a plausible registry ref either.
+            (f"docker:{REF}\n", ("docker:", None)),
             # Not a plausible registry ref: never interpolated into a script.
             ("docker:a/b:1;rm -rf /", ("docker:", None)),
             ("docker:a b", ("docker:", None)),
@@ -143,6 +146,20 @@ class TestParseCacheConfig:
             {"share_path": SHARE, "partition": "c pu"},
             {"share_path": SHARE, "partition": "cpu", "poll_interval_seconds": 0},
             {"share_path": SHARE, "partition": "cpu", "timeout_seconds": -1},
+            # A trailing "\n" passes re.match + `$`; the reviewer ran this
+            # one's #SBATCH header in bash and it created a file.
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "sbatch_options": {"qos\n": "$(touch${IFS}/tmp/pr560_inj_proof)"},
+            },
+            {
+                "share_path": SHARE,
+                "partition": "cpu",
+                "sbatch_options": {"qos": "cpu\n"},
+            },
+            {"share_path": SHARE, "partition": "cpu\n"},
+            {"share_path": SHARE + "\n", "partition": "cpu"},
             {"share_path": SHARE, "partition": "cpu", "known_hosts": "x"},
             {
                 "share_path": SHARE,
@@ -534,17 +551,34 @@ class TestSlots:
         for _ in range(3):
             assert asyncio.run(contend()) == [f"docker:{SQSH}"] * 2
 
-    def test_slots_go_away_with_their_loop(self):
+    @pytest.mark.parametrize("contended", [False, True])
+    def test_slots_go_away_with_their_loop(self, contended):
+        # Once a waiter has blocked on the lock, the lock references its loop
+        # and the weak key alone no longer frees the entry; _slot_for drops
+        # closed loops instead. The reviewer's repro is the contended case.
         import gc
 
-        async def touch():
-            cache._slot_for(SQSH)
+        async def use():
+            slot = cache._slot_for(SQSH)
+            if not contended:
+                return
 
-        before = len(cache._SLOTS)
-        for _ in range(5):
-            asyncio.run(touch())
+            async def hold():
+                async with slot.lock:
+                    await asyncio.sleep(0)
+
+            await asyncio.gather(hold(), hold())
+
+        for _ in range(3):
+            asyncio.run(use())
+
+        async def probe():
+            cache._slot_for(SQSH)
+            return [loop for loop in cache._SLOTS if loop.is_closed()]
+
+        assert asyncio.run(probe()) == []
         gc.collect()
-        assert len(cache._SLOTS) <= before
+        assert all(not loop.is_closed() for loop in cache._SLOTS)
 
 
 class TestHostKeys:
@@ -580,6 +614,35 @@ class TestHostKeys:
         argv, kh = self._argv(tmp_path, (line,))
         assert kh.read_text() == line + "\n"
         assert "StrictHostKeyChecking=yes" in argv
+
+    def test_pinned_file_is_not_rewritten_when_unchanged(self, tmp_path):
+        # Hits run in parallel and every ssh reads this file. Rewriting it on
+        # each resolve (write_text truncates first) let a reader see it empty.
+        path = tmp_path / cache.KNOWN_HOSTS_FILENAME
+        cache._write_if_changed(path, "a ssh-ed25519 AAAA\n")
+        inode = path.stat().st_ino
+        with patch.object(cache.os, "replace") as replace:
+            cache._write_if_changed(path, "a ssh-ed25519 AAAA\n")
+        replace.assert_not_called()
+        assert path.stat().st_ino == inode
+
+    def test_a_changed_key_replaces_the_file_atomically(self, tmp_path):
+        path = tmp_path / cache.KNOWN_HOSTS_FILENAME
+        cache._write_if_changed(path, "a ssh-ed25519 AAAA\n")
+        seen = []
+        real_replace = cache.os.replace
+
+        def spy(src, dst):
+            # At the moment of the swap the live file still holds the old,
+            # complete key and the new one is a full separate file.
+            seen.append((Path(dst).read_text(), Path(src).read_text()))
+            real_replace(src, dst)
+
+        with patch.object(cache.os, "replace", spy):
+            cache._write_if_changed(path, "a ssh-ed25519 BBBB\n")
+        assert seen == [("a ssh-ed25519 AAAA\n", "a ssh-ed25519 BBBB\n")]
+        assert path.read_text() == "a ssh-ed25519 BBBB\n"
+        assert [p.name for p in tmp_path.iterdir()] == [cache.KNOWN_HOSTS_FILENAME]
 
 
 # ---------------------------------------------------------------------------
