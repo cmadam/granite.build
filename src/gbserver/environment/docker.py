@@ -43,6 +43,7 @@ from gbserver.types.buildevent import (
     EntityRunMetadata,
 )
 from gbserver.types.constants import (
+    DEFAULT_ROOT_WORKSPACE_DIR,
     DOCKER_PULL_MAX_ATTEMPTS,
     DOCKER_PULL_RETRY_BASE_DELAY,
     DOCKER_PULL_RETRY_MAX_DELAY,
@@ -517,15 +518,22 @@ class Docker(Environment):
         if not host.exists():
             raise FileNotFoundError(f"env:// input {uri} not found at {host}")
         is_dir = host.is_dir()
-        mount_src = host if is_dir else host.parent
+        # Resolve the directory once and use that one value for the check, the
+        # mount key and the mount source, so the container gets exactly the
+        # directory that was checked, and two spellings of one directory share
+        # a mount. The file name is kept as given: a file symlink resolves
+        # inside the container's own filesystem, so it cannot leave the mount.
+        try:
+            mount_src = (host if is_dir else host.parent).resolve(strict=True)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f"env:// input {uri} not found at {host}") from e
         self._check_env_input_mount_src(mount_src, uri)
-        volume = self._extra_volumes.get(str(mount_src)) or self._env_input_volumes.get(
-            str(mount_src)
-        )
+        key = str(mount_src)
+        volume = self._extra_volumes.get(key) or self._env_input_volumes.get(key)
         if volume is None:
             n = len(self._env_input_volumes)
             volume = {"bind": f"{_ENV_INPUTS_MOUNT}/{n}", "mode": "ro"}
-            self._env_input_volumes[str(mount_src)] = volume
+            self._env_input_volumes[key] = volume
         container = volume["bind"] if is_dir else f"{volume['bind']}/{host.name}"
         logger.info(
             "pullasset_envstore: mounted %s at %s (container path %s)",
@@ -536,32 +544,56 @@ class Docker(Environment):
         return {BINDING_KEY: {"path": container}}, None
 
     @staticmethod
+    def _env_output_roots() -> List[Path]:
+        """Resolved host dirs gbserver itself writes step outputs to.
+
+        ``<GB home>/workdir`` (the Bash environment's default output dir) and
+        the build runner's workspace root. A root that contains the GB home
+        directory is dropped: allowing it would expose the secrets kept there.
+        """
+        gb_home = Path(get_gb_home_dir()).resolve()
+        roots = [gb_home / "workdir", Path(DEFAULT_ROOT_WORKSPACE_DIR).resolve()]
+        return [r for r in roots if not gb_home.is_relative_to(r)]
+
+    @staticmethod
     def _check_env_input_mount_src(mount_src: Path, uri: Any) -> None:
         """Refuse an env:// input mount source that would expose host secrets.
 
-        The container may hold space secrets, so the source (resolved, so a
-        symlink cannot dodge the checks) must not:
+        *mount_src* must already be resolved: it is checked as given, and the
+        caller mounts that same path. The container may hold space secrets, so
+        the source must not:
 
         - contain the gbserver user's home directory (``/``, ``/home``, ``~``);
-        - be, contain, or sit inside the GB home directory or a system
-          directory in ``_DENIED_MOUNT_DIRS`` (e.g. ``/etc`` for
-          ``env:///etc/hosts``);
-        - sit inside a hidden directory of the home directory (``~/.ssh``,
-          ``~/.aws``, ``~/.gbcli``, ...).
+        - be, contain, or sit inside a system directory in
+          ``_DENIED_MOUNT_DIRS`` (e.g. ``/etc`` for ``env:///etc/hosts``);
+        - be, contain, or sit inside the GB home directory, or sit inside a
+          hidden directory of the home directory (``~/.ssh``, ``~/.aws``,
+          ``~/.gbcli``, ...), unless it lies in an output root from
+          :meth:`_env_output_roots`. That lets a Docker target read an env://
+          output a Bash target wrote under ``~/.granite.build/workdir`` while
+          the rest of the GB home (secrets, the SQLite DB) stays refused.
 
         :raises ValueError: the mount source is refused.
         """
-        src = mount_src.resolve()
+        src = mount_src
         home = Path.home().resolve()
-        denied = [Path(d).resolve() for d in _DENIED_MOUNT_DIRS]
-        denied.append(Path(get_gb_home_dir()).resolve())
+        gb_home = Path(get_gb_home_dir()).resolve()
+        system = [Path(d).resolve() for d in _DENIED_MOUNT_DIRS]
+        in_output_root = any(src.is_relative_to(r) for r in Docker._env_output_roots())
         refused = (
             home.is_relative_to(src)
-            or any(src.is_relative_to(d) or d.is_relative_to(src) for d in denied)
+            or any(src.is_relative_to(d) or d.is_relative_to(src) for d in system)
             or (
-                src.is_relative_to(home)
-                and src != home
-                and src.relative_to(home).parts[0].startswith(".")
+                not in_output_root
+                and (
+                    src.is_relative_to(gb_home)
+                    or gb_home.is_relative_to(src)
+                    or (
+                        src.is_relative_to(home)
+                        and src != home
+                        and src.relative_to(home).parts[0].startswith(".")
+                    )
+                )
             )
         )
         if refused:

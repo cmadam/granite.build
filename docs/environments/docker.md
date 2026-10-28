@@ -136,11 +136,16 @@ and translates it to Docker container limits:
   mount goes only into the containers of the target that takes the input. The mount source is
   always the input's host path, including an `env://` output an earlier Docker target wrote in its
   own workspace. Because a file input mounts its **whole parent directory** (so the step can read
-  the file's siblings), the mount source is refused with an error when it contains the gbserver
-  user's home directory (`/`, `/home`, `~`), lies in a hidden directory of it (`~/.ssh`, `~/.aws`,
-  ...), or is, contains or lies in the GB home directory or a system directory (`/etc`, `/proc`,
-  `/sys`, `/dev`, `/boot`, `/run`). Put the input in its own directory (e.g.
-  `~/run1/generation.json`, not `~/generation.json`).
+  the file's siblings), the mount source (with symlinks resolved; that resolved directory is what
+  gets mounted) is refused with an error when it contains the gbserver user's home directory (`/`,
+  `/home`, `~`), or is, contains or lies in a system directory (`/etc`, `/proc`, `/sys`, `/dev`,
+  `/boot`, `/run`, `/var/run`). It is also refused when it is, contains or lies in the GB home
+  directory, or lies in a hidden directory of the home directory (`~/.ssh`, `~/.aws`, ...), unless
+  it lies in a directory gbserver writes step outputs to: `<GB home>/workdir` (where a [bash](bash.md)
+  target writes by default) or the build runner's workspace root. So a Docker target can read an
+  `env://` output of a bash target, while the rest of the GB home (secrets, the database) stays out
+  of reach. Put the input in its own directory (e.g. `~/run1/generation.json`, not
+  `~/generation.json`).
 - **Workspace.** Each launch's own asset directory is bind-mounted at `/gb-workspace` (read-write)
   in that launch's container only; write outputs there.
 - **Outputs.** Register artifacts with the standard `GB_ARTIFACT_ID:<id> GB_ARTIFACT_PATH:<path>`

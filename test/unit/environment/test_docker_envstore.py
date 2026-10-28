@@ -555,3 +555,126 @@ def test_only_env_uris_skip_the_cache():
     assert not Environment._is_cached_uri("env:///a/b")
     assert Environment._is_cached_uri("file:///a/b")
     assert Environment._is_cached_uri("hf://org/repo")
+
+
+# ---------------------------------------------------------------------------
+# Output roots gbserver writes to are allowed inside the GB home directory.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def gb_home_in_fake_home(fake_home, monkeypatch):
+    # The default layout: GB home is the hidden ~/.granite.build.
+    gb_home = fake_home / ".granite.build"
+    gb_home.mkdir()
+    monkeypatch.setenv("GB_HOME_DIR", str(gb_home))
+    return gb_home
+
+
+@pytest.mark.asyncio
+async def test_bash_output_in_gb_home_workdir_is_mounted(
+    docker_env, gb_home_in_fake_home
+):
+    # Bash writes outputs under <GB home>/workdir by default (bash.py).
+    out = gb_home_in_fake_home / "workdir" / "llm-build-x" / "t" / "outputs"
+    out.mkdir(parents=True)
+    (out / "result.json").write_text("{}")
+    binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(out / "result.json"))
+    assert docker_env._env_input_volumes[str(out)]["mode"] == "ro"
+    assert binding[BINDING_KEY]["path"].endswith("/result.json")
+
+
+@pytest.mark.asyncio
+async def test_rest_of_gb_home_still_refused(docker_env, gb_home_in_fake_home):
+    for sub in ("user_secrets", "space_secrets"):
+        (gb_home_in_fake_home / sub).mkdir()
+        with pytest.raises(ValueError, match="its own directory"):
+            await docker_env.pullasset_envstore(
+                uri=_env_uri(gb_home_in_fake_home / sub)
+            )
+    (gb_home_in_fake_home / "llmb-server.db").write_text("")
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(
+            uri=_env_uri(gb_home_in_fake_home / "llmb-server.db")
+        )
+    # The output root itself sits inside GB home but does not contain it.
+    (gb_home_in_fake_home / "workdir").mkdir()
+    await docker_env.pullasset_envstore(uri=_env_uri(gb_home_in_fake_home / "workdir"))
+
+
+@pytest.mark.asyncio
+async def test_other_hidden_home_dir_still_refused(docker_env, gb_home_in_fake_home):
+    ssh = gb_home_in_fake_home.parent / ".ssh"
+    ssh.mkdir()
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(ssh))
+
+
+@pytest.mark.asyncio
+async def test_workspace_root_output_is_mounted(docker_env, fake_home, monkeypatch):
+    root = fake_home / ".gbws"
+    out = root / "builds" / "b1" / "outputs"
+    out.mkdir(parents=True)
+    monkeypatch.setattr(
+        "gbserver.environment.docker.DEFAULT_ROOT_WORKSPACE_DIR", str(root)
+    )
+    await docker_env.pullasset_envstore(uri=_env_uri(out))
+    assert str(out) in docker_env._env_input_volumes
+
+
+def test_output_root_containing_gb_home_is_dropped(tmp_path, monkeypatch):
+    monkeypatch.setenv("GB_HOME_DIR", str(tmp_path / "gbhome"))
+    monkeypatch.setattr(
+        "gbserver.environment.docker.DEFAULT_ROOT_WORKSPACE_DIR", str(tmp_path)
+    )
+    assert Docker._env_output_roots() == [(tmp_path / "gbhome" / "workdir").resolve()]
+
+
+# ---------------------------------------------------------------------------
+# The checked path is the mounted path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mount_uses_resolved_dir_and_keeps_file_name(docker_env, tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "data.json").write_text("{}")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    (real / "alias.json").symlink_to(real / "data.json")
+
+    b1, _ = await docker_env.pullasset_envstore(uri=_env_uri(link / "alias.json"))
+    b2, _ = await docker_env.pullasset_envstore(uri=_env_uri(real / "data.json"))
+    # One mount, keyed by (and sourced from) the resolved directory.
+    assert list(docker_env._env_input_volumes) == [str(real.resolve())]
+    bind = docker_env._env_input_volumes[str(real.resolve())]["bind"]
+    # The in-container file name is the one the user gave.
+    assert b1[BINDING_KEY]["path"] == f"{bind}/alias.json"
+    assert b2[BINDING_KEY]["path"] == f"{bind}/data.json"
+
+
+# ---------------------------------------------------------------------------
+# The env:// cache rule holds for every environment, not only Docker.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_non_docker_env_output_pull_returns_uri_path(tmp_path):
+    from gbserver.environment.bash import Bash
+
+    env = _push_env(Bash(event_q=asyncio.Queue()))
+    host = tmp_path / "outputs" / "result.json"
+    # The producer's own view of the path differs from the registered URI.
+    task = env.pushasset(
+        task_group=None,  # type: ignore[arg-type]
+        binding={"path": str(host), "extra": "producer-only"},
+        uristr=f"env://{host}",
+        binding_id="result",
+        run_metadata=EntityRunMetadata(targetsteprun_id="tsrA"),
+    )
+    uristr = URI.get_uristr(await task)
+    assert uristr not in env.asset_bindings
+    binding, step = await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
+    assert step is None
+    assert binding == {BINDING_KEY: {"path": str(host)}}
