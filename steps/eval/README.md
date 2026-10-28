@@ -10,7 +10,7 @@ benchmark runtime those images are built from, and the image recipes themselves.
 | `<family>/skypilot/` | One step per benchmark family: `step-template.yaml` (the source of truth), `README.md` / `USAGE.md`, and the shared contract test. |
 | `<family>/Dockerfile.gpu`, `<family>/Dockerfile.cpu` | The family's image recipe(s). Every family has a GPU image; the families whose benchmarks split into GPU generate + CPU score (`--phase`) also have a `-cpu` image. Families needing extra system setup carry an `extras.sh` (and `nemoskills` a pinned `comet-requirements.txt` for its COMET judge). |
 | `src/core/` | The shared granite-evals runtime: harness adapters, vLLM serving, scoring, results. |
-| `<family>/granite_evals/`, `<family>/tests/` | The family's benchmark modules and their unit tests, overlaid onto the same package (what each contains: [VENDORED.md](VENDORED.md)). |
+| `<family>/src/`, `<family>/tests/` | The family's benchmark modules and their unit tests. `src/` is overlaid onto the core's `granite_evals/benchmarks/` package dir at image-build time (what each family contains: [VENDORED.md](VENDORED.md)). |
 | `scripts/prefetch_datasets.py` | Pins and pre-fetches the HF datasets into a cache the (offline) jobs read. |
 | `eval-example/` | The framework's generic eval exemplar step — pre-existing, not one of the granite-evals families. |
 
@@ -30,7 +30,7 @@ its pinned image (`config.image`, set by the recipe — e.g. the `IMAGE` /
 `granite-evals run <benchmark>` inside the job.
 
 Bumping a benchmark's behavior means editing `src/` or the family's
-`<family>/granite_evals/`, rebuilding the family image,
+`<family>/src/`, rebuilding the family image,
 pushing it, and re-pinning its tag in the recipe `parameters.yaml` — recipes under
 `recipes/evals/<family>/<benchmark>/skypilot/` choose which benchmarks a model
 family is scored on and own the image pins.

@@ -20,7 +20,7 @@
 #   podman build --platform linux/amd64 -f swebench/Dockerfile.gpu . -t <registry>/gb-step-eval-swebench:<tag>
 #
 # The image carries vLLM (the `serve` extra), the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (swebench/granite_evals), the
+# (src/core) overlaid with this family's benchmark modules (swebench/src), the
 # family's pinned harness (the `swebench` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
@@ -64,7 +64,7 @@ COPY --chmod=755 src/core/pyproject.toml src/core/uv.lock ./
 RUN uv sync --locked --no-install-project --no-dev --extra serve --extra swebench
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 swebench/granite_evals ./src/granite_evals
+COPY --chmod=755 swebench/src ./src/granite_evals/benchmarks
 COPY --chmod=755 src/core/tests ./tests
 COPY --chmod=755 swebench/tests ./tests
 RUN uv sync --locked --no-dev --extra serve --extra swebench \
