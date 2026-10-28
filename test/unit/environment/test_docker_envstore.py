@@ -48,9 +48,11 @@ async def test_file_input_is_mounted_read_only(docker_env, tmp_path):
     assert step is None
     path = binding[BINDING_KEY]["path"]
     assert path.startswith("/gb-env-inputs/") and path.endswith("/generation.json")
-    vol = docker_env._extra_volumes[str(f.parent)]
+    vol = docker_env._env_input_volumes[str(f.parent)]
     assert vol["mode"] == "ro"
     assert path == f"{vol['bind']}/generation.json"
+    # Not a shared mount: only launches whose bindings reference it get it.
+    assert docker_env._extra_volumes == {}
     assert docker_env._resolve_host_path(path) == str(f)
 
 
@@ -59,7 +61,7 @@ async def test_dir_input_is_mounted_whole(docker_env, tmp_path):
     d = tmp_path / "model"
     d.mkdir()
     binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(d))
-    vol = docker_env._extra_volumes[str(d)]
+    vol = docker_env._env_input_volumes[str(d)]
     assert vol["mode"] == "ro"
     assert binding[BINDING_KEY]["path"] == vol["bind"]
 
@@ -88,19 +90,14 @@ async def test_distinct_inputs_get_distinct_mounts_shared_parent_reused(
     pa2 = (await docker_env.pullasset_envstore(uri=_env_uri(a2)))[0][BINDING_KEY]
     pb1 = (await docker_env.pullasset_envstore(uri=_env_uri(b1)))[0][BINDING_KEY]
 
-    mount_a = docker_env._extra_volumes[str(a_dir)]["bind"]
-    mount_b = docker_env._extra_volumes[str(b_dir)]["bind"]
+    mount_a = docker_env._env_input_volumes[str(a_dir)]["bind"]
+    mount_b = docker_env._env_input_volumes[str(b_dir)]["bind"]
     assert mount_a != mount_b
     assert pa1["path"] == f"{mount_a}/one.json"
     assert pa2["path"] == f"{mount_a}/two.json"
     assert pb1["path"] == f"{mount_b}/one.json"
     assert pa1["path"] != pb1["path"]
-    env_mounts = [
-        v
-        for v in docker_env._extra_volumes.values()
-        if v["bind"].startswith("/gb-env-inputs/")
-    ]
-    assert len(env_mounts) == 2
+    assert len(docker_env._env_input_volumes) == 2
 
 
 @pytest.mark.asyncio
@@ -115,6 +112,7 @@ async def test_reuses_existing_read_only_mount(docker_env, tmp_path):
     binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(snap / "config.json"))
     assert binding[BINDING_KEY]["path"] == "/gb-hf-models/org/repo/config.json"
     assert len(docker_env._extra_volumes) == 1
+    assert docker_env._env_input_volumes == {}
 
 
 # ---------------------------------------------------------------------------
@@ -132,7 +130,7 @@ def _push_env(docker_env):
         scheme = URI.get_uristr(uri).split("://", 1)[0]
         return (
             SimpleNamespace(type=f"{scheme}store", get_secrets=lambda: {}),
-            SimpleNamespace(push=None),
+            SimpleNamespace(push=None, pull=None),
         )
 
     docker_env._get_storeconfig = _storeconfig
@@ -168,9 +166,8 @@ async def test_env_output_in_workspace_registers_host_path(docker_env, tmp_path)
     expected = f"env://{tmp_path}/wsB/outputs/x/results.json"
     assert uristr == expected
     assert {e.payload.uri for e in events} == {expected}
-    assert env.asset_bindings[expected][BINDING_KEY]["path"] == (
-        f"{tmp_path}/wsB/outputs/x/results.json"
-    )
+    # env:// pushes are never cached, so a pull always reaches the store.
+    assert expected not in env.asset_bindings
     # The caller's binding object is not mutated.
     assert binding == {"path": _RESULTS}
 
@@ -214,12 +211,27 @@ async def test_file_output_binding_untouched(docker_env, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_env_output_unknown_targetsteprun_unchanged(docker_env, caplog):
+async def test_env_output_unknown_targetsteprun_raises(docker_env):
     env = _push_env(docker_env)
-    with caplog.at_level(logging.WARNING):
-        uristr, _ = await _push(env, {"path": _RESULTS}, tsr="nope")
-    assert uristr == f"env://{_RESULTS}"
-    assert "nope" in caplog.text
+    with pytest.raises(LookupError, match="nope"):
+        await _push(env, {"path": _RESULTS}, tsr="nope")
+    # Nothing registered: the container path exists on no host.
+    assert env.event_q.empty()
+
+
+@pytest.mark.asyncio
+async def test_env_output_unknown_targetsteprun_raises_in_task_group(docker_env):
+    env = _push_env(docker_env)
+    with pytest.raises(ExceptionGroup) as excinfo:
+        async with asyncio.TaskGroup() as tg:
+            env.pushasset(
+                task_group=tg,
+                binding={"path": _RESULTS},
+                uristr="env://{{ binding.path }}",
+                binding_id="granite_results",
+                run_metadata=EntityRunMetadata(targetsteprun_id="nope"),
+            )
+    assert excinfo.group_contains(LookupError)
 
 
 @pytest.mark.asyncio
@@ -359,13 +371,12 @@ async def test_env_output_of_earlier_docker_target_is_mounted_on_pull(
     uristr, _ = await _push(env, {"path": _RESULTS}, tsr="tsrA")
     host = f"{ws}/outputs/x/results.json"
     assert uristr == f"env://{host}"
-    # The base push cached the host binding; a pull must not hand it back as is.
-    assert env.asset_bindings[uristr][BINDING_KEY]["path"] == host
+    assert uristr not in env.asset_bindings
 
     binding, step = await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
     assert step is None
     path = binding[BINDING_KEY]["path"]
-    vol = env._extra_volumes[str(ws / "outputs" / "x")]
+    vol = env._env_input_volumes[str(ws / "outputs" / "x")]
     assert vol["mode"] == "ro"
     assert path == f"{vol['bind']}/results.json"
     assert path.startswith("/gb-env-inputs/")
@@ -380,7 +391,7 @@ async def test_env_output_of_earlier_docker_target_is_mounted_on_pull(
 async def test_root_dir_input_refused(docker_env):
     with pytest.raises(ValueError, match="its own directory"):
         await docker_env.pullasset_envstore(uri="env:///")
-    assert docker_env._extra_volumes == {}
+    assert docker_env._env_input_volumes == {}
 
 
 @pytest.fixture
@@ -398,7 +409,7 @@ async def test_file_in_home_dir_refused(docker_env, fake_home):
     (fake_home / "generation.json").write_text("{}")
     with pytest.raises(ValueError, match="its own directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(fake_home / "generation.json"))
-    assert docker_env._extra_volumes == {}
+    assert docker_env._env_input_volumes == {}
 
 
 @pytest.mark.asyncio
@@ -424,5 +435,123 @@ async def test_subdir_of_home_is_mounted(docker_env, fake_home):
     binding, _ = await docker_env.pullasset_envstore(
         uri=_env_uri(sub / "generation.json")
     )
-    assert docker_env._extra_volumes[str(sub)]["mode"] == "ro"
+    assert docker_env._env_input_volumes[str(sub)]["mode"] == "ro"
     assert binding[BINDING_KEY]["path"].endswith("/generation.json")
+
+
+@pytest.mark.asyncio
+async def test_parent_of_home_dir_refused(docker_env, fake_home):
+    # env:///home/report.json mounts /home, which holds the user's home.
+    (fake_home.parent / "report.json").write_text("{}")
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(
+            uri=_env_uri(fake_home.parent / "report.json")
+        )
+
+
+@pytest.mark.asyncio
+async def test_hidden_home_subdir_refused(docker_env, fake_home):
+    ssh = fake_home / ".ssh" / "keys"
+    ssh.mkdir(parents=True)
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(ssh))
+
+
+@pytest.mark.asyncio
+async def test_gb_home_dir_refused(docker_env, tmp_path, monkeypatch):
+    gb_home = tmp_path / "gbhome"
+    (gb_home / "secrets").mkdir(parents=True)
+    monkeypatch.setenv("GB_HOME_DIR", str(gb_home))
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(gb_home / "secrets"))
+    # A dir that contains the GB home is refused too.
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_system_dir_input_refused(docker_env):
+    # env:///etc/hosts would mount all of /etc.
+    with pytest.raises(ValueError, match="its own directory"):
+        await docker_env.pullasset_envstore(uri="env:///etc/hosts")
+
+
+# ---------------------------------------------------------------------------
+# env:// input mounts belong to the launch whose bindings reference them.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_env_input_mounted_only_into_referencing_launch(docker_env, tmp_path):
+    client = _mock_launch_env(docker_env)
+    d = tmp_path / "gen"
+    d.mkdir()
+    (d / "generation.json").write_text("{}")
+    binding, _ = await docker_env.pullasset_envstore(
+        uri=_env_uri(d / "generation.json")
+    )
+
+    await docker_env.launch_docker(
+        launch_id="launchAAAA",
+        targetsteprun_asset_dir=tmp_path / "wsA",
+        config={},
+        launcher_config={"command": "true"},
+        step={"name": "s"},
+        run_metadata={"targetsteprun_id": "tsrA"},
+        bindings={"gen": binding},
+    )
+    await _launch(docker_env, "launchBBBB", tmp_path / "wsB", "tsrB")
+
+    vols_a = client.containers.run.call_args_list[0].kwargs["volumes"]
+    vols_b = client.containers.run.call_args_list[1].kwargs["volumes"]
+    assert vols_a[str(d)] == {"bind": "/gb-env-inputs/0", "mode": "ro"}
+    assert str(d) not in vols_b
+    assert docker_env._extra_volumes == {}
+
+
+@pytest.mark.asyncio
+async def test_launch_records_absolute_workspace(docker_env, tmp_path, monkeypatch):
+    _mock_launch_env(docker_env)
+    monkeypatch.chdir(tmp_path)
+    from pathlib import Path
+
+    await _launch(docker_env, "launchAAAA", Path("rel") / "ws", "tsrA")
+    assert docker_env._workspaces_by_targetsteprun["tsrA"] == str(
+        tmp_path / "rel" / "ws"
+    )
+
+
+@pytest.mark.asyncio
+async def test_launch_without_targetsteprun_id_warns(docker_env, tmp_path, caplog):
+    _mock_launch_env(docker_env)
+    with caplog.at_level(logging.WARNING):
+        await _launch(docker_env, "launchAAAA", tmp_path / "wsA", None)
+    assert docker_env._workspaces_by_targetsteprun == {}
+    assert "no targetsteprun_id" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Base Environment: env:// is never served from the asset_bindings cache.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_env_pull_skips_cache_even_after_push(docker_env, tmp_path):
+    # A pull racing the producer's push must still reach pullasset_envstore,
+    # whatever asset_bindings holds by then.
+    env = _push_env(docker_env)
+    d = tmp_path / "gen"
+    d.mkdir()
+    uristr = _env_uri(d)
+    env.asset_bindings[uristr] = {BINDING_KEY: {"path": str(d)}}
+    Environment._thread_local.asset_events[uristr] = asyncio.Event()
+    Environment._thread_local.asset_events[uristr].set()
+    env.pullasset_types = {"envstore": Docker.pullasset_envstore}
+    binding, _ = await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
+    assert binding[BINDING_KEY]["path"].startswith("/gb-env-inputs/")
+
+
+def test_only_env_uris_skip_the_cache():
+    assert not Environment._is_cached_uri("env:///a/b")
+    assert Environment._is_cached_uri("file:///a/b")
+    assert Environment._is_cached_uri("hf://org/repo")

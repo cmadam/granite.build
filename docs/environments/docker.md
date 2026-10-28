@@ -99,7 +99,8 @@ launcher vars are standardized on the `GB_` prefix; for backwards compatibility 
 
 Declare the space secrets a step needs under `config.docker.secrets`; each is resolved in the build
 server and passed to the container as an environment variable. Only declared secrets are injected,
-and a declared secret missing from the space fails the launch. `secret_name` defaults to `env_name`
+as on LSF, SkyPilot and K8s (unlike [bash](bash.md), which exports every space secret), and a
+declared secret missing from the space fails the launch. `secret_name` defaults to `env_name`
 verbatim. A `config.docker.env` or launcher `env` entry of the same name wins over the secret.
 
 ```yaml
@@ -132,11 +133,14 @@ and translates it to Docker container limits:
   cache symlinks resolve), and the in-container path is supplied as the binding. `env://` inputs (a
   path another target left on this host) are bind-mounted read-only under `/gb-env-inputs/<n>` (a
   file's parent directory, or the directory itself), and the binding is the in-container path. The
-  mount source is always the input's host path, including an `env://` output an earlier Docker
-  target wrote in its own workspace. Because a file input mounts its **whole parent directory**
-  (so the step can read the file's siblings), an input whose mount source would be `/` or the
-  gbserver user's home directory is refused with an error: put the input in its own directory
-  (e.g. `~/run1/generation.json`, not `~/generation.json`).
+  mount goes only into the containers of the target that takes the input. The mount source is
+  always the input's host path, including an `env://` output an earlier Docker target wrote in its
+  own workspace. Because a file input mounts its **whole parent directory** (so the step can read
+  the file's siblings), the mount source is refused with an error when it contains the gbserver
+  user's home directory (`/`, `/home`, `~`), lies in a hidden directory of it (`~/.ssh`, `~/.aws`,
+  ...), or is, contains or lies in the GB home directory or a system directory (`/etc`, `/proc`,
+  `/sys`, `/dev`, `/boot`, `/run`). Put the input in its own directory (e.g.
+  `~/run1/generation.json`, not `~/generation.json`).
 - **Workspace.** Each launch's own asset directory is bind-mounted at `/gb-workspace` (read-write)
   in that launch's container only; write outputs there.
 - **Outputs.** Register artifacts with the standard `GB_ARTIFACT_ID:<id> GB_ARTIFACT_PATH:<path>`
@@ -146,7 +150,10 @@ and translates it to Docker container limits:
   See [Monitoring and artifact events](../steps/monitoring-and-artifact-events.md).
   On push, container paths under `/gb-workspace` are translated back to the host workspace of the
   launch that produced them, so an `env://{{ binding.path }}` output written there is registered at
-  its host path, and `file://` and `hf://` outputs are copied or uploaded from it.
+  its host path, and `file://` and `hf://` outputs are copied or uploaded from it. An `env://`
+  output stays resolvable after the build only while that workspace exists. It lives under the
+  build runner's workspace directory (`GBSERVER_DEFAULT_ROOT_WORKSPACE_DIR`), or under the system
+  temp dir (e.g. `/tmp`) for a build started without one, such as `gbserver build`.
 
 ## See also
 

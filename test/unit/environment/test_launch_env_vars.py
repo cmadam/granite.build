@@ -397,7 +397,7 @@ class TestDockerOverride:
         env = self._docker()
         env.secrets = {"tok": "secret-val", "other": "undeclared"}
         env._launched_containers = {}
-        env._launched_workspaces = {}
+        env._env_input_volumes = {}
         env._extra_volumes = {}
         client = MagicMock()
         env._get_docker = MagicMock(return_value=(MagicMock(), client))
