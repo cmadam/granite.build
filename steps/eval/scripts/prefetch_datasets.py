@@ -19,7 +19,7 @@ the HF cache. Jobs on air-gapped compute nodes then read the pinned snapshots
 from the cache (HF_HUB_OFFLINE=1).
 
 Every entry is pinned to the commit the benchmark module pins
-(src/*/granite_evals/benchmarks/*.py); `--check` verifies that against the source.
+(<family>/src/granite_evals/benchmarks/*.py); `--check` verifies that against the source.
 Datasets that are not on the Hub (GitHub files, PyPI packages, task data) are
 pinned by commit/sha256 and baked into the image by the owning family's extras.sh instead.
 
@@ -127,7 +127,8 @@ DATASETS: dict[str, tuple[str, str, str]] = {
     ),
 }
 
-SRC = Path(__file__).resolve().parent.parent / "src"
+# The shared core lives in src/core/; each family's modules in <family>/src/.
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def check_pins() -> list[str]:
@@ -135,15 +136,17 @@ def check_pins() -> list[str]:
     problems = []
     for bench, (repo, rev, fam) in DATASETS.items():
         text = "\n".join(
-            p.read_text() for p in (SRC / fam).rglob("*.py") if "tests" not in p.parts
+            p.read_text()
+            for p in (ROOT / fam / "src").rglob("*.py")
+            if "tests" not in p.parts
         )
         text += "\n".join(
             p.read_text()
-            for p in (SRC / "core").rglob("*.py")
+            for p in (ROOT / "src" / "core").rglob("*.py")
             if "tests" not in p.parts
         )
         if repo not in text or rev not in text:
-            problems.append(f"{bench}: {repo}@{rev} not found in src/{fam} or src/core")
+            problems.append(f"{bench}: {repo}@{rev} not found in {fam}/src or src/core")
     return problems
 
 
