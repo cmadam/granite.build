@@ -31,8 +31,8 @@ its pinned image (`config.image`, set by the recipe — e.g. the `IMAGE` /
 
 Bumping a benchmark's behavior means editing `src/`, rebuilding the family image,
 pushing it, and re-pinning its tag in the recipe `parameters.yaml` — recipes under
-`recipes/granite-evals/` choose which benchmarks a model family is scored on and
-own the image pins.
+`recipes/evals/<family>/<benchmark>/skypilot/` choose which benchmarks a model
+family is scored on and own the image pins.
 
 ## Layout of a family step
 

@@ -6,7 +6,7 @@ version: 0.1.0
 # benchmark in this family to run; every steps/eval/*/ template has the same shape
 # and differs only in `name`, the family's image env var, and its defaults.
 # skypilot/test/test_step_template.py holds them to that. Recipes
-# (recipes/granite-evals/...) choose which benchmarks a model family is scored on
+# (recipes/evals/ifbench/...) choose which benchmarks a model family is scored on
 # and set `benchmark` per target.
 #
 # THE CODE LIVES IN THIS REPO. The benchmark runtime is vendored under steps/eval/src
