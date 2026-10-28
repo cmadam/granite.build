@@ -3243,6 +3243,11 @@ class Skypilot(Environment):
         ``monitor_skypilot_monitor`` runs, so post-launch polling for
         all targets continues in parallel.
         """
+        # Resolve a SLURM image to its shared .sqsh BEFORE taking a bring-up
+        # slot: a cache miss waits on an import job (minutes to tens of
+        # minutes), and holding the semaphore through it would stall every
+        # other target's launch.
+        cached_image_id = await self._resolve_slurm_cached_image(launch_id, **kwargs)
         # Acquire without blocking the event loop: threading.Semaphore.acquire
         # is a blocking call, so poll it non-blockingly and yield to the loop
         # between attempts. This lets the target's post-launch monitor polling
@@ -3256,20 +3261,104 @@ class Skypilot(Environment):
                 launch_id=launch_id,
                 targetsteprun_asset_dir=targetsteprun_asset_dir,
                 environment_config=environment_config,
+                cached_image_id=cached_image_id,
                 **kwargs,
             )
         finally:
             sem.release()
+
+    def _launch_cloud_and_alias(
+        self: Self, launcher_config: dict, config: dict
+    ) -> Tuple[str, Optional[str]]:
+        """The normalized target cloud and cluster alias for a launch.
+
+        Same resolution ``_launch_skypilot_inner`` uses: the first infra
+        segment (lowercased) and the second (the ``~/.<cloud>/config`` Host
+        alias, ``None`` when the infra names no cluster).
+        """
+        cloud = (launcher_config.get("resources") or {}).get(
+            "cloud"
+        ) or self._get_cloud()
+        override_res = {
+            **(launcher_config.get("resources") or {}),
+            **((config.get("launcher_config") or {}).get("resources") or {}),
+        }
+        infra, _ = self._resolve_infra_and_zone(cloud, override_res, config)
+        parts = str(infra).split("/")
+        return (parts[0] or "").lower(), (parts[1] if len(parts) >= 2 else None)
+
+    @staticmethod
+    def _step_image_id(launcher_config: dict, config: dict) -> Optional[str]:
+        """The step's ``image_id`` (build layer over step layer), or ``None``.
+
+        Trailing ``or None`` maps an empty image_id to None: the merged
+        ``command`` step renders image_id to "" when no image is given, and
+        sky.Resources expects None (bare node) rather than an empty string.
+        """
+        return (
+            (config.get("launcher_config") or {}).get("image_id")
+            or launcher_config.get("image_id")
+        ) or None
+
+    async def _resolve_slurm_cached_image(
+        self: Self, launch_id: str, **kwargs: Any
+    ) -> Optional[str]:
+        """The shared ``.sqsh`` to launch a SLURM container step from, or
+        ``None`` to launch with the step's own ``image_id``.
+
+        Only acts when the environment sets ``slurm_image_cache`` and the step
+        targets SLURM with a registry image; see ``_slurm_image_cache``. This
+        never fails a launch: a cache failure, and an error resolving the
+        launch's cloud or SSH config here, log a warning and launch from the
+        registry image. A malformed block is rejected earlier, when the
+        environment loads (``EnvironmentConfig``); an SSH-config error recurs
+        in ``_launch_skypilot_inner``, which reports it through the normal path.
+        """
+        from gbserver.environment._slurm_image_cache import (
+            parse_cache_config,
+            resolve_cached_image,
+        )
+
+        env_cfg = self.config.config if self.config else {}
+        if not env_cfg.get("slurm_image_cache"):
+            return None
+        launcher_config = kwargs.get("launcher_config", {}) or {}
+        config = kwargs.get("config", {}) or {}
+        image_id = self._step_image_id(launcher_config, config)
+        try:
+            cache_cfg = parse_cache_config(env_cfg.get("slurm_image_cache"))
+            cloud_group, target_alias = self._launch_cloud_and_alias(
+                launcher_config, config
+            )
+            if cache_cfg is None or cloud_group != "slurm" or not image_id:
+                return None
+            # Materialize ~/.slurm/config so the alias resolves. Idempotent;
+            # _launch_skypilot_inner repeats it and keeps the same login node.
+            await self._prepare_ssh_for_launch(cloud_group, target_alias)
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Skipping the SLURM image cache for launch %s: %s", launch_id, e
+            )
+            return None
+        if not target_alias:
+            return None
+        resolved = await resolve_cached_image(image_id, cache_cfg, target_alias)
+        return resolved if resolved != image_id else None
 
     async def _launch_skypilot_inner(
         self: Self,
         launch_id: str,
         targetsteprun_asset_dir=None,
         environment_config: Optional[EnvironmentConfig] = None,
+        cached_image_id: Optional[str] = None,
         **kwargs,
     ) -> None:
         """Body of launch_skypilot. Split out so the semaphore wrapper in
         ``launch_skypilot`` doesn't have to re-indent the entire block.
+
+        :param cached_image_id: the shared ``.sqsh`` resolved by
+            ``_resolve_slurm_cached_image``; replaces the step's ``image_id``
+            when set.
         """
         try:
             # Resolve the target cloud FIRST (pure computation off kwargs/env — no
@@ -3404,10 +3493,15 @@ class Skypilot(Environment):
             # Trailing `or None` maps an empty image_id to None: the merged
             # `command` step renders image_id to "" when no image is given, and
             # sky.Resources expects None (bare node) rather than an empty string.
+            # A shared .sqsh resolved from slurm_image_cache takes precedence.
             image_id = (
-                (config.get("launcher_config") or {}).get("image_id")
-                or launcher_config.get("image_id")
-            ) or None
+                cached_image_id
+                or (
+                    (config.get("launcher_config") or {}).get("image_id")
+                    or launcher_config.get("image_id")
+                )
+                or None
+            )
 
             # Per-step SLURM sbatch directives (--time, --gres, --qos, ...).
             # SLURM is the only cloud whose SkyPilot fork exposes a per-task
