@@ -26,8 +26,11 @@ WORKERS: 16
 OPTIONS: ""
 TENSOR_PARALLEL_SIZE: 1
 
-# ─── Judge (paid; key from the GRANITE_EVALS_JUDGE_API_KEY secret) ──────
-# OpenAI-compatible endpoint of the judge gateway. No default; set it for your site.
+# ─── Judge (unused: this domain scores rule-based) ──────────────────────
+# LLM judging exists only for the tau NL domains (retail, banking_knowledge);
+# telecom grades with the harness's own DB/action/communicate evaluators, so
+# the score target declares no judge secret. JUDGE_BASE_URL is still threaded
+# into the step options for family-shape consistency but is never read here.
 JUDGE_BASE_URL: ""
 
 # ─── Cluster ──────────────────────────────────────────────────────────
