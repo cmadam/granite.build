@@ -26,8 +26,11 @@ REPEATS: ""
 WORKERS: 4
 OPTIONS: ""
 TENSOR_PARALLEL_SIZE: 1
-# Shared enroot squashfs cache for this benchmark's sandboxes.
-SANDBOX_CACHE: "/proj/granite-build/g4os/granite/enroot-cache"
+# Shared enroot squashfs cache for this benchmark's task images. Empty derives
+# a per-run cache at ${OUTPUT_ROOT}/${RUN_NAME}/enroot-cache, writable by
+# whoever dispatched the run (they own the output dir); set a shared path to
+# reuse imported images across runs.
+SANDBOX_CACHE: ""
 
 # ─── Judge (paid; key from the GRANITE_EVALS_JUDGE_API_KEY secret) ──────
 # OpenAI-compatible endpoint of the judge gateway. No default; set it for your site.
