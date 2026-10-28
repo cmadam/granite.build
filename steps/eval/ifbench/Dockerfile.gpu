@@ -20,7 +20,7 @@
 #   podman build --platform linux/amd64 -f ifbench/Dockerfile.gpu . -t <registry>/gb-step-eval-ifbench:<tag>
 #
 # The image carries vLLM (the `serve` extra), the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (ifbench/src), the
+# (src/core) overlaid with this family's benchmark modules (ifbench/granite_evals), the
 # family's pinned harness (the `ifbench` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
@@ -71,9 +71,9 @@ RUN --mount=type=bind,source=ifbench/extras.sh,target=/tmp/extras/ifbench.sh \
 RUN uv sync --locked --no-install-project --no-dev --extra serve --extra ifbench
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 ifbench/src/granite_evals ./src/granite_evals
+COPY --chmod=755 ifbench/granite_evals ./src/granite_evals
 COPY --chmod=755 src/core/tests ./tests
-COPY --chmod=755 ifbench/src/tests ./tests
+COPY --chmod=755 ifbench/tests ./tests
 RUN uv sync --locked --no-dev --extra serve --extra ifbench \
     && uv run --no-sync --with pytest pytest -q -p no:cacheprovider --basetemp=/opt/granite-evals/.pytest-tmp tests \
     && granite-evals list \

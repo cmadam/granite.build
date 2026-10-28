@@ -20,7 +20,7 @@
 #   podman build --platform linux/amd64 -f nemoskills/Dockerfile.gpu . -t <registry>/gb-step-eval-nemoskills:<tag>
 #
 # The image carries vLLM (the `serve` extra), the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (nemoskills/src), the
+# (src/core) overlaid with this family's benchmark modules (nemoskills/granite_evals), the
 # family's pinned harness (the `nemoskills` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
@@ -72,9 +72,9 @@ RUN --mount=type=bind,source=nemoskills/extras.sh,target=/tmp/extras/nemoskills.
 RUN uv sync --locked --no-install-project --no-dev --extra serve --extra nemoskills
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 nemoskills/src/granite_evals ./src/granite_evals
+COPY --chmod=755 nemoskills/granite_evals ./src/granite_evals
 COPY --chmod=755 src/core/tests ./tests
-COPY --chmod=755 nemoskills/src/tests ./tests
+COPY --chmod=755 nemoskills/tests ./tests
 RUN uv sync --locked --no-dev --extra serve --extra nemoskills \
     && uv run --no-sync --with pytest pytest -q -p no:cacheprovider --basetemp=/opt/granite-evals/.pytest-tmp tests \
     && granite-evals list \

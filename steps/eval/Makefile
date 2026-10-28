@@ -17,7 +17,7 @@
 # cannot share an environment). The build context is this directory; each
 # family's recipe is <family>/Dockerfile.gpu and, for the CPU_FAMILIES,
 # <family>/Dockerfile.cpu, with any extra system setup in <family>/extras.sh
-# and the family's benchmark modules in <family>/src/.
+# and the family's benchmark modules in <family>/granite_evals/.
 #
 #   make images REGISTRY=quay.io/myorg            build all 9 GPU + 7 CPU images (`-cpu` suffix)
 #   make image-nemoskills REGISTRY=...            build one
@@ -79,8 +79,8 @@ test-src:
 	  echo "== $$f"; \
 	  d=$$(mktemp -d); \
 	  mkdir -p $$d/src $$d/tests; \
-	  cp -R src/core/granite_evals $$d/src/; cp -R $$f/src/granite_evals/. $$d/src/granite_evals/; \
-	  cp -R src/core/tests/. $$d/tests/; cp -R $$f/src/tests/. $$d/tests/ 2>/dev/null || true; \
+	  cp -R src/core/granite_evals $$d/src/; cp -R $$f/granite_evals/. $$d/src/granite_evals/; \
+	  cp -R src/core/tests/. $$d/tests/; cp -R $$f/tests/. $$d/tests/ 2>/dev/null || true; \
 	  (cd $$d && PYTHONPATH=src $(PYTHON) -m pytest -q -p no:cacheprovider tests); rc=$$?; \
 	  rm -rf $$d; [ $$rc -eq 0 ] || exit $$rc; \
 	done

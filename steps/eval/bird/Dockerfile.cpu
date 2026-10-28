@@ -21,7 +21,7 @@
 #
 # CPU sibling of the GPU image for `--phase score` (grading, no model served):
 # no vLLM. The image carries the shared granite_evals core
-# (src/core) overlaid with this family's benchmark modules (bird/src), the
+# (src/core) overlaid with this family's benchmark modules (bird/granite_evals), the
 # family's pinned harness (the `bird` extra) and the enroot CLI for benchmarks
 # that sandbox each task in a container. Nothing is cloned or mounted at launch;
 # datasets come from the mounted HF cache (see scripts/prefetch_datasets.py).
@@ -66,9 +66,9 @@ COPY --chmod=755 src/core/pyproject.toml src/core/uv.lock ./
 RUN uv sync --locked --no-install-project --no-dev --extra bird
 # The shared core first, then the family's modules merged into the same package.
 COPY --chmod=755 src/core/granite_evals ./src/granite_evals
-COPY --chmod=755 bird/src/granite_evals ./src/granite_evals
+COPY --chmod=755 bird/granite_evals ./src/granite_evals
 COPY --chmod=755 src/core/tests ./tests
-COPY --chmod=755 bird/src/tests ./tests
+COPY --chmod=755 bird/tests ./tests
 RUN uv sync --locked --no-dev --extra bird \
     && uv run --no-sync --with pytest pytest -q -p no:cacheprovider --basetemp=/opt/granite-evals/.pytest-tmp tests \
     && granite-evals list \
