@@ -37,7 +37,7 @@ steps:
 | `options` | `""` | Space-separated `key=value` options: `categories` (comma-separated BFCL categories or groups, default `all_scoring`), `temperature`, `top_p`, `max_tokens` (default: the checkpoint's generation_config), `search_mcp_url`, `include_input_log`. |
 | `phase` | `"all"` | `all` generates and scores in one job. `generate` serves the model and writes `generation.json` (`granite_generation`); `score` grades that output dir without a GPU (same `output_dir`, `limit`, `repeats`) and writes `results.json` |
 | `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `""` | vLLM. |
-| `sandbox_cache` | `/proj/granite-build/g4os/granite/enroot-cache` | Unused by this benchmark. |
+| `sandbox_cache` | `""` | Unused: this benchmark runs no sandbox. |
 | `hf_home` | `""` | Overrides `HF_HOME`. The memory_vector category downloads `all-MiniLM-L6-v2` into it. |
 
 GPUs, queue and memory come from the target's `launcher_config.resources`. The step

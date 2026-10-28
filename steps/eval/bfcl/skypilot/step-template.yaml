@@ -66,7 +66,7 @@ config:
   gpu_memory_utilization: "0.9"
   max_model_len: ""
   # Unused by BFCL (no sandboxes); kept so every granite step has one config contract.
-  sandbox_cache: "/proj/granite-build/g4os/granite/enroot-cache"
+  sandbox_cache: ""
   # Empty leaves the image's HF cache default alone.
   hf_home: ""
 outputs:

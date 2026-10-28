@@ -37,7 +37,7 @@ steps:
 | `dataset` / `dataset_revision` | `""` | A local extracted `dev_20240627` dir overrides the pinned dev.zip. |
 | `options` | `""` | Space-separated `key=value` options: `temperature`, `top_p`, `max_tokens` (default: the checkpoint's generation_config), `evidence=true` (prefix BIRD's external knowledge), `timeout` (s, default 30), `sql=gold`. |
 | `tensor_parallel_size` / `gpu_memory_utilization` / `max_model_len` | `1` / `0.9` / `""` | vLLM. |
-| `sandbox_cache` | `/proj/granite-build/g4os/granite/enroot-cache` | Unused by this benchmark. |
+| `sandbox_cache` | `""` | Unused: this benchmark runs no sandbox. |
 | `hf_home` | `""` | Overrides `HF_HOME`, and with it the dev-set cache. |
 
 GPUs, queue and memory come from the target's `launcher_config.resources`. The step
