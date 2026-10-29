@@ -18,6 +18,7 @@
 
 import asyncio
 import logging
+import os
 
 import pytest
 
@@ -112,6 +113,20 @@ async def test_reuses_existing_read_only_mount(docker_env, tmp_path):
     binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(snap / "config.json"))
     assert binding[BINDING_KEY]["path"] == "/gb-hf-models/org/repo/config.json"
     assert len(docker_env._extra_volumes) == 1
+    assert docker_env._env_input_volumes == {}
+
+
+@pytest.mark.asyncio
+async def test_reuses_hf_mount_through_symlinked_path(docker_env, tmp_path):
+    real = tmp_path / "real-snap"
+    real.mkdir()
+    (real / "config.json").write_text("{}")
+    link = tmp_path / "snap-link"
+    link.symlink_to(real)
+    # The HF pull keys the mount by its unresolved path.
+    docker_env._extra_volumes[str(link)] = {"bind": "/gb-hf-models/o/r", "mode": "ro"}
+    binding, _ = await docker_env.pullasset_envstore(uri=_env_uri(real / "config.json"))
+    assert binding[BINDING_KEY]["path"] == "/gb-hf-models/o/r/config.json"
     assert docker_env._env_input_volumes == {}
 
 
@@ -383,13 +398,13 @@ async def test_env_output_of_earlier_docker_target_is_mounted_on_pull(
 
 
 # ---------------------------------------------------------------------------
-# Mount scope: never / or the gbserver user's home directory.
+# Mount scope: each refusal names the rule that fired.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_root_dir_input_refused(docker_env):
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="contains the home directory"):
         await docker_env.pullasset_envstore(uri="env:///")
     assert docker_env._env_input_volumes == {}
 
@@ -407,14 +422,14 @@ def fake_home(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_file_in_home_dir_refused(docker_env, fake_home):
     (fake_home / "generation.json").write_text("{}")
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="contains the home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(fake_home / "generation.json"))
     assert docker_env._env_input_volumes == {}
 
 
 @pytest.mark.asyncio
 async def test_home_dir_input_refused(docker_env, fake_home):
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="contains the home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(fake_home))
 
 
@@ -423,7 +438,7 @@ async def test_home_dir_via_symlink_refused(docker_env, fake_home, tmp_path):
     link = tmp_path / "link"
     link.symlink_to(fake_home)
     (fake_home / "generation.json").write_text("{}")
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="contains the home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(link / "generation.json"))
 
 
@@ -443,7 +458,7 @@ async def test_subdir_of_home_is_mounted(docker_env, fake_home):
 async def test_parent_of_home_dir_refused(docker_env, fake_home):
     # env:///home/report.json mounts /home, which holds the user's home.
     (fake_home.parent / "report.json").write_text("{}")
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="contains the home directory"):
         await docker_env.pullasset_envstore(
             uri=_env_uri(fake_home.parent / "report.json")
         )
@@ -453,7 +468,7 @@ async def test_parent_of_home_dir_refused(docker_env, fake_home):
 async def test_hidden_home_subdir_refused(docker_env, fake_home):
     ssh = fake_home / ".ssh" / "keys"
     ssh.mkdir(parents=True)
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="hidden home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(ssh))
 
 
@@ -462,18 +477,45 @@ async def test_gb_home_dir_refused(docker_env, tmp_path, monkeypatch):
     gb_home = tmp_path / "gbhome"
     (gb_home / "secrets").mkdir(parents=True)
     monkeypatch.setenv("GB_HOME_DIR", str(gb_home))
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="GB home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(gb_home / "secrets"))
     # A dir that contains the GB home is refused too.
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="GB home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(tmp_path))
 
 
 @pytest.mark.asyncio
 async def test_system_dir_input_refused(docker_env):
     # env:///etc/hosts would mount all of /etc.
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="system directory"):
         await docker_env.pullasset_envstore(uri="env:///etc/hosts")
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root reads any dir"
+)
+@pytest.mark.asyncio
+async def test_unreadable_dir_refused(docker_env, tmp_path):
+    # The daemon mounts as root: never hand the container a dir the server
+    # user cannot read itself (e.g. /root, /var/lib/docker).
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(ValueError, match="not readable"):
+            await docker_env.pullasset_envstore(uri=_env_uri(locked))
+    finally:
+        locked.chmod(0o700)
+
+
+@pytest.mark.parametrize("src", ["/root", "/var/lib/docker", "/var", "/var/log"])
+def test_root_only_and_container_state_dirs_refused(docker_env, src, monkeypatch):
+    from pathlib import Path
+
+    # Isolate the system rule: pretend the server user can read everything.
+    monkeypatch.setattr("gbserver.environment.docker.os.access", lambda *a: True)
+    with pytest.raises(ValueError, match="system directory"):
+        docker_env._check_env_input_mount_src(Path(src).resolve(), f"env://{src}")
 
 
 # ---------------------------------------------------------------------------
@@ -588,46 +630,92 @@ async def test_bash_output_in_gb_home_workdir_is_mounted(
 async def test_rest_of_gb_home_still_refused(docker_env, gb_home_in_fake_home):
     for sub in ("user_secrets", "space_secrets"):
         (gb_home_in_fake_home / sub).mkdir()
-        with pytest.raises(ValueError, match="its own directory"):
+        with pytest.raises(ValueError, match="GB home directory"):
             await docker_env.pullasset_envstore(
                 uri=_env_uri(gb_home_in_fake_home / sub)
             )
     (gb_home_in_fake_home / "llmb-server.db").write_text("")
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="GB home directory"):
         await docker_env.pullasset_envstore(
             uri=_env_uri(gb_home_in_fake_home / "llmb-server.db")
         )
-    # The output root itself sits inside GB home but does not contain it.
+    # The output root itself would expose every Bash build's outputs.
     (gb_home_in_fake_home / "workdir").mkdir()
-    await docker_env.pullasset_envstore(uri=_env_uri(gb_home_in_fake_home / "workdir"))
+    with pytest.raises(ValueError, match="GB home directory"):
+        await docker_env.pullasset_envstore(
+            uri=_env_uri(gb_home_in_fake_home / "workdir")
+        )
+
+
+@pytest.mark.asyncio
+async def test_gb_home_rule_alone_refuses_outside_home(
+    docker_env, tmp_path, fake_home, monkeypatch
+):
+    # GB home outside the home dir, so only the GB-home rule can fire.
+    gb_home = tmp_path / "gbhome"
+    (gb_home / "user_secrets").mkdir(parents=True)
+    monkeypatch.setenv("GB_HOME_DIR", str(gb_home))
+    with pytest.raises(ValueError, match="GB home directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(gb_home / "user_secrets"))
 
 
 @pytest.mark.asyncio
 async def test_other_hidden_home_dir_still_refused(docker_env, gb_home_in_fake_home):
     ssh = gb_home_in_fake_home.parent / ".ssh"
     ssh.mkdir()
-    with pytest.raises(ValueError, match="its own directory"):
+    with pytest.raises(ValueError, match="hidden home directory"):
         await docker_env.pullasset_envstore(uri=_env_uri(ssh))
 
 
 @pytest.mark.asyncio
-async def test_workspace_root_output_is_mounted(docker_env, fake_home, monkeypatch):
+async def test_earlier_docker_workspace_in_hidden_dir_is_mounted(
+    docker_env, fake_home, tmp_path
+):
+    # The real workspace root (e.g. workspace_dir: ~/.gbws) is whatever the
+    # launch used, recorded at launch time, not a constant.
+    _mock_launch_env(docker_env)
+    ws = fake_home / ".gbws" / "builds" / "b1" / "targetruns" / "tsrA"
+    (ws / "outputs").mkdir(parents=True)
+    await _launch(docker_env, "launchAAAA", ws, "tsrA")
+    await docker_env.pullasset_envstore(uri=_env_uri(ws / "outputs"))
+    assert str(ws / "outputs") in docker_env._env_input_volumes
+
+
+@pytest.mark.asyncio
+async def test_workspace_root_clones_still_refused(docker_env, fake_home):
+    # Only recorded launch workspaces are allowed, not the root that also
+    # holds the build watcher's PR clones (git config with a GitHub token).
+    _mock_launch_env(docker_env)
     root = fake_home / ".gbws"
-    out = root / "builds" / "b1" / "outputs"
-    out.mkdir(parents=True)
-    monkeypatch.setattr(
-        "gbserver.environment.docker.DEFAULT_ROOT_WORKSPACE_DIR", str(root)
-    )
-    await docker_env.pullasset_envstore(uri=_env_uri(out))
-    assert str(out) in docker_env._env_input_volumes
+    ws = root / "builds" / "b1" / "targetruns" / "tsrA"
+    clone = root / "gbserver-buildwatcher-workspace" / "repos" / "r"
+    clone.mkdir(parents=True)
+    ws.mkdir(parents=True)
+    await _launch(docker_env, "launchAAAA", ws, "tsrA")
+    with pytest.raises(ValueError, match="hidden home directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(clone))
 
 
-def test_output_root_containing_gb_home_is_dropped(tmp_path, monkeypatch):
+def test_output_root_containing_home_or_gb_home_is_dropped(
+    docker_env, fake_home, tmp_path, monkeypatch
+):
     monkeypatch.setenv("GB_HOME_DIR", str(tmp_path / "gbhome"))
-    monkeypatch.setattr(
-        "gbserver.environment.docker.DEFAULT_ROOT_WORKSPACE_DIR", str(tmp_path)
-    )
-    assert Docker._env_output_roots() == [(tmp_path / "gbhome" / "workdir").resolve()]
+    # A launch workspace of $HOME (or above GB home) must not reopen ~/.ssh.
+    docker_env._workspaces_by_targetsteprun = {"a": str(fake_home), "b": str(tmp_path)}
+    assert docker_env._env_output_roots() == [
+        (tmp_path / "gbhome" / "workdir").resolve()
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workspace_of_home_does_not_reopen_hidden_dirs(
+    docker_env, fake_home, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("GB_HOME_DIR", str(tmp_path / "gbhome"))
+    docker_env._workspaces_by_targetsteprun = {"a": str(fake_home)}
+    (fake_home / ".ssh").mkdir()
+    with pytest.raises(ValueError, match="hidden home directory"):
+        await docker_env.pullasset_envstore(uri=_env_uri(fake_home / ".ssh"))
 
 
 # ---------------------------------------------------------------------------
@@ -678,3 +766,78 @@ async def test_non_docker_env_output_pull_returns_uri_path(tmp_path):
     binding, step = await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
     assert step is None
     assert binding == {BINDING_KEY: {"path": str(host)}}
+
+
+# ---------------------------------------------------------------------------
+# A container-path producer binding is never cached for another container.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_output_with_workspace_path_is_not_cached(docker_env, tmp_path):
+    # A cached /gb-workspace path would point into the *consumer's* workspace.
+    env = _push_env(docker_env)
+    _register_launch(env, "tsrA", tmp_path / "wsA")
+
+    async def _file_handler(self, uri=None, **kw):
+        return uri
+
+    env.pushasset_types = {"filestore": _file_handler}
+    uristr, _ = await _push(
+        env, {"path": "/gb-workspace/m.json"}, uristr=f"file://{tmp_path}/m.json"
+    )
+    assert uristr not in env.asset_bindings
+    # Docker has no file:// pull, so the consumer fails loudly, not silently.
+    Environment._thread_local.asset_events[uristr].set()
+    with pytest.raises(RuntimeError, match="failed to load"):
+        await env.pullasset(task_group=None, uri=URI.get_uri(uristr))
+
+
+@pytest.mark.asyncio
+async def test_file_output_with_host_path_is_still_cached(docker_env, tmp_path):
+    env = _push_env(docker_env)
+
+    async def _file_handler(self, uri=None, **kw):
+        return uri
+
+    env.pushasset_types = {"filestore": _file_handler}
+    host = str(tmp_path / "m.json")
+    uristr, _ = await _push(env, {"path": host}, uristr=f"file://{tmp_path}/out.json")
+    assert env.asset_bindings[uristr] == {BINDING_KEY: {"path": host}}
+
+
+# ---------------------------------------------------------------------------
+# env:// outputs at a read-only input mount map to the input's host path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_env_output_of_reemitted_input_registers_host_path(docker_env, tmp_path):
+    env = _push_env(docker_env)
+    d = tmp_path / "gen"
+    d.mkdir()
+    (d / "m.json").write_text("{}")
+    binding, _ = await env.pullasset_envstore(uri=_env_uri(d / "m.json"))
+    container = binding[BINDING_KEY]["path"]
+    assert container.startswith("/gb-env-inputs/")
+    uristr, _ = await _push(env, {"path": container})
+    assert uristr == f"env://{d.resolve()}/m.json"
+
+
+@pytest.mark.asyncio
+async def test_env_output_at_unmounted_container_path_raises(docker_env):
+    env = _push_env(docker_env)
+    with pytest.raises(LookupError, match="no Docker mount"):
+        await _push(env, {"path": "/gb-env-inputs/7/m.json"})
+
+
+@pytest.mark.asyncio
+async def test_literal_env_uri_at_container_path_refused(docker_env):
+    env = _push_env(docker_env)
+    env.pushasset_types = {"envstore": Docker.pushasset_envstore}
+    with pytest.raises(ValueError, match="container path"):
+        await _push(
+            env,
+            {"path": "/somewhere/else"},
+            uristr="env:///gb-workspace/outputs/x",
+        )

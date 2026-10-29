@@ -1510,6 +1510,16 @@ class Environment(ABC):
         """
         return not uristr.startswith("env://")
 
+    def _caches_pushed_binding(self: Self, uristr: str, binding: Any) -> bool:
+        """Whether :meth:`pushasset` caches the producer *binding* of *uristr*.
+
+        A cached binding is handed as is to later consumers on this instance,
+        so an environment whose producer bindings hold a path only the producer
+        can see overrides this to opt out (Docker: a container path). Defaults
+        to :meth:`_is_cached_uri`.
+        """
+        return Environment._is_cached_uri(uristr)
+
     def pullasset(
         self: Self, task_group: TaskGroup, uri: URI, binding: Optional[Any] = None
     ) -> Task[Tuple[Dict, Optional[BuildTargetStepConfig]]]:
@@ -1647,7 +1657,7 @@ class Environment(ABC):
             else:
                 Environment._thread_local.asset_events[uristr].set()
             await self.event_q.put(event)
-            if Environment._is_cached_uri(uristr):
+            if self._caches_pushed_binding(uristr, binding):
                 self.asset_bindings[uristr] = {BINDING_KEY: binding}
             # For inline pushes (no separate push step), emit ARTIFACT_PUSHED_EVENT
             # so the artifact transitions from pending to success.

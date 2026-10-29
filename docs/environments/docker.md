@@ -137,15 +137,23 @@ and translates it to Docker container limits:
   always the input's host path, including an `env://` output an earlier Docker target wrote in its
   own workspace. Because a file input mounts its **whole parent directory** (so the step can read
   the file's siblings), the mount source (with symlinks resolved; that resolved directory is what
-  gets mounted) is refused with an error when it contains the gbserver user's home directory (`/`,
-  `/home`, `~`), or is, contains or lies in a system directory (`/etc`, `/proc`, `/sys`, `/dev`,
-  `/boot`, `/run`, `/var/run`). It is also refused when it is, contains or lies in the GB home
-  directory, or lies in a hidden directory of the home directory (`~/.ssh`, `~/.aws`, ...), unless
-  it lies in a directory gbserver writes step outputs to: `<GB home>/workdir` (where a [bash](bash.md)
-  target writes by default) or the build runner's workspace root. So a Docker target can read an
-  `env://` output of a bash target, while the rest of the GB home (secrets, the database) stays out
-  of reach. Put the input in its own directory (e.g. `~/run1/generation.json`, not
-  `~/generation.json`).
+  gets mounted) is checked first. The Docker daemon mounts as root, so the source is refused with an
+  error, naming the rule, when:
+  - the gbserver user cannot read it;
+  - it contains the gbserver user's home directory (`/`, `/home`, `~`);
+  - it is, contains or lies in a system or container-state directory (`/etc`, `/proc`, `/sys`,
+    `/dev`, `/boot`, `/run`, `/var/run`, `/root`, `/var/lib/docker`, `/var/lib/containers`,
+    `/var/log`; so all of `/var` is refused too);
+  - it is, contains or lies in the GB home directory, or lies in a hidden directory of the home
+    directory (`~/.ssh`, `~/.aws`, ...).
+
+  The last rule has an exception for directories gbserver wrote step outputs to: a subdirectory of
+  `<GB home>/workdir` (where a [bash](bash.md) target writes by default, e.g.
+  `~/.granite.build/workdir/llm-build-<id>/...`), or a directory in the workspace of an earlier
+  Docker launch of the same build. So a Docker target can read the `env://` output of a bash or
+  Docker target, while the rest of the GB home (secrets, the database), `workdir` itself, and the
+  build watcher's PR clones stay out of reach. Put the input in its own directory (e.g.
+  `~/run1/generation.json`, not `~/generation.json`).
 - **Workspace.** Each launch's own asset directory is bind-mounted at `/gb-workspace` (read-write)
   in that launch's container only; write outputs there.
 - **Outputs.** Register artifacts with the standard `GB_ARTIFACT_ID:<id> GB_ARTIFACT_PATH:<path>`
@@ -156,9 +164,17 @@ and translates it to Docker container limits:
   On push, container paths under `/gb-workspace` are translated back to the host workspace of the
   launch that produced them, so an `env://{{ binding.path }}` output written there is registered at
   its host path, and `file://` and `hf://` outputs are copied or uploaded from it. An `env://`
-  output stays resolvable after the build only while that workspace exists. It lives under the
-  build runner's workspace directory (`GBSERVER_DEFAULT_ROOT_WORKSPACE_DIR`), or under the system
-  temp dir (e.g. `/tmp`) for a build started without one, such as `gbserver build`.
+  output that re-emits an input (a path under `/gb-env-inputs` or `/gb-hf-models`) is registered at
+  that input's host path. A literal `env://` URI naming a container path (e.g.
+  `env:///gb-workspace/outputs/x`) is refused; use `env://{{ binding.path }}`.
+  An `env://` output stays resolvable only while that workspace exists. It lives in a temporary
+  directory under the build runner's workspace directory (`--workspace-dir`, the build watcher's
+  `workspace_dir`, or `GBSERVER_DEFAULT_ROOT_WORKSPACE_DIR`), which gbserver **deletes when it
+  exits**, or under the system temp dir (e.g. `/tmp`) for a build started without one, such as
+  `gbserver build`. Copy an output to a `file://` URI to keep it past a restart.
+- **Docker → Docker hand-offs.** Use `env://` for an output another Docker target reads. A
+  `file://` output written in `/gb-workspace` is copied to its URI, but a Docker target cannot pull
+  it back (there is no Docker `file://` pull), so that hand-off fails with an error.
 
 ## See also
 
